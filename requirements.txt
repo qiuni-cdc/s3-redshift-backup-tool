@@ -1,0 +1,32 @@
+# Core dependencies
+pandas>=1.5.0
+pyarrow>=10.0.0
+mysql-connector-python>=8.0.0
+boto3>=1.26.0
+sshtunnel>=0.4.0
+pydantic>=1.10.0
+click>=8.0.0
+structlog>=22.0.0
+
+# Development dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.0.0
+black>=22.0.0
+flake8>=5.0.0
+mypy>=1.0.0
+isort>=5.0.0
+
+# Testing containers
+testcontainers>=3.0.0
+
+# Performance testing
+pytest-benchmark>=4.0.0
+
+# Documentation
+sphinx>=5.0.0
+sphinx-autodoc-typehints>=1.0.0
+
+# Security scanning
+safety>=2.0.0
+bandit>=1.7.0
