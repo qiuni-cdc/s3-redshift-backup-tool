@@ -1,7 +1,18 @@
-# Environment and credentials
+# Environment and credentials - CRITICAL FOR SECURITY
 .env
+.env.local
+.env.production
+.env.staging
 *.pem
 *.key
+*.ppk
+id_rsa*
+id_ed25519*
+credentials.txt
+secrets.txt
+*_backup.py
+*_backup.sql
+*_with_credentials.*
 
 # Python
 __pycache__/
