@@ -258,25 +258,35 @@ class S3Manager:
         df: pd.DataFrame,
         s3_key: str,
         schema: Optional[pa.Schema] = None,
+        use_schema_alignment: bool = True,
         **kwargs
     ) -> bool:
         """
-        Upload pandas DataFrame as parquet to S3.
+        Upload pandas DataFrame as parquet to S3 with Feature 1 schema alignment.
         
         Args:
             df: Pandas DataFrame to upload
             s3_key: S3 key for the upload
-            schema: Optional PyArrow schema for validation
+            schema: Optional PyArrow schema for validation and alignment
+            use_schema_alignment: Enable Feature 1 schema alignment (default: True)
             **kwargs: Additional arguments passed to upload_parquet
         
         Returns:
             True if upload successful
         """
         try:
-            # Convert DataFrame to PyArrow table with Redshift compatibility
-            if schema:
+            # Feature 1: Schema Alignment for Redshift Compatibility
+            if schema and use_schema_alignment:
+                logger.debug("Using Feature 1 schema alignment", s3_key=s3_key)
+                # Apply Feature 1 schema alignment for perfect Redshift compatibility
+                table = self.align_dataframe_to_redshift_schema(df, schema)
+            elif schema:
+                logger.debug("Using legacy schema validation", s3_key=s3_key)
+                # Legacy approach - basic schema validation only
                 table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
             else:
+                logger.debug("No schema provided - using automatic inference", s3_key=s3_key)
+                # No schema - use automatic inference
                 table = pa.Table.from_pandas(df, preserve_index=False)
             
             # Skip DataFrame metadata for Redshift compatibility
@@ -286,7 +296,9 @@ class S3Manager:
             return self.upload_parquet(table, s3_key, **kwargs)
             
         except Exception as e:
-            logger.error("DataFrame upload failed", error=str(e))
+            logger.error("DataFrame upload failed", error=str(e), 
+                        use_schema_alignment=use_schema_alignment,
+                        has_schema=schema is not None)
             raise S3Error(f"DataFrame upload failed: {e}")
     
     def list_backup_files(
@@ -502,3 +514,101 @@ class S3Manager:
             'total_bytes': 0,
             'failed_uploads': 0
         }
+    
+    def align_dataframe_to_redshift_schema(self, df: pd.DataFrame, schema: pa.Schema) -> pa.Table:
+        """
+        Feature 1: Align DataFrame to Redshift-compatible schema with robust error handling.
+        
+        This function ensures perfect schema compatibility by:
+        1. Reordering columns to match target schema
+        2. Adding missing columns as nulls
+        3. Removing extra columns not in schema
+        4. Type casting with fallback to nulls for incompatible data
+        
+        Args:
+            df: Source DataFrame to align
+            schema: Target PyArrow schema for Redshift compatibility
+            
+        Returns:
+            PyArrow Table aligned to target schema
+            
+        Raises:
+            S3Error: If schema alignment fails completely
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            logger.debug("Starting Feature 1 schema alignment", 
+                        source_columns=len(df.columns), 
+                        target_columns=len(schema))
+            
+            # Get target column names and types
+            target_columns = [field.name for field in schema]
+            source_columns = df.columns.tolist()
+            
+            # Performance tracking
+            columns_casted = 0
+            columns_missing = 0
+            columns_nullified = 0
+            
+            # Step 1: Reorder and select columns
+            aligned_df = pd.DataFrame()
+            
+            for field in schema:
+                col_name = field.name
+                target_type = field.type
+                
+                if col_name in df.columns:
+                    # Column exists - perform type conversion
+                    try:
+                        if pa.types.is_integer(target_type):
+                            aligned_df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('Int64')
+                        elif pa.types.is_floating(target_type):
+                            aligned_df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('float64')
+                        elif pa.types.is_decimal(target_type):
+                            # Special handling for decimal types - convert to float for Redshift compatibility
+                            aligned_df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('float64')
+                        elif pa.types.is_string(target_type):
+                            aligned_df[col_name] = df[col_name].astype('string')
+                        elif pa.types.is_timestamp(target_type):
+                            aligned_df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+                        elif pa.types.is_date(target_type):
+                            aligned_df[col_name] = pd.to_datetime(df[col_name], errors='coerce').dt.date
+                        else:
+                            # Default: preserve as-is
+                            aligned_df[col_name] = df[col_name]
+                        
+                        columns_casted += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Type conversion failed for column {col_name}", error=str(e))
+                        aligned_df[col_name] = None
+                        columns_nullified += 1
+                else:
+                    # Column missing - add as nulls
+                    aligned_df[col_name] = None
+                    columns_missing += 1
+            
+            # Step 2: Convert to PyArrow Table with target schema
+            table = pa.table(aligned_df, schema=schema)
+            
+            alignment_time = time.time() - start_time
+            
+            # Log performance metrics
+            logger.info("Schema alignment successful",
+                       casted=columns_casted,
+                       columns=len(schema), 
+                       missing=columns_missing,
+                       nullified=columns_nullified,
+                       rows=len(df),
+                       duration_seconds=round(alignment_time, 3))
+            
+            return table
+            
+        except Exception as e:
+            error_msg = f"Feature 1 schema alignment failed: {str(e)}"
+            logger.error("Schema alignment error", error=error_msg, 
+                        source_columns=len(df.columns) if df is not None else 0,
+                        target_columns=len(schema))
+            raise S3Error(error_msg)
