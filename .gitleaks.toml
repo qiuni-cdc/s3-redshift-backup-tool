@@ -1,0 +1,66 @@
+# GitLeaks Configuration - Prevent Credential Exposure
+# This file configures gitleaks to detect secrets before they reach GitHub
+
+[extend]
+# Use default ruleset
+useDefault = true
+
+[[rules]]
+# AWS Access Key Detection
+id = "aws-access-key"
+description = "AWS Access Key ID"
+regex = '''AKIA[0-9A-Z]{16}'''
+tags = ["key", "AWS"]
+
+[[rules]]
+# AWS Secret Key Detection  
+id = "aws-secret-key"
+description = "AWS Secret Access Key"
+regex = '''[A-Za-z0-9/+=]{40}'''
+tags = ["secret", "AWS"]
+
+[[rules]]
+# Database Password Detection
+id = "database-password"
+description = "Database Password"
+regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"]*[a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>?]{8,}['"]*'''
+tags = ["password", "database"]
+
+[[rules]]
+# SSH Private Key Detection
+id = "ssh-private-key"
+description = "SSH Private Key"
+regex = '''-----BEGIN [A-Z]+ PRIVATE KEY-----'''
+tags = ["key", "SSH"]
+
+[[rules]]
+# Generic Secret Detection
+id = "generic-secret"
+description = "Generic Secret"
+regex = '''(?i)(secret|token|key)\s*[:=]\s*['"]*[a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>?]{16,}['"]*'''
+tags = ["secret", "generic"]
+
+[allowlist]
+# Allow placeholder/example credentials
+regexes = [
+  '''AKIAEXAMPLEKEY123456''',
+  '''ExampleSecretKey123456789abcdefghijk''',
+  '''your_db_password''',
+  '''your_redshift_password''',
+  '''your-database-host\.example\.com''',
+  '''your\..*\.bastion\.host''',
+  '''your_.*_user''',
+  '''your-s3-bucket-name''',
+  '''example\.com''',
+  '''localhost''',
+  '''127\.0\.0\.1'''
+]
+
+# Allow files that are templates or documentation
+paths = [
+  '''.env.template''',
+  '''.env.example''',
+  '''README.md''',
+  '''SECURITY.md''',
+  '''docs/.*'''
+]

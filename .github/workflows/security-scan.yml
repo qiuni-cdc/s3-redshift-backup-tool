@@ -1,0 +1,54 @@
+# GitHub Actions - Security Scanning
+# Automatically scans for credentials on every push/PR
+
+name: Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  credential-scan:
+    name: Credential Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better scanning
+    
+    - name: Run GitLeaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+    
+    - name: Install detect-secrets
+      run: |
+        pip install detect-secrets
+    
+    - name: Create secrets baseline if not exists
+      run: |
+        if [ ! -f .secrets.baseline ]; then
+          detect-secrets scan --baseline .secrets.baseline
+        fi
+    
+    - name: Run detect-secrets scan
+      run: |
+        detect-secrets scan --baseline .secrets.baseline --fail-on-verified-secrets
+    
+    - name: Run custom credential checker
+      run: |
+        find . -type f \( -name "*.py" -o -name "*.sql" -o -name "*.md" -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" -o -name "*.toml" \) \
+          -not -path "./.git/*" \
+          -not -path "./test_env/*" \
+          -not -path "./__pycache__/*" \
+          | xargs ./scripts/check-credentials.sh
+    
+    - name: Security scan summary
+      run: |
+        echo "✅ Security scan completed successfully"
+        echo "No credential exposure detected in repository"
