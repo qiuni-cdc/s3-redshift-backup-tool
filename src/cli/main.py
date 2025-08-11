@@ -68,12 +68,17 @@ def cli(ctx, debug, config_file, log_file, json_logs):
         # Configure application logging
         backup_logger = configure_logging_from_config(config)
         
-        # Validate configuration
-        errors = config.validate_all()
-        if errors:
-            click.echo("⚠️  Configuration warnings:")
-            for error in errors:
-                click.echo(f"   - {error}")
+        # Validate configuration (but don't fail CLI initialization)
+        try:
+            errors = config.validate_all()
+            if errors:
+                click.echo("⚠️  Configuration warnings:")
+                for error in errors:
+                    click.echo(f"   - {error}")
+                click.echo()
+        except Exception as validation_error:
+            # Store validation error for later display but don't fail initialization
+            click.echo(f"⚠️  Configuration validation error: {validation_error}")
             click.echo()
         
         # Store in context
@@ -257,17 +262,49 @@ def status(ctx):
         click.echo(f"   Log Level: {config.log_level}")
         click.echo()
         
-        # Test connections
+        # Test connections with error handling
         click.echo("🔌 Connectivity Tests:")
-        connection_manager = ConnectionManager(config)
         
-        health_status = connection_manager.health_check()
+        try:
+            connection_manager = ConnectionManager(config)
+            health_status = connection_manager.health_check()
+            
+            for component, status in health_status.items():
+                if status == 'OK':
+                    click.echo(f"   ✅ {component.upper()}: {status}")
+                else:
+                    click.echo(f"   ❌ {component.upper()}: {status}")
         
-        for component, status in health_status.items():
-            if status == 'OK':
-                click.echo(f"   ✅ {component.upper()}: {status}")
-            else:
-                click.echo(f"   ❌ {component.upper()}: {status}")
+        except Exception as conn_error:
+            click.echo(f"   ⚠️  Connection tests skipped: {conn_error}")
+            
+            # Try individual components with better error handling
+            click.echo("   🔍 Testing individual components:")
+            
+            # Test S3 configuration
+            try:
+                import boto3
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=config.s3.access_key,
+                    aws_secret_access_key=config.s3.secret_key.get_secret_value(),
+                    region_name=config.s3.region
+                )
+                s3_client.head_bucket(Bucket=config.s3.bucket_name)
+                click.echo(f"   ✅ S3: OK (bucket accessible)")
+            except Exception as s3_error:
+                click.echo(f"   ❌ S3: {s3_error}")
+            
+            # Test SSH configuration
+            try:
+                from pathlib import Path
+                ssh_key_path = Path(config.ssh.bastion_key_path)
+                if ssh_key_path.exists():
+                    click.echo(f"   ✅ SSH Key: OK (file exists)")
+                else:
+                    click.echo(f"   ❌ SSH Key: File not found at {config.ssh.bastion_key_path}")
+            except Exception as ssh_error:
+                click.echo(f"   ⚠️  SSH Key: {ssh_error}")
         
         # Check last backup info
         click.echo()
@@ -275,20 +312,35 @@ def status(ctx):
         
         try:
             from src.core.watermark import WatermarkManager
-            watermark_manager = WatermarkManager(config, connection_manager.get_s3_client())
             
-            last_watermark = watermark_manager.get_last_watermark()
-            watermark_metadata = watermark_manager.get_watermark_metadata()
+            # Try to create watermark manager with S3-only access
+            try:
+                import boto3
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=config.s3.access_key,
+                    aws_secret_access_key=config.s3.secret_key.get_secret_value(),
+                    region_name=config.s3.region
+                )
+                watermark_manager = WatermarkManager(config, s3_client)
+                
+                last_watermark = watermark_manager.get_last_watermark()
+                watermark_metadata = watermark_manager.get_watermark_metadata()
+                
+                click.echo(f"   Last watermark: {last_watermark}")
+                
+                if watermark_metadata:
+                    click.echo(f"   Last update: {watermark_metadata.get('updated_at', 'Unknown')}")
+                    if 'backup_strategy' in watermark_metadata:
+                        click.echo(f"   Strategy used: {watermark_metadata['backup_strategy']}")
+                else:
+                    click.echo(f"   Default watermark (no backups yet)")
             
-            click.echo(f"   Last watermark: {last_watermark}")
-            
-            if watermark_metadata:
-                click.echo(f"   Last update: {watermark_metadata.get('updated_at', 'Unknown')}")
-                if 'backup_strategy' in watermark_metadata:
-                    click.echo(f"   Strategy used: {watermark_metadata['backup_strategy']}")
+            except Exception as wm_error:
+                click.echo(f"   ⚠️  Could not retrieve backup info: {wm_error}")
         
-        except Exception as e:
-            click.echo(f"   ⚠️  Could not retrieve backup info: {e}")
+        except ImportError as e:
+            click.echo(f"   ⚠️  Watermark module error: {e}")
         
         # System resources
         click.echo()
@@ -297,6 +349,17 @@ def status(ctx):
         click.echo(f"   Batch size: {config.backup.batch_size}")
         click.echo(f"   Timeout: {config.backup.timeout_seconds}s")
         click.echo(f"   Retry attempts: {config.backup.retry_attempts}")
+        
+        # Configuration validation summary
+        click.echo()
+        click.echo("⚙️  Configuration Validation:")
+        errors = config.validate_all()
+        if errors:
+            click.echo(f"   ⚠️  Found {len(errors)} configuration issues:")
+            for error in errors:
+                click.echo(f"     - {error}")
+        else:
+            click.echo(f"   ✅ All configuration validated")
         
         click.echo()
         click.echo("✅ Status check completed")
@@ -495,6 +558,150 @@ def config(ctx, output: str):
     else:
         click.echo("⚙️  Current Configuration:")
         click.echo(json.dumps(config_data, indent=2))
+
+
+@cli.command()
+@click.argument('operation', type=click.Choice(['get', 'set', 'list', 'backup', 'restore']))
+@click.option('--table', '-t', help='Table name for table-specific watermark')
+@click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
+@click.option('--backup-key', help='Backup key for restore operation')
+@click.option('--metadata', help='JSON metadata for set operation')
+@click.pass_context
+def watermark(ctx, operation: str, table: str, timestamp: str, backup_key: str, metadata: str):
+    """
+    Manage watermark timestamps for incremental backups.
+    
+    Operations:
+        get - Get current watermark
+        set - Set new watermark timestamp
+        list - List watermark backups
+        backup - Create watermark backup
+        restore - Restore from backup
+    
+    Examples:
+        s3-backup watermark get
+        s3-backup watermark get -t settlement.table_name
+        s3-backup watermark set --timestamp "2025-08-11 10:00:00"
+        s3-backup watermark list
+        s3-backup watermark backup
+        s3-backup watermark restore --backup-key watermark/backup_20250811_100000
+    """
+    config = ctx.obj['config']
+    backup_logger = ctx.obj['backup_logger']
+    
+    try:
+        # Create S3 client directly (watermark operations only need S3, not SSH/DB)
+        from src.core.watermark import WatermarkManager
+        import boto3
+        
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=config.s3.access_key,
+            aws_secret_access_key=config.s3.secret_key.get_secret_value(),
+            region_name=config.s3.region
+        )
+        watermark_manager = WatermarkManager(config, s3_client)
+        
+        click.echo(f"🔖 Watermark {operation.upper()}")
+        if table:
+            click.echo(f"   Table: {table}")
+        click.echo()
+        
+        if operation == 'get':
+            # Get watermark
+            watermark = watermark_manager.get_last_watermark(table)
+            watermark_metadata = watermark_manager.get_watermark_metadata()
+            
+            click.echo(f"📅 Current Watermark: {watermark}")
+            
+            if watermark_metadata:
+                click.echo("📋 Metadata:")
+                for key, value in watermark_metadata.items():
+                    if key not in ['update_source', 'format_version']:  # Skip internal metadata
+                        click.echo(f"   {key}: {value}")
+        
+        elif operation == 'set':
+            if not timestamp:
+                click.echo("❌ Timestamp required for set operation", err=True)
+                click.echo("   Use --timestamp 'YYYY-MM-DD HH:MM:SS'")
+                sys.exit(1)
+            
+            # Parse metadata if provided
+            metadata_dict = {}
+            if metadata:
+                try:
+                    metadata_dict = json.loads(metadata)
+                except json.JSONDecodeError as e:
+                    click.echo(f"❌ Invalid JSON metadata: {e}", err=True)
+                    sys.exit(1)
+            
+            # Set watermark
+            success = watermark_manager.update_watermark(
+                timestamp=timestamp,
+                table_name=table,
+                metadata=metadata_dict
+            )
+            
+            if success:
+                click.echo(f"✅ Watermark updated to: {timestamp}")
+                if table:
+                    click.echo(f"   Table: {table}")
+                if metadata_dict:
+                    click.echo(f"   Metadata: {json.dumps(metadata_dict, indent=2)}")
+            else:
+                click.echo("❌ Failed to update watermark", err=True)
+                sys.exit(1)
+        
+        elif operation == 'list':
+            # List backups
+            backups = watermark_manager.list_watermark_backups()
+            
+            if not backups:
+                click.echo("No watermark backups found")
+                return
+            
+            click.echo(f"📂 Found {len(backups)} watermark backups:")
+            click.echo()
+            
+            for i, backup in enumerate(backups[:10]):  # Show first 10
+                click.echo(f"   {i+1}. {backup['key']}")
+                click.echo(f"      Size: {backup['size']} bytes")
+                click.echo(f"      Modified: {backup['last_modified']}")
+                click.echo()
+            
+            if len(backups) > 10:
+                click.echo(f"   ... and {len(backups) - 10} more backups")
+        
+        elif operation == 'backup':
+            # Create backup
+            backup_key = watermark_manager.backup_watermark()
+            click.echo(f"✅ Watermark backup created: {backup_key}")
+        
+        elif operation == 'restore':
+            if not backup_key:
+                click.echo("❌ Backup key required for restore operation", err=True)
+                click.echo("   Use --backup-key 'backup_key_name'")
+                sys.exit(1)
+            
+            if not click.confirm(f"⚠️  Restore watermark from '{backup_key}'? This will overwrite the current watermark."):
+                return
+            
+            # Restore watermark
+            success = watermark_manager.restore_watermark(backup_key)
+            
+            if success:
+                click.echo(f"✅ Watermark restored from: {backup_key}")
+                # Show new watermark
+                watermark = watermark_manager.get_last_watermark(table)
+                click.echo(f"   New watermark: {watermark}")
+            else:
+                click.echo("❌ Failed to restore watermark", err=True)
+                sys.exit(1)
+        
+    except Exception as e:
+        backup_logger.error_occurred(e, "cli_watermark_command")
+        click.echo(f"❌ Watermark operation failed: {e}", err=True)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

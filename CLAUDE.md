@@ -299,7 +299,7 @@ python -m src.cli.main status
 python -m src.cli.main info
 
 # Clean old backup data
-python -m src.cli.main clean --bucket redshift-dw-qa-uniuni-com --prefix incremental/ --confirm
+python -m src.cli.main clean --bucket your-s3-bucket-name --prefix incremental/ --confirm
 
 # Validate configuration
 python -m src.cli.main config
@@ -310,37 +310,37 @@ python -m src.cli.main config
 ✅ **Current Production Configuration** (verified working in `.env`):
 ```bash
 # Database Configuration
-DB_HOST=us-east-1.ro.db.analysis.uniuni.ca.internal
+DB_HOST=your-database-host.example.com
 DB_PORT=3306
-DB_USER=chenqi
-DB_PASSWORD=YOUR_DB_PASSWORD
+DB_USER=your_db_user
+DB_PASSWORD=your_db_password
 DB_DATABASE=settlement
 
-# SSH Configuration - MySQL Bastion (VERIFIED WORKING)
-SSH_BASTION_HOST=44.209.128.227
-SSH_BASTION_USER=chenqi  
-SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
+# SSH Configuration - MySQL Bastion (EXAMPLE)
+SSH_BASTION_HOST=your.mysql.bastion.host
+SSH_BASTION_USER=your_ssh_user  
+SSH_BASTION_KEY_PATH=/path/to/your/ssh/key.pem
 
-# Redshift SSH Configuration - Separate Bastion (VERIFIED WORKING)
-REDSHIFT_SSH_BASTION_HOST=35.82.216.244
-REDSHIFT_SSH_BASTION_USER=chenqi
-REDSHIFT_SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
+# Redshift SSH Configuration - Separate Bastion (EXAMPLE)
+REDSHIFT_SSH_BASTION_HOST=your.redshift.bastion.host
+REDSHIFT_SSH_BASTION_USER=your_ssh_user
+REDSHIFT_SSH_BASTION_KEY_PATH=/path/to/your/ssh/key.pem
 
-# S3 Configuration - CORRECTED BUCKET NAME
-S3_BUCKET_NAME=redshift-dw-qa-uniuni-com  # CONFIRMED: No extra "i"
+# S3 Configuration - EXAMPLE
+S3_BUCKET_NAME=your-s3-bucket-name
 AWS_ACCESS_KEY_ID=AKIAEXAMPLEKEY123456
 AWS_SECRET_ACCESS_KEY=ExampleSecretKey123456789abcdefghijk
 S3_REGION=us-east-1
 S3_INCREMENTAL_PATH=incremental/
 S3_HIGH_WATERMARK_KEY=watermark/last_run_timestamp.txt
 
-# Redshift Configuration - CORRECTED AND VERIFIED
-REDSHIFT_HOST=redshift-dw.qa.uniuni.com
+# Redshift Configuration - EXAMPLE
+REDSHIFT_HOST=your.redshift.cluster.com
 REDSHIFT_PORT=5439
-REDSHIFT_DATABASE=dw  # CORRECTED: Was using 'dev', now uses 'dw'
-REDSHIFT_USER=YOUR_REDSHIFT_USER
-REDSHIFT_PASSWORD=YOUR_REDSHIFT_PASSWORD
-REDSHIFT_SCHEMA=public  # CONFIRMED: Using public schema
+REDSHIFT_DATABASE=dw
+REDSHIFT_USER=your_redshift_user
+REDSHIFT_PASSWORD=your_redshift_password
+REDSHIFT_SCHEMA=public
 
 # Backup Performance Settings
 BACKUP_BATCH_SIZE=10000
@@ -359,8 +359,8 @@ BACKUP_TIMEOUT_SECONDS=300
    - ✅ Fixed SSH key parameter (`ssh_pkey` vs `ssh_private_key`)
    - ✅ Implemented proper SSH key permissions (600)
    - ✅ **SEPARATE SSH SERVERS CONFIGURED**: 
-     - MySQL bastion: `44.209.128.227` (verified working)
-     - Redshift bastion: `35.82.216.244` (verified working)
+     - MySQL bastion: `your.mysql.bastion.host` (example)
+     - Redshift bastion: `your.redshift.bastion.host` (example)
    - ✅ **10K TEST PASSED**: Complete pipeline MySQL→S3→Redshift operational
 
 2. **Configuration Management**:
