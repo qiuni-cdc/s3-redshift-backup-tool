@@ -1,8 +1,72 @@
-# S3 to Redshift Incremental Backup System
+# 🚀 S3 to Redshift Incremental Backup System
 
-A production-ready Python application for incremental data backup from MySQL to S3 and Redshift, designed to replace Google Colab prototypes with proper architecture, testing, and deployment capabilities.
+[![Security Scan](https://github.com/qiuni-cdc/s3-redshift-backup-tool/actions/workflows/security-scan.yml/badge.svg)](https://github.com/qiuni-cdc/s3-redshift-backup-tool/actions/workflows/security-scan.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+🎉 **PRODUCTION READY** - A fully operational Python application for incremental data backup from MySQL to S3 and Redshift with enterprise architecture, comprehensive testing, and verified deployment capabilities.
+
+## 🎯 **Quick Start**
+
+### **1. One-Time Setup**
+```bash
+# Clone repository
+git clone https://github.com/qiuni-cdc/s3-redshift-backup-tool.git
+cd s3-redshift-backup-tool
+
+# Setup virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Setup security protection (REQUIRED)
+./scripts/setup-git-hooks.sh
+```
+
+### **2. Configure Credentials**
+```bash
+# Copy configuration template
+cp .env .env.local
+
+# Edit .env.local with your actual credentials
+# (All files starting with .env are gitignored for security)
+```
+
+### **3. Run Your First Backup**
+```bash
+# Test connection (dry run)
+python -m src.cli.main backup -t your_database.your_table -s sequential --dry-run
+
+# Execute backup
+python -m src.cli.main backup -t your_database.your_table -s sequential
+
+# Check system status
+python -m src.cli.main status
+```
+
+## 🛡️ **Security Features**
+
+This repository implements **comprehensive credential protection**:
+
+### **🔒 6-Layer Protection System**
+1. **GitIgnore**: Prevents credential files from being committed
+2. **Pre-commit Hooks**: Scans every commit for secrets
+3. **Pre-push Hooks**: Final validation before GitHub push
+4. **GitLeaks Integration**: Industry-standard secret detection
+5. **Custom Scanner**: Domain-specific credential patterns
+6. **GitHub Actions**: Automated security scanning on every push
+
+### **🚨 Zero Credential Exposure**
+- ✅ **All documentation uses placeholder credentials**
+- ✅ **Real credentials never committed to repository**
+- ✅ **Automatic scanning prevents accidental exposure**
+- ✅ **Safe for public repositories and collaboration**
+
+**Setup Security**: Run `./scripts/setup-git-hooks.sh` once after cloning.
+
+## ⚡ Features
 
 - **Multiple Backup Strategies**: Sequential, inter-table parallel, and intra-table parallel processing
 - **Incremental Processing**: High-watermark based incremental data processing  
