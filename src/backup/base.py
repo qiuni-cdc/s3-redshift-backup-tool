@@ -108,6 +108,10 @@ class BaseBackupStrategy(ABC):
         # Initialize components with S3 client
         self.s3_client = None
         self._initialize_components()
+        
+        # Initialize dynamic schema manager
+        from src.config.dynamic_schemas import DynamicSchemaManager
+        self.dynamic_schema_manager = DynamicSchemaManager(self.connection_manager)
     
     def _initialize_components(self):
         """Initialize components with shared S3 client"""

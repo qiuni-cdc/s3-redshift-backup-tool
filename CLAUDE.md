@@ -307,24 +307,40 @@ python -m src.cli.main config
 
 ## Configuration
 
-✅ **Current Production Configuration** (already set in `.env`):
+✅ **Current Production Configuration** (verified working in `.env`):
 ```bash
 # Database Configuration
 DB_HOST=us-east-1.ro.db.analysis.uniuni.ca.internal
 DB_PORT=3306
 DB_USER=chenqi
+DB_PASSWORD=YOUR_DB_PASSWORD
 DB_DATABASE=settlement
 
-# SSH Configuration (for bastion host access)
+# SSH Configuration - MySQL Bastion (VERIFIED WORKING)
 SSH_BASTION_HOST=44.209.128.227
-SSH_BASTION_USER=chenqi
+SSH_BASTION_USER=chenqi  
 SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
 
-# S3 Configuration
-S3_BUCKET_NAME=redshift-dw-qa-uniuni-com
+# Redshift SSH Configuration - Separate Bastion (VERIFIED WORKING)
+REDSHIFT_SSH_BASTION_HOST=35.82.216.244
+REDSHIFT_SSH_BASTION_USER=chenqi
+REDSHIFT_SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
+
+# S3 Configuration - CORRECTED BUCKET NAME
+S3_BUCKET_NAME=redshift-dw-qa-uniuni-com  # CONFIRMED: No extra "i"
+AWS_ACCESS_KEY_ID=AKIAEXAMPLEKEY123456
+AWS_SECRET_ACCESS_KEY=ExampleSecretKey123456789abcdefghijk
 S3_REGION=us-east-1
 S3_INCREMENTAL_PATH=incremental/
 S3_HIGH_WATERMARK_KEY=watermark/last_run_timestamp.txt
+
+# Redshift Configuration - CORRECTED AND VERIFIED
+REDSHIFT_HOST=redshift-dw.qa.uniuni.com
+REDSHIFT_PORT=5439
+REDSHIFT_DATABASE=dw  # CORRECTED: Was using 'dev', now uses 'dw'
+REDSHIFT_USER=YOUR_REDSHIFT_USER
+REDSHIFT_PASSWORD=YOUR_REDSHIFT_PASSWORD
+REDSHIFT_SCHEMA=public  # CONFIRMED: Using public schema
 
 # Backup Performance Settings
 BACKUP_BATCH_SIZE=10000
@@ -342,6 +358,10 @@ BACKUP_TIMEOUT_SECONDS=300
    - ✅ Solved paramiko compatibility issue (downgraded to <3.0)
    - ✅ Fixed SSH key parameter (`ssh_pkey` vs `ssh_private_key`)
    - ✅ Implemented proper SSH key permissions (600)
+   - ✅ **SEPARATE SSH SERVERS CONFIGURED**: 
+     - MySQL bastion: `44.209.128.227` (verified working)
+     - Redshift bastion: `35.82.216.244` (verified working)
+   - ✅ **10K TEST PASSED**: Complete pipeline MySQL→S3→Redshift operational
 
 2. **Configuration Management**:
    - ✅ Resolved pydantic-settings nested config loading

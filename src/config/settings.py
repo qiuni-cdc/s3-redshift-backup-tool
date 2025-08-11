@@ -60,6 +60,43 @@ class S3Config(BaseSettings):
         extra = "ignore"
 
 
+class RedshiftSSHConfig(BaseSettings):
+    """SSH bastion host configuration for Redshift"""
+    bastion_host: str = Field(..., description="Redshift SSH bastion host address")
+    bastion_user: str = Field(..., description="Redshift SSH username")
+    bastion_key_path: str = Field(..., description="Path to Redshift SSH private key")
+    local_port: int = Field(0, description="Local port for Redshift SSH tunnel (0 for dynamic)")
+    
+    class Config:
+        env_prefix = "REDSHIFT_SSH_"
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        extra = "ignore"
+    
+    @validator('bastion_key_path')
+    def validate_key_path(cls, v):
+        """Validate SSH key file exists"""
+        if not Path(v).exists():
+            raise ValueError(f"Redshift SSH key file not found: {v}")
+        return v
+
+
+class RedshiftConfig(BaseSettings):
+    """Redshift connection configuration"""
+    host: str = Field(..., description="Redshift host")
+    port: int = Field(5439, description="Redshift port")
+    user: str = Field(..., description="Redshift username")
+    password: SecretStr = Field(..., description="Redshift password")
+    database: str = Field(..., description="Redshift database")
+    schema: str = Field("public", description="Redshift schema")
+    
+    class Config:
+        env_prefix = "REDSHIFT_"
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        extra = "ignore"
+
+
 class BackupConfig(BaseSettings):
     """Backup operation configuration"""
     batch_size: int = Field(10000, description="Number of rows per batch")
@@ -129,6 +166,20 @@ class AppConfig(BaseSettings):
         if not hasattr(self, '_backup'):
             self._backup = BackupConfig()
         return self._backup
+    
+    @property
+    def redshift(self) -> RedshiftConfig:
+        """Get Redshift configuration"""
+        if not hasattr(self, '_redshift'):
+            self._redshift = RedshiftConfig()
+        return self._redshift
+    
+    @property
+    def redshift_ssh(self) -> RedshiftSSHConfig:
+        """Get Redshift SSH configuration"""
+        if not hasattr(self, '_redshift_ssh'):
+            self._redshift_ssh = RedshiftSSHConfig()
+        return self._redshift_ssh
     
     @validator('log_level')
     def validate_log_level(cls, v):
