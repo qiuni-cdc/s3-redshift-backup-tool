@@ -498,7 +498,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
             # Create dedicated database session for this thread using shared SSH tunnel
             with self.thread_safe_database_session() as db_conn:
                 chunk_result = self._process_single_chunk(
-                    db_conn, table_name, chunk_start, chunk_end, chunk_id, thread_id
+                    db_conn, table_name, chunk_start, chunk_end, chunk_id, thread_id, limit
                 )
                 
                 chunk_duration = time.time() - chunk_start_time
@@ -538,7 +538,8 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
         chunk_start: str,
         chunk_end: str,
         chunk_id: str,
-        thread_id: int
+        thread_id: int,
+        limit: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process a single time chunk.
