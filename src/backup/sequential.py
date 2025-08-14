@@ -26,9 +26,9 @@ class SequentialBackupStrategy(BaseBackupStrategy):
     
     def __init__(self, config):
         super().__init__(config)
-        self.logger.set_context(strategy="sequential")
+        self.logger.set_context(strategy="sequential", gemini_mode=True)
     
-    def execute(self, tables: List[str]) -> bool:
+    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
         """
         Execute sequential backup for all specified tables.
         
@@ -99,17 +99,8 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                             self.logger.logger.error("Database connection lost, stopping backup")
                             break
             
-            # Update watermarks only if some tables succeeded
-            watermark_updated = False
-            if successful_tables:
-                try:
-                    watermark_updated = self.update_watermarks(
-                        current_timestamp, successful_tables, table_specific=False
-                    )
-                except Exception as e:
-                    self.logger.error_occurred(e, "watermark_update")
-                    # Don't fail the entire backup if watermark update fails
-                    watermark_updated = False
+            # Watermarks are now updated per table, no global update needed
+            watermark_updated = len(successful_tables) > 0  # True if any table succeeded
             
             # Calculate final results
             all_success = len(failed_tables) == 0
@@ -127,7 +118,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 watermark_updated=watermark_updated
             )
             
-            # Log summary
+            # Log summary with Gemini statistics
             summary = self.get_backup_summary()
             self.logger.logger.info(
                 "Sequential backup summary",
@@ -135,6 +126,17 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 successful_tables=len(successful_tables),
                 failed_tables=len(failed_tables)
             )
+            
+            # Log Gemini mode statistics
+            gemini_stats = summary.get('gemini_stats', {})
+            if gemini_stats.get('total_batches_processed', 0) > 0:
+                self.logger.logger.info(
+                    "Gemini mode statistics",
+                    gemini_success_rate=f"{gemini_stats.get('gemini_success_rate', 0)}%",
+                    schemas_discovered=gemini_stats.get('schemas_discovered', 0),
+                    total_batches=gemini_stats.get('total_batches_processed', 0),
+                    strategy="sequential"
+                )
             
             return all_success
             
@@ -180,8 +182,8 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 )
                 return False
             
-            # Get last watermark for this backup window
-            last_watermark = self.watermark_manager.get_last_watermark()
+            # Get last watermark for this specific table
+            last_watermark = self.get_table_watermark_timestamp(table_name)
             
             # Log backup window
             self.logger.logger.info(
@@ -209,9 +211,9 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 estimated_rows=estimated_rows
             )
             
-            # Execute incremental query
+            # Execute incremental query with optional limit
             incremental_query = self.get_incremental_query(
-                table_name, last_watermark, current_timestamp
+                table_name, last_watermark, current_timestamp, limit=limit
             )
             
             cursor.execute(incremental_query)
@@ -265,6 +267,44 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 table_name, total_rows_processed, batch_id, table_duration
             )
             
+            # Get max data timestamp from processed data for watermark
+            max_data_timestamp = None
+            if total_rows_processed > 0:
+                # Get last batch to find max timestamp
+                cursor.execute(f"""
+                    SELECT MAX(`update_at`) as max_update_at 
+                    FROM {table_name} 
+                    WHERE `update_at` > '{last_watermark}' 
+                    AND `update_at` <= '{current_timestamp}'
+                """)
+                result = cursor.fetchone()
+                if result and result.get('max_update_at'):
+                    max_data_timestamp = result['max_update_at']
+            
+            # Update S3 watermark for this table
+            try:
+                watermark_updated = self.update_watermarks(
+                    table_name=table_name,
+                    extraction_time=datetime.strptime(current_timestamp, '%Y-%m-%d %H:%M:%S'),
+                    max_data_timestamp=max_data_timestamp,
+                    rows_extracted=total_rows_processed,
+                    status='success',
+                    s3_file_count=batch_id
+                )
+                
+                if not watermark_updated:
+                    self.logger.logger.warning(
+                        "Failed to update watermark, but table processing succeeded",
+                        table_name=table_name
+                    )
+                
+            except Exception as e:
+                self.logger.logger.warning(
+                    "Watermark update failed but table processing succeeded",
+                    table_name=table_name,
+                    error=str(e)
+                )
+            
             self.logger.logger.info(
                 "Table processing completed",
                 table_name=table_name,
@@ -277,6 +317,24 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             return True
             
         except Exception as e:
+            # Update watermark with error status
+            try:
+                self.update_watermarks(
+                    table_name=table_name,
+                    extraction_time=datetime.strptime(current_timestamp, '%Y-%m-%d %H:%M:%S'),
+                    max_data_timestamp=None,
+                    rows_extracted=0,
+                    status='failed',
+                    s3_file_count=0,
+                    error_message=str(e)
+                )
+            except Exception as watermark_error:
+                self.logger.logger.warning(
+                    "Failed to update error watermark",
+                    table_name=table_name,
+                    watermark_error=str(watermark_error)
+                )
+            
             self.logger.error_occurred(e, f"table_processing_{table_name}")
             return False
         

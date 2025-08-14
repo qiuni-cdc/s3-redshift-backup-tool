@@ -29,12 +29,12 @@ class InterTableBackupStrategy(BaseBackupStrategy):
     
     def __init__(self, config):
         super().__init__(config)
-        self.logger.set_context(strategy="inter_table_parallel")
+        self.logger.set_context(strategy="inter_table_parallel", gemini_mode=True)
         self._thread_local = threading.local()
         self._results_lock = threading.Lock()
         self._table_results = {}
     
-    def execute(self, tables: List[str]) -> bool:
+    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
         """
         Execute inter-table parallel backup for all specified tables.
         
@@ -298,9 +298,9 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                 estimated_rows=estimated_rows
             )
             
-            # Execute incremental query
+            # Execute incremental query with optional limit
             incremental_query = self.get_incremental_query(
-                table_name, last_watermark, current_timestamp
+                table_name, last_watermark, current_timestamp, limit=limit
             )
             
             cursor.execute(incremental_query)

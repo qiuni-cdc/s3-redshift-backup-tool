@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import threading
 from collections import defaultdict
+from contextlib import contextmanager
+import mysql.connector
 
 from src.backup.base import BaseBackupStrategy
 from src.utils.exceptions import BackupError, DatabaseError, ValidationError, raise_backup_error
@@ -29,12 +31,19 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
     
     def __init__(self, config):
         super().__init__(config)
-        self.logger.set_context(strategy="intra_table_parallel")
+        self.logger.set_context(strategy="intra_table_parallel", gemini_mode=True)
         self._thread_local = threading.local()
         self._results_lock = threading.Lock()
         self._chunk_results = {}
+        
+        # Shared connection management for thread safety
+        self._shared_ssh_tunnel = None
+        self._shared_local_port = None
+        self._connection_lock = threading.Lock()
+        self._connection_pool = []
+        self._pool_lock = threading.Lock()
     
-    def execute(self, tables: List[str]) -> bool:
+    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
         """
         Execute intra-table parallel backup for specified tables.
         
@@ -156,6 +165,136 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
         
         finally:
             self.cleanup_resources()
+    
+    @contextmanager
+    def thread_safe_database_session(self):
+        """
+        Thread-safe database session using shared SSH tunnel.
+        
+        This method ensures that all threads share a single SSH tunnel
+        but get their own database connections to avoid conflicts.
+        """
+        db_conn = None
+        try:
+            # Ensure shared SSH tunnel is established
+            self._ensure_shared_ssh_tunnel()
+            
+            # Create database connection through shared tunnel
+            conn_config = {
+                'host': '127.0.0.1',
+                'port': self._shared_local_port,
+                'user': self.config.database.user,
+                'password': self.config.database.password.get_secret_value(),
+                'database': self.config.database.database,
+                'autocommit': False,
+                'connection_timeout': 30,
+                'charset': 'utf8mb4',
+                'use_unicode': True,
+                'sql_mode': 'TRADITIONAL',
+                'raise_on_warnings': True
+            }
+            
+            # Create connection with retries
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    db_conn = mysql.connector.connect(**conn_config)
+                    break
+                except mysql.connector.Error as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    self.logger.logger.warning(
+                        f"Database connection attempt {attempt + 1} failed, retrying: {e}"
+                    )
+                    time.sleep(2 ** attempt)
+            
+            if not db_conn.is_connected():
+                raise DatabaseError("Database connection test failed")
+            
+            self.logger.logger.debug(
+                "Thread database connection established",
+                thread_id=threading.get_ident(),
+                local_port=self._shared_local_port
+            )
+            
+            yield db_conn
+            
+        except Exception as e:
+            self.logger.logger.error(
+                "Thread database connection failed",
+                thread_id=threading.get_ident(),
+                error=str(e)
+            )
+            raise DatabaseError(f"Thread database connection failed: {e}")
+        
+        finally:
+            if db_conn and db_conn.is_connected():
+                db_conn.close()
+                self.logger.logger.debug(
+                    "Thread database connection closed",
+                    thread_id=threading.get_ident()
+                )
+    
+    def _ensure_shared_ssh_tunnel(self):
+        """Ensure shared SSH tunnel is established and available for all threads"""
+        with self._connection_lock:
+            if self._shared_ssh_tunnel is None or not self._shared_ssh_tunnel.is_active:
+                self.logger.logger.info("Establishing shared SSH tunnel for intra-table parallel processing")
+                
+                # Create SSH tunnel
+                from sshtunnel import SSHTunnelForwarder
+                
+                self._shared_ssh_tunnel = SSHTunnelForwarder(
+                    (self.config.ssh.bastion_host, 22),
+                    ssh_username=self.config.ssh.bastion_user,
+                    ssh_pkey=self.config.ssh.bastion_key_path,
+                    remote_bind_address=(self.config.database.host, self.config.database.port),
+                    local_bind_address=('127.0.0.1', 0)  # Use dynamic port
+                )
+                
+                # Start tunnel with retry logic
+                max_attempts = 3
+                for attempt in range(max_attempts):
+                    try:
+                        self._shared_ssh_tunnel.start()
+                        break
+                    except Exception as e:
+                        if attempt == max_attempts - 1:
+                            raise
+                        self.logger.logger.warning(
+                            f"Shared SSH tunnel attempt {attempt + 1} failed, retrying: {e}"
+                        )
+                        time.sleep(2 ** attempt)
+                
+                self._shared_local_port = self._shared_ssh_tunnel.local_bind_port
+                
+                self.logger.logger.info(
+                    "Shared SSH tunnel established",
+                    local_port=self._shared_local_port,
+                    remote_host=self.config.database.host,
+                    remote_port=self.config.database.port
+                )
+                
+                # Test tunnel connectivity
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex(('127.0.0.1', self._shared_local_port))
+                sock.close()
+                
+                if result != 0:
+                    raise ConnectionError("Shared SSH tunnel connectivity test failed")
+    
+    def cleanup_resources(self):
+        """Cleanup shared SSH tunnel and connection pool"""
+        super().cleanup_resources()
+        
+        with self._connection_lock:
+            if self._shared_ssh_tunnel and self._shared_ssh_tunnel.is_active:
+                self._shared_ssh_tunnel.stop()
+                self.logger.logger.info("Shared SSH tunnel closed")
+                self._shared_ssh_tunnel = None
+                self._shared_local_port = None
     
     def _process_table_with_chunks(
         self, 
@@ -353,8 +492,8 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
             
             chunk_start_time = time.time()
             
-            # Create dedicated database session for this thread
-            with self.database_session() as db_conn:
+            # Create dedicated database session for this thread using shared SSH tunnel
+            with self.thread_safe_database_session() as db_conn:
                 chunk_result = self._process_single_chunk(
                     db_conn, table_name, chunk_start, chunk_end, chunk_id, thread_id
                 )
@@ -436,9 +575,9 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
                 chunk_end=chunk_end
             )
             
-            # Get chunk query (using chunk-specific time window)
+            # Get chunk query (using chunk-specific time window) with optional limit
             chunk_query = self.get_incremental_query(
-                table_name, chunk_start, chunk_end
+                table_name, chunk_start, chunk_end, limit=limit
             )
             
             # Execute chunk query

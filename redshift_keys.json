@@ -1,0 +1,6 @@
+  {
+    "settlement.settlement_normal_delivery_detail": {
+      "distkey": "ant_parcel_no",
+      "sortkey": ["billing_num", "create_at"]
+    }
+  }

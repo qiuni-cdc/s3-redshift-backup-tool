@@ -144,20 +144,20 @@ The system uses environment variables for configuration. Here's your current pro
 
 ```bash
 # Database Configuration
-DB_HOST=us-east-1.ro.db.analysis.uniuni.ca.internal
+DB_HOST=your-database-host.example.com
 DB_PORT=3306
-DB_USER=chenqi
-DB_PASSWORD=677aa5aa58143b4796a87ae825dcec1a
+DB_USER=your_db_user
+DB_PASSWORD=your_db_password
 DB_DATABASE=settlement
 
 # SSH Configuration (for bastion host access)
-SSH_BASTION_HOST=44.209.128.227
-SSH_BASTION_USER=chenqi
-SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
+SSH_BASTION_HOST=your.mysql.bastion.host
+SSH_BASTION_USER=your_ssh_user
+SSH_BASTION_KEY_PATH=/path/to/your/ssh/key.pem
 SSH_LOCAL_PORT=0
 
 # S3 Configuration
-S3_BUCKET_NAME=redshift-dw-qa-uniuni-com
+S3_BUCKET_NAME=your-s3-bucket-name
 S3_ACCESS_KEY=YOUR_AWS_ACCESS_KEY_ID
 S3_SECRET_KEY=YOUR_AWS_SECRET_ACCESS_KEY
 S3_REGION=us-east-1
@@ -246,6 +246,171 @@ python -m src.cli.main status
 ```
 Shows system health, connectivity status, and recent backup activity.
 
+#### Sync Command (Production Pipeline)
+```bash
+python -m src.cli.main sync [OPTIONS]
+```
+
+**Complete MySQL → S3 → Redshift synchronization with flexible schema discovery.**
+
+**Options:**
+- `-t, --tables` (required): Table names to sync
+- `-s, --strategy`: Backup strategy (sequential|inter-table|intra-table)
+- `--backup-only`: Only run backup (MySQL → S3), skip Redshift loading
+- `--redshift-only`: Only run Redshift loading (S3 → Redshift), skip backup
+- `--limit`: Limit rows per query (for testing/development)
+- `--verify-data`: Verify row counts after sync
+- `--dry-run`: Test run without execution
+- `--max-workers`: Override number of worker threads
+- `--batch-size`: Override batch size
+
+**Examples:**
+```bash
+# Full sync (MySQL → S3 → Redshift)
+python -m src.cli.main sync -t settlement.settlement_claim_detail
+
+# Multiple tables with parallel strategy  
+python -m src.cli.main sync \
+  -t settlement.settlement_claim_detail \
+  -t settlement.settlement_normal_delivery_detail \
+  -s inter-table
+
+# Backup only (MySQL → S3)
+python -m src.cli.main sync -t settlement.table_name --backup-only
+
+# Redshift loading only (S3 → Redshift) - preserves manual watermarks
+python -m src.cli.main sync -t settlement.table_name --redshift-only
+
+# Test run without execution
+python -m src.cli.main sync -t settlement.table_name --dry-run
+
+# Testing with row limits (development)
+python -m src.cli.main sync -t settlement.table_name --limit 1000
+
+# Quick test with logging
+python -m src.cli.main --log-file test.log sync -t settlement.table_name --limit 5000
+```
+
+#### Watermark Management Commands
+```bash
+python -m src.cli.main watermark [OPERATION] [OPTIONS]
+```
+
+**Operations:**
+- `get`: Get current table watermark
+- `set`: Set new watermark timestamp for table  
+- `reset`: Delete watermark completely (fresh start)
+- `list`: List all table watermarks
+
+**Options:**
+- `-t, --table`: Table name for table-specific watermark operations
+- `--timestamp`: Timestamp for set operation (YYYY-MM-DD HH:MM:SS)
+
+**Examples:**
+```bash
+# View current watermark
+python -m src.cli.main watermark get -t settlement.settlement_claim_detail
+
+# Set manual starting timestamp for incremental sync
+python -m src.cli.main watermark set \
+  -t settlement.settlement_claim_detail \
+  --timestamp "2025-08-09 20:00:01"
+
+# Reset watermark completely (fresh start)
+python -m src.cli.main watermark reset -t settlement.settlement_claim_detail
+
+# List all table watermarks
+python -m src.cli.main watermark list
+```
+
+**Watermark Use Cases:**
+
+1. **Load Existing S3 Files After Specific Timestamp:**
+```bash
+python -m src.cli.main watermark reset -t settlement.table_name
+python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-08-09 20:00:01'
+python -m src.cli.main sync -t settlement.table_name --redshift-only
+```
+
+2. **Complete Fresh Sync from Timestamp:**
+```bash
+# Clean S3 files (optional)
+aws s3 rm s3://bucket/incremental/ --recursive --exclude "*" --include "*table_name*"
+
+# Set starting point and run full sync
+python -m src.cli.main watermark reset -t settlement.table_name
+python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-08-09 20:00:01'
+python -m src.cli.main sync -t settlement.table_name
+```
+
+#### S3 Storage Management (s3clean)
+```bash
+python -m src.cli.main s3clean [OPERATION] [OPTIONS]
+```
+
+**PRODUCTION-READY S3 CLEANUP SYSTEM** - Enterprise-grade storage management with comprehensive safety features.
+
+**Operations:**
+- `list` - List S3 files for a table or all tables with detailed metadata
+- `clean` - Clean S3 files for a specific table with safety confirmations
+- `clean-all` - Clean S3 files for all tables (use with extreme caution)
+
+**Options:**
+- `-t, --table` - Table name to clean (required for clean operation)
+- `--older-than` - Delete files older than X time units (e.g., "7d", "24h", "30m")
+- `--pattern` - File pattern to match (e.g., "batch_*", "*.parquet")
+- `--dry-run` - Show what would be deleted without actually deleting
+- `--force` - Skip confirmation prompts for automated workflows
+
+**Examples:**
+
+**Safe Exploration and Preview:**
+```bash
+# List files for specific table with sizes and dates
+python -m src.cli.main s3clean list -t settlement.settlement_return_detail
+
+# Preview what would be deleted (recommended first step)
+python -m src.cli.main s3clean clean -t settlement.settlement_return_detail --dry-run
+```
+
+**Targeted Cleanup Operations:**
+```bash
+# Clean all files for a table (with confirmation prompt)
+python -m src.cli.main s3clean clean -t settlement.settlement_return_detail
+
+# Clean files older than 7 days (recommended approach)
+python -m src.cli.main s3clean clean -t settlement.settlement_return_detail --older-than "7d"
+
+# Clean with pattern matching for specific batches
+python -m src.cli.main s3clean clean -t settlement.settlement_return_detail --pattern "batch_*"
+
+# Automated cleanup without prompts (for scripts)
+python -m src.cli.main s3clean clean -t settlement.settlement_return_detail --force
+
+# System-wide cleanup (DANGEROUS - requires double confirmation)
+python -m src.cli.main s3clean clean-all --older-than "30d"
+```
+
+**Enterprise Safety Features:**
+- ✅ **Multi-layer Protection** - Dry-run preview, confirmation prompts, table validation
+- ✅ **Time-based Filtering** - Only clean files older than specified age (`7d`, `24h`, `30m`)
+- ✅ **Pattern Matching** - Target specific file patterns for selective cleanup
+- ✅ **Table Isolation** - Prevents accidental deletion across wrong tables
+- ✅ **Size Reporting** - Shows exactly how much space will be freed
+- ✅ **File Type Validation** - Only processes `.parquet` backup files
+- ✅ **Error Prevention** - Cannot accidentally clean wrong table or recent files
+
+**Production-Ready Workflow:**
+1. **Explore**: `s3clean list -t table_name` - Review current storage usage
+2. **Preview**: `s3clean clean -t table_name --dry-run` - Validate cleanup plan
+3. **Execute**: `s3clean clean -t table_name --older-than "7d"` - Perform safe cleanup
+4. **Verify**: `s3clean list -t table_name` - Confirm results and space freed
+
+**Maintenance Schedule Recommendations:**
+- **Weekly**: Clean files older than 7 days for active tables
+- **Monthly**: Clean files older than 30 days for archived tables  
+- **Quarterly**: Review overall storage usage patterns
+
 #### Info Command
 ```bash
 python -m src.cli.main info
@@ -267,14 +432,14 @@ python -m src.cli.main clean [OPTIONS]
 ```bash
 # Clean old backup files (older than 30 days)
 python -m src.cli.main clean \
-  --bucket redshift-dw-qa-uniuni-com \
+  --bucket your-s3-bucket-name \
   --prefix incremental/ \
   --days 30 \
   --confirm
 
 # Dry run of cleanup (see what would be deleted)
 python -m src.cli.main clean \
-  --bucket redshift-dw-qa-uniuni-com \
+  --bucket your-s3-bucket-name \
   --prefix incremental/ \
   --days 7
 ```
@@ -420,7 +585,7 @@ python inspect_backup_data.py
 
 Your backups are stored in S3 with this structure:
 ```
-s3://redshift-dw-qa-uniuni-com/
+s3://your-s3-bucket-name/
 ├── incremental/
 │   └── settlement.settlement_normal_delivery_detail/
 │       └── year=2025/month=07/day=28/hour=20/
@@ -560,7 +725,7 @@ PARTITIONED BY (
   day string,
   hour string
 )
-LOCATION 's3://redshift-dw-qa-uniuni-com/incremental/settlement.settlement_normal_delivery_detail/'
+LOCATION 's3://your-s3-bucket-name/incremental/settlement.settlement_normal_delivery_detail/'
 TBLPROPERTIES ('has_encrypted_data'='false')
 
 -- Query recent deliveries
@@ -577,13 +742,13 @@ ORDER BY delivery_count DESC
 #### Using AWS CLI
 ```bash
 # List backup files
-aws s3 ls s3://redshift-dw-qa-uniuni-com/incremental/ --recursive
+aws s3 ls s3://your-s3-bucket-name/incremental/ --recursive
 
 # Download a specific file
-aws s3 cp s3://redshift-dw-qa-uniuni-com/incremental/settlement.settlement_normal_delivery_detail/year=2025/month=07/day=28/hour=20/2025-07-28_20-12-03_batch_0001.parquet ./
+aws s3 cp s3://your-s3-bucket-name/incremental/settlement.settlement_normal_delivery_detail/year=2025/month=07/day=28/hour=20/2025-07-28_20-12-03_batch_0001.parquet ./
 
 # Sync entire backup directory
-aws s3 sync s3://redshift-dw-qa-uniuni-com/incremental/ ./local_backup/
+aws s3 sync s3://your-s3-bucket-name/incremental/ ./local_backup/
 ```
 
 #### Using Python (Pandas/PyArrow)
@@ -592,7 +757,7 @@ import pandas as pd
 import boto3
 
 # Read directly from S3
-s3_path = 's3://redshift-dw-qa-uniuni-com/incremental/settlement.settlement_normal_delivery_detail/'
+s3_path = 's3://your-s3-bucket-name/incremental/settlement.settlement_normal_delivery_detail/'
 df = pd.read_parquet(s3_path)
 
 # Analyze data
@@ -625,14 +790,14 @@ print(partner_stats)
 **Solutions:**
 ```bash
 # Check SSH key permissions
-ls -la /home/qi_chen/test_env/chenqi.pem
+ls -la /path/to/your/ssh/key.pem
 # Should show: -rw------- (600 permissions)
 
 # Fix permissions if needed
-chmod 600 /home/qi_chen/test_env/chenqi.pem
+chmod 600 /path/to/your/ssh/key.pem
 
 # Test SSH connection manually
-ssh -i /home/qi_chen/test_env/chenqi.pem chenqi@44.209.128.227
+ssh -i /path/to/your/ssh/key.pem chenqi@your.mysql.bastion.host
 
 # Check paramiko version (should be <3.0)
 pip list | grep paramiko
@@ -673,7 +838,7 @@ python display_s3_data.py
 grep S3_ .env
 
 # Verify bucket permissions
-aws s3 ls s3://redshift-dw-qa-uniuni-com/
+aws s3 ls s3://your-s3-bucket-name/
 ```
 
 #### 4. No Data to Backup
@@ -698,7 +863,106 @@ python backup_dashboard.py | grep -A5 "Watermark"
 python check_claim_simple.py
 ```
 
-#### 5. Performance Issues
+#### 5. Watermark and Sync Issues
+
+**Symptoms:**
+- "Found X files, filtered to 0 files for loading"
+- "No S3 parquet files found"
+- Manual watermarks not working
+- All files being loaded when expecting incremental
+
+**Solutions:**
+
+**Check Watermark State:**
+```bash
+# View current watermark details
+python -m src.cli.main watermark get -t settlement.table_name
+
+# Look for:
+# - Last Data Timestamp: Should match your expected date
+# - Last Extraction Time: Should be None for manual watermarks
+# - Backup Strategy: Should be 'manual_cli' for manual watermarks
+```
+
+**Reset and Set Fresh Watermark:**
+```bash
+# Complete reset and fresh start
+python -m src.cli.main watermark reset -t settlement.table_name
+python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-08-09 20:00:01'
+
+# Verify the watermark was set correctly
+python -m src.cli.main watermark get -t settlement.table_name
+```
+
+**Check S3 File Timestamps:**
+```bash
+# List S3 files with creation times
+aws s3 ls s3://your-bucket/incremental/ --recursive | grep table_name
+
+# Files created before your watermark timestamp will be filtered out
+```
+
+**Use Correct Sync Commands:**
+```bash
+# For loading existing S3 files with manual watermark (preserves watermark)
+python -m src.cli.main sync -t settlement.table_name --redshift-only
+
+# For fresh end-to-end sync (backup will overwrite manual watermark)
+python -m src.cli.main sync -t settlement.table_name
+```
+
+**Debug Filtering Logic:**
+Look for these log messages to understand what's happening:
+- ✅ `"Using manual watermark-based incremental Redshift loading: files after YYYY-MM-DD"`
+- ❌ `"Using session-based incremental Redshift loading: files from X to Y"` (means manual watermark was overwritten)
+- ✅ `"backup_strategy = 'manual_cli'"` in debug output
+- ❌ `"backup_strategy = 'sequential'"` (means backup process ran and overwrote manual watermark)
+
+#### 6. S3 Clean Issues
+
+**Symptoms:**
+- "S3 clean operation failed"
+- "Failed to list S3 files"
+- "No files found to delete" when files should exist
+
+**Solutions:**
+
+**Check S3 Connectivity:**
+```bash
+# Test basic S3 access
+python -m src.cli.main s3clean list
+
+# Check specific table files
+python -m src.cli.main s3clean list -t settlement.table_name
+```
+
+**Verify File Existence:**
+```bash
+# List with AWS CLI to compare
+aws s3 ls s3://your-bucket/incremental/ --recursive | grep table_name
+
+# Check file ages
+python -m src.cli.main s3clean list -t settlement.table_name
+```
+
+**Safe Cleanup Process:**
+```bash
+# 1. Always start with dry run
+python -m src.cli.main s3clean clean -t settlement.table_name --dry-run
+
+# 2. Use time filters for safety
+python -m src.cli.main s3clean clean -t settlement.table_name --older-than "7d" --dry-run
+
+# 3. Execute only after verification
+python -m src.cli.main s3clean clean -t settlement.table_name --older-than "7d"
+```
+
+**Common Issues:**
+- **"No files found"**: Table name might not match S3 file patterns
+- **"Invalid time format"**: Use formats like "7d", "24h", "30m"
+- **Large file counts**: Command processes up to 1000 files per operation
+
+#### 7. Performance Issues
 
 **Symptoms:**
 - Slow backup performance
@@ -931,8 +1195,8 @@ BACKUP_MAX_WORKERS=8
 #### SSH Key Management
 ```bash
 # Secure SSH key storage
-chmod 600 /home/qi_chen/test_env/chenqi.pem
-chown qi_chen:qi_chen /home/qi_chen/test_env/chenqi.pem
+chmod 600 /path/to/your/ssh/key.pem
+chown qi_chen:qi_chen /path/to/your/ssh/key.pem
 
 # Key rotation (when needed)
 # 1. Generate new key
@@ -972,8 +1236,8 @@ cp .env .env.staging
         "s3:DeleteObject"
       ],
       "Resource": [
-        "arn:aws:s3:::redshift-dw-qa-uniuni-com/incremental/*",
-        "arn:aws:s3:::redshift-dw-qa-uniuni-com/watermark/*"
+        "arn:aws:s3:::your-s3-bucket-name/incremental/*",
+        "arn:aws:s3:::your-s3-bucket-name/watermark/*"
       ]
     },
     {
@@ -981,7 +1245,7 @@ cp .env .env.staging
       "Action": [
         "s3:ListBucket"
       ],
-      "Resource": "arn:aws:s3:::redshift-dw-qa-uniuni-com"
+      "Resource": "arn:aws:s3:::your-s3-bucket-name"
     }
   ]
 }
@@ -1011,7 +1275,7 @@ python backup_dashboard.py | grep -A5 "Recent Activity"
 python inspect_backup_data.py | grep -A10 "Data Shape"
 
 # Validate S3 files
-aws s3 ls s3://redshift-dw-qa-uniuni-com/incremental/ --recursive --human-readable
+aws s3 ls s3://your-s3-bucket-name/incremental/ --recursive --human-readable
 ```
 
 #### 3. Disaster Recovery
@@ -1044,7 +1308,7 @@ EOF
 python -m src.cli.main status > weekly_health_$(date +%Y%m%d).log
 
 # Monthly cleanup of old backups
-python -m src.cli.main clean --bucket redshift-dw-qa-uniuni-com --prefix incremental/ --days 90 --confirm
+python -m src.cli.main clean --bucket your-s3-bucket-name --prefix incremental/ --days 90 --confirm
 
 # Quarterly performance review
 python backup_dashboard.py > quarterly_report_$(date +%Y%m%d).txt
@@ -1084,7 +1348,7 @@ ARCHIVE_RETENTION_DAYS=2555  # 7 years
 cat > cleanup_retention.sh << 'EOF'
 #!/bin/bash
 python -m src.cli.main clean \
-  --bucket redshift-dw-qa-uniuni-com \
+  --bucket your-s3-bucket-name \
   --prefix incremental/ \
   --days $BACKUP_RETENTION_DAYS \
   --confirm

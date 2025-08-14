@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
 from src.core.s3_manager import S3Manager
-from src.core.watermark import WatermarkManager
+from src.core.s3_watermark_manager import S3WatermarkManager
 from src.config.schemas import get_table_schema, validate_table_data
 from src.utils.validation import validate_data, ValidationResult
 from src.utils.exceptions import (
@@ -101,7 +101,7 @@ class BaseBackupStrategy(ABC):
         self.config = config
         self.connection_manager = ConnectionManager(config)
         self.s3_manager = S3Manager(config)
-        self.watermark_manager = WatermarkManager(config)
+        self.watermark_manager = S3WatermarkManager(config)
         self.logger = get_backup_logger()
         self.metrics = BackupMetrics()
         
@@ -109,16 +109,25 @@ class BaseBackupStrategy(ABC):
         self.s3_client = None
         self._initialize_components()
         
-        # Initialize dynamic schema manager
-        from src.config.dynamic_schemas import DynamicSchemaManager
-        self.dynamic_schema_manager = DynamicSchemaManager(self.connection_manager)
+        # Initialize flexible schema manager for any table
+        from src.core.flexible_schema_manager import FlexibleSchemaManager
+        self.flexible_schema_manager = FlexibleSchemaManager(self.connection_manager)
+        
+        # Track PoC mode usage (renamed from Gemini)
+        self._poc_mode_enabled = True
+        self._gemini_mode_enabled = True  # For compatibility
+        self._gemini_usage_stats = {
+            'schemas_discovered': 0,
+            'batches_with_gemini': 0,  # Keep for compatibility
+            'batches_with_fallback': 0
+        }
     
     def _initialize_components(self):
         """Initialize components with shared S3 client"""
         try:
             self.s3_client = self.connection_manager.get_s3_client()
             self.s3_manager.s3_client = self.s3_client
-            self.watermark_manager.s3_client = self.s3_client
+            # S3WatermarkManager has its own S3 client initialization
             
             self.logger.connection_established("S3")
         except Exception as e:
@@ -126,12 +135,13 @@ class BaseBackupStrategy(ABC):
             raise
     
     @abstractmethod
-    def execute(self, tables: List[str]) -> bool:
+    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
         """
         Execute backup strategy for given tables.
         
         Args:
             tables: List of table names to backup
+            limit: Optional row limit per query (for testing purposes)
         
         Returns:
             True if backup successful, False otherwise
@@ -143,7 +153,8 @@ class BaseBackupStrategy(ABC):
         table_name: str, 
         last_watermark: str, 
         current_timestamp: str,
-        custom_where: Optional[str] = None
+        custom_where: Optional[str] = None,
+        limit: Optional[int] = None
     ) -> str:
         """
         Generate incremental query for table.
@@ -153,6 +164,7 @@ class BaseBackupStrategy(ABC):
             last_watermark: Last backup timestamp
             current_timestamp: Current backup timestamp
             custom_where: Additional WHERE conditions
+            limit: Optional LIMIT for testing large tables
         
         Returns:
             SQL query string for incremental data
@@ -165,17 +177,30 @@ class BaseBackupStrategy(ABC):
         if custom_where:
             where_conditions.append(custom_where)
         
+        # Apply limit if specified (for testing purposes)
+        if limit is not None:
+            self.logger.logger.info(
+                "Applying explicit LIMIT to query",
+                table_name=table_name,
+                limit=limit,
+                reason="explicit_limit"
+            )
+        
         query = f"""
         SELECT * FROM {table_name}
         WHERE {' AND '.join(where_conditions)}
         ORDER BY `update_at`, `ID`
         """
         
+        if limit:
+            query += f" LIMIT {limit}"
+        
         self.logger.logger.debug(
             "Generated incremental query",
             table_name=table_name,
             last_watermark=last_watermark,
             current_timestamp=current_timestamp,
+            limit=limit,
             query_preview=query[:200] + "..." if len(query) > 200 else query
         )
         
@@ -260,8 +285,23 @@ class BaseBackupStrategy(ABC):
             current_timestamp: Current backup timestamp
         
         Returns:
-            Estimated row count
+            Estimated row count (or -1 for large tables where count is skipped)
         """
+        # Skip count for known large tables to avoid timeout
+        large_tables = [
+            'settlement.settlement_normal_delivery_detail',
+            'settlement_normal_delivery_detail'
+        ]
+        
+        table_basename = table_name.split('.')[-1]
+        if table_name in large_tables or table_basename in large_tables:
+            self.logger.logger.info(
+                "Skipping row count for large table",
+                table_name=table_name,
+                reason="large_table_optimization"
+            )
+            return -1  # Indicate unknown count
+        
         try:
             count_query = f"""
             SELECT COUNT(*) FROM {table_name}
@@ -278,6 +318,10 @@ class BaseBackupStrategy(ABC):
             
             cursor.execute(count_query)
             result = cursor.fetchone()
+            
+            if not result:
+                return 0
+                
             # Handle both dictionary and tuple cursor results
             if isinstance(result, dict):
                 count = result['COUNT(*)'] if 'COUNT(*)' in result else list(result.values())[0]
@@ -298,12 +342,11 @@ class BaseBackupStrategy(ABC):
             self.logger.logger.error(
                 "Failed to get row count",
                 table_name=table_name,
-                query=count_query.strip(),
                 error=str(e),
                 error_type=type(e).__name__
             )
-            # Re-raise the exception to stop processing if query is fundamentally broken
-            return 0
+            # Return -1 to indicate unknown count instead of failing
+            return -1
     
     def process_batch(
         self, 
@@ -357,33 +400,68 @@ class BaseBackupStrategy(ABC):
                 
                 self.metrics.warnings += len(validation_result.warnings)
             
-            # Schema validation and conversion
-            if schema:
-                try:
-                    table = validate_table_data(df, table_name, strict=False)
-                except Exception as e:
-                    self.logger.error_occurred(e, f"schema_conversion_{table_name}")
-                    # Fallback to automatic schema inference
-                    table = pa.Table.from_pandas(df)
-            else:
+            # Flexible Schema Mode: Use dynamic schema discovery for any table
+            try:
+                # Use flexible schema manager for dynamic discovery
+                if not schema:
+                    self.logger.logger.debug(
+                        "Using flexible schema discovery",
+                        table_name=table_name,
+                        batch_id=batch_id
+                    )
+                    # Get schema dynamically for any table
+                    flexible_schema, redshift_ddl = self.flexible_schema_manager.get_table_schema(table_name)
+                    schema = flexible_schema
+                    self._gemini_usage_stats['schemas_discovered'] += 1
+                    
+                    self.logger.logger.info(
+                        "Dynamic schema discovered",
+                        table_name=table_name,
+                        columns=len(schema),
+                        schema_cached=table_name in self.flexible_schema_manager._schema_cache
+                    )
+                
+                # Generate S3 key
+                s3_key = self.s3_manager.generate_s3_key(
+                    table_name, current_timestamp, batch_id
+                )
+                
+                # Use flexible upload with dynamic schema alignment
+                success = self.s3_manager.upload_dataframe(
+                    df,
+                    s3_key,
+                    schema=schema,
+                    use_schema_alignment=True,  # Enable flexible alignment
+                    compression="snappy"
+                )
+                
+                if success:
+                    self._gemini_usage_stats['batches_with_gemini'] += 1
+                    self.logger.logger.debug(
+                        "Flexible schema batch upload successful",
+                        table_name=table_name,
+                        batch_id=batch_id,
+                        schema_fields=len(schema),
+                        s3_key=s3_key
+                    )
+                
+            except Exception as e:
+                self.logger.logger.warning(
+                    "Flexible schema mode failed, falling back to basic upload",
+                    table_name=table_name,
+                    batch_id=batch_id,
+                    error=str(e)
+                )
+                
+                # Fallback to basic upload without PoC features
                 table = pa.Table.from_pandas(df)
-            
-            # Generate S3 key
-            s3_key = self.s3_manager.generate_s3_key(
-                table_name, current_timestamp, batch_id
-            )
-            
-            # Upload to S3
-            success = self.s3_manager.upload_parquet(
-                table, 
-                s3_key,
-                metadata={
-                    'table_name': table_name,
-                    'batch_id': str(batch_id),
-                    'backup_timestamp': current_timestamp,
-                    'row_count': str(len(batch_data))
-                }
-            )
+                s3_key = self.s3_manager.generate_s3_key(
+                    table_name, current_timestamp, batch_id
+                )
+                success = self.s3_manager.upload_parquet(table, s3_key)
+                
+                if success:
+                    self._gemini_usage_stats['batches_with_fallback'] += 1
             
             if success:
                 batch_duration = time.time() - batch_start_time
@@ -392,8 +470,8 @@ class BaseBackupStrategy(ABC):
                     table_name, batch_id, len(batch_data), s3_key
                 )
                 
-                # Update metrics
-                batch_bytes = len(table.to_pandas().to_csv().encode('utf-8'))  # Rough estimate
+                # Update metrics - estimate bytes from DataFrame size
+                batch_bytes = len(df) * len(df.columns) * 8  # Rough estimate: 8 bytes per cell
                 self.metrics.total_bytes += batch_bytes
                 
                 return True
@@ -532,60 +610,67 @@ class BaseBackupStrategy(ABC):
     
     def update_watermarks(
         self, 
-        current_timestamp: str, 
-        tables: List[str], 
-        table_specific: bool = False
+        table_name: str,
+        extraction_time: datetime,
+        max_data_timestamp: Optional[datetime] = None,
+        rows_extracted: int = 0,
+        status: str = 'success',
+        s3_file_count: int = 0,
+        error_message: Optional[str] = None
     ) -> bool:
         """
-        Update watermarks after successful backup.
+        Update S3-based watermarks after successful backup.
         
         Args:
-            current_timestamp: New watermark timestamp
-            tables: List of successfully backed up tables
-            table_specific: Whether to use table-specific watermarks
+            table_name: Name of the table that was backed up
+            extraction_time: When the backup process ran
+            max_data_timestamp: Maximum update_at from extracted data
+            rows_extracted: Number of rows extracted
+            status: Status (pending, success, failed)
+            s3_file_count: Number of S3 files created
+            error_message: Error message if backup failed
         
         Returns:
             True if watermarks updated successfully
         """
         try:
-            if table_specific:
-                # Update watermark for each table
-                for table_name in tables:
-                    success = self.watermark_manager.update_watermark(
-                        current_timestamp, 
-                        table_name=table_name,
-                        metadata={
-                            'backup_strategy': self.__class__.__name__,
-                            'table_count': len(tables),
-                            'backup_duration': self.metrics.get_duration()
-                        }
-                    )
-                    if not success:
-                        self.logger.error_occurred(
-                            Exception(f"Failed to update watermark for {table_name}"),
-                            "watermark_update"
-                        )
-                        return False
-            else:
-                # Update global watermark
-                success = self.watermark_manager.update_watermark(
-                    current_timestamp,
-                    metadata={
-                        'backup_strategy': self.__class__.__name__,
-                        'tables_backed_up': tables,
-                        'backup_duration': self.metrics.get_duration(),
-                        'total_rows': self.metrics.total_rows
-                    }
-                )
-                if not success:
-                    return False
+            success = self.watermark_manager.update_mysql_watermark(
+                table_name=table_name,
+                extraction_time=extraction_time,
+                max_data_timestamp=max_data_timestamp,
+                rows_extracted=rows_extracted,
+                status=status,
+                backup_strategy=self.__class__.__name__.replace('BackupStrategy', '').lower(),
+                s3_file_count=s3_file_count,
+                error_message=error_message
+            )
             
-            self.logger.watermark_updated("previous", current_timestamp)
-            return True
+            if success:
+                timestamp_str = extraction_time.strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.watermark_updated(table_name, timestamp_str)
+            
+            return success
             
         except Exception as e:
-            self.logger.error_occurred(e, "watermark_update")
+            self.logger.error_occurred(e, f"watermark_update_{table_name}")
             return False
+    
+    def get_table_watermark_timestamp(self, table_name: str) -> str:
+        """
+        Get incremental start timestamp for a table from S3 watermarks.
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            Timestamp string for incremental backup start
+        """
+        try:
+            return self.watermark_manager.get_incremental_start_timestamp(table_name)
+        except Exception as e:
+            self.logger.error_occurred(e, f"watermark_retrieval_{table_name}")
+            # Fallback to default
+            return "2025-01-01 00:00:00"
     
     def cleanup_resources(self):
         """Clean up resources after backup operation"""
@@ -601,6 +686,11 @@ class BaseBackupStrategy(ABC):
     def get_backup_summary(self) -> Dict[str, Any]:
         """Get comprehensive backup operation summary"""
         summary = self.metrics.get_summary()
+        
+        # Calculate Gemini usage percentage
+        total_batches = self._gemini_usage_stats['batches_with_gemini'] + self._gemini_usage_stats['batches_with_fallback']
+        gemini_percentage = (self._gemini_usage_stats['batches_with_gemini'] / max(total_batches, 1)) * 100
+        
         summary.update({
             'strategy': self.__class__.__name__,
             'config': {
@@ -608,7 +698,15 @@ class BaseBackupStrategy(ABC):
                 'max_workers': self.config.backup.max_workers,
                 'timeout_seconds': self.config.backup.timeout_seconds
             },
-            's3_stats': self.s3_manager.get_upload_stats()
+            's3_stats': self.s3_manager.get_upload_stats(),
+            'gemini_stats': {
+                'mode_enabled': self._gemini_mode_enabled,
+                'schemas_discovered': self._gemini_usage_stats['schemas_discovered'],
+                'batches_with_gemini': self._gemini_usage_stats['batches_with_gemini'],
+                'batches_with_fallback': self._gemini_usage_stats['batches_with_fallback'],
+                'gemini_success_rate': round(gemini_percentage, 1),
+                'total_batches_processed': total_batches
+            }
         })
         
         return summary
