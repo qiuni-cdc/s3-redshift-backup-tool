@@ -8,9 +8,15 @@ monitoring system status, and managing backup configurations.
 import click
 import sys
 import json
+import warnings
 from typing import List, Dict, Any
 from pathlib import Path
 import time
+
+# Suppress common library warnings in non-debug mode
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="paramiko")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="cryptography")
 
 from src.config.settings import AppConfig
 from src.backup.sequential import SequentialBackupStrategy
@@ -31,11 +37,12 @@ STRATEGIES = {
 
 @click.group()
 @click.option('--debug', is_flag=True, help='Enable debug logging')
+@click.option('--quiet', '-q', is_flag=True, help='Quiet mode - only show errors and warnings')
 @click.option('--config-file', type=click.Path(exists=True), help='Configuration file path')
 @click.option('--log-file', type=click.Path(), help='Log file path')
 @click.option('--json-logs', is_flag=True, help='Output logs in JSON format')
 @click.pass_context
-def cli(ctx, debug, config_file, log_file, json_logs):
+def cli(ctx, debug, quiet, config_file, log_file, json_logs):
     """
     S3 to Redshift Incremental Backup System
     
@@ -46,7 +53,12 @@ def cli(ctx, debug, config_file, log_file, json_logs):
     
     try:
         # Setup logging first
-        log_level = "DEBUG" if debug else "INFO"
+        if quiet:
+            log_level = "WARNING"
+        elif debug:
+            log_level = "DEBUG"
+        else:
+            log_level = "INFO"
         setup_logging(
             level=log_level,
             log_file=log_file,
@@ -86,12 +98,14 @@ def cli(ctx, debug, config_file, log_file, json_logs):
         ctx.obj['backup_logger'] = backup_logger
         ctx.obj['debug'] = debug
         
-        backup_logger.logger.info(
-            "CLI initialized successfully",
-            debug_mode=debug,
-            config_file=config_file,
-            log_file=log_file
-        )
+        # Only log CLI initialization in debug mode or when explicitly requested
+        if debug:
+            backup_logger.logger.info(
+                "CLI initialized successfully",
+                debug_mode=debug,
+                config_file=config_file,
+                log_file=log_file
+            )
         
     except Exception as e:
         click.echo(f"❌ Failed to initialize: {e}", err=True)

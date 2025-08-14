@@ -72,26 +72,26 @@ TABLE_SCHEMAS = {
         pa.field('update_at', pa.timestamp('us'), nullable=True),  # For incremental processing
     ]),
     
-    # Claim details table
+    # Claim details table - Updated with actual database schema (18 columns)
     'settlement.settlement_claim_detail': pa.schema([
-        pa.field('ID', pa.int64(), nullable=False),
-        pa.field('claim_num', pa.string(), nullable=True),
-        pa.field('parcel_num', pa.string(), nullable=True),
+        pa.field('ID', pa.int32(), nullable=False),
+        pa.field('billing_num', pa.string(), nullable=False),
+        pa.field('partner_id', pa.int32(), nullable=False),
         pa.field('customer_id', pa.int32(), nullable=True),
-        pa.field('partner_id', pa.int32(), nullable=True),
-        pa.field('claim_type', pa.string(), nullable=True),
-        pa.field('claim_reason', pa.string(), nullable=True),
-        pa.field('claim_amount', pa.decimal128(10, 4), nullable=True),
-        pa.field('approved_amount', pa.decimal128(10, 4), nullable=True),
-        pa.field('currency', pa.string(), nullable=True),
-        pa.field('claim_status', pa.string(), nullable=True),
-        pa.field('claim_date', pa.date32(), nullable=True),
-        pa.field('resolution_date', pa.date32(), nullable=True),
-        pa.field('settlement_date', pa.date32(), nullable=True),
-        pa.field('notes', pa.string(), nullable=True),
-        pa.field('created_at', pa.timestamp('us'), nullable=True),
-        pa.field('updated_at', pa.timestamp('us'), nullable=True),
+        pa.field('ant_parcel_no', pa.string(), nullable=False),
+        pa.field('warehouse', pa.string(), nullable=True),
+        pa.field('shipping_fee', pa.decimal128(15, 4), nullable=False),
+        pa.field('declared_value', pa.decimal128(15, 4), nullable=False),
+        pa.field('total', pa.decimal128(15, 4), nullable=False),
+        pa.field('dollar_100_limit_adjustment', pa.decimal128(15, 4), nullable=False),
+        pa.field('charge_currency', pa.string(), nullable=True),
+        pa.field('reason', pa.string(), nullable=True),
+        pa.field('is_valid', pa.int32(), nullable=True),
+        pa.field('create_at', pa.timestamp('us'), nullable=True),
         pa.field('update_at', pa.timestamp('us'), nullable=True),
+        pa.field('orig_declared_value', pa.decimal128(15, 4), nullable=False),
+        pa.field('orig_currency', pa.string(), nullable=True),
+        pa.field('exchange_rate', pa.decimal128(15, 4), nullable=True),
     ]),
     
     # Transshipment details
@@ -185,7 +185,7 @@ class SchemaManager:
         if custom_schemas:
             self.schemas.update(custom_schemas)
         
-        logger.info(f"Schema manager initialized with {len(self.schemas)} table schemas")
+        logger.info("Static schema manager initialized (deprecated - use flexible_schema_manager for dynamic discovery)")
     
     def get_schema(self, table_name: str) -> Optional[pa.Schema]:
         """
@@ -477,17 +477,20 @@ class SchemaManager:
         return type_mapping.get(type_str, pa.string())  # Default to string
 
 
-# Global schema manager instance
-_schema_manager = SchemaManager()
+# Global schema manager instance (deprecated - use flexible_schema_manager instead)
+_schema_manager = None
 
 def get_schema_manager() -> SchemaManager:
-    """Get the global schema manager instance"""
+    """Get the global schema manager instance (deprecated)"""
+    global _schema_manager
+    if _schema_manager is None:
+        _schema_manager = SchemaManager()
     return _schema_manager
 
 def get_table_schema(table_name: str) -> Optional[pa.Schema]:
-    """Convenience function to get table schema"""
-    return _schema_manager.get_schema(table_name)
+    """Convenience function to get table schema (deprecated - use flexible_schema_manager)"""
+    return get_schema_manager().get_schema(table_name)
 
 def validate_table_data(data: Any, table_name: str, strict: bool = True) -> pa.Table:
-    """Convenience function to validate table data"""
-    return _schema_manager.validate_data(data, table_name, strict)
+    """Convenience function to validate table data (deprecated - use flexible_schema_manager)"""
+    return get_schema_manager().validate_data(data, table_name, strict)
