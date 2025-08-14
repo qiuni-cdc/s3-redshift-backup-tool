@@ -74,7 +74,8 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                         table_name, 
                         current_timestamp,
                         i + 1,
-                        len(tables)
+                        len(tables),
+                        limit
                     ): table_name 
                     for i, table_name in enumerate(tables)
                 }
@@ -170,7 +171,8 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         table_name: str, 
         current_timestamp: str,
         table_index: int,
-        total_tables: int
+        total_tables: int,
+        limit: Optional[int] = None
     ) -> bool:
         """
         Process a single table in a separate thread.

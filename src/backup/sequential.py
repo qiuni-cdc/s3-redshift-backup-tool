@@ -65,7 +65,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                     
                     try:
                         success = self._process_single_table(
-                            db_conn, table_name, current_timestamp
+                            db_conn, table_name, current_timestamp, limit
                         )
                         
                         table_duration = time.time() - table_start_time
@@ -154,7 +154,8 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         self, 
         db_conn, 
         table_name: str, 
-        current_timestamp: str
+        current_timestamp: str,
+        limit: Optional[int] = None
     ) -> bool:
         """
         Process a single table for backup.
