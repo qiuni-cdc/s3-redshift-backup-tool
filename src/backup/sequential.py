@@ -6,7 +6,7 @@ one by one in sequence. This is the most reliable strategy for consistent backup
 but may take longer for large numbers of tables.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import time
 from datetime import datetime
 

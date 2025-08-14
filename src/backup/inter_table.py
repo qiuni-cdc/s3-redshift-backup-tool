@@ -6,7 +6,7 @@ are processed simultaneously using thread pools. Best for scenarios with
 many tables and sufficient system resources.
 """
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future

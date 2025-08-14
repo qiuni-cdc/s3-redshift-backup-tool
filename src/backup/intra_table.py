@@ -6,7 +6,7 @@ by splitting the time range into chunks and processing them simultaneously.
 Best for scenarios with very large tables and time-based data.
 """
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
