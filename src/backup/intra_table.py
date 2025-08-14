@@ -352,7 +352,8 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
                         chunk_start,
                         chunk_end,
                         chunk_index + 1,
-                        len(time_chunks)
+                        len(time_chunks),
+                        limit
                     ): (chunk_index, chunk_start, chunk_end)
                     for chunk_index, (chunk_start, chunk_end) in enumerate(time_chunks)
                 }
@@ -444,7 +445,8 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
         chunk_start: str,
         chunk_end: str,
         chunk_index: int,
-        total_chunks: int
+        total_chunks: int,
+        limit: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process a single time chunk in a separate thread.
