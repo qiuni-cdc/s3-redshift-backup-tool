@@ -88,7 +88,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
                 
                 try:
                     success = self._process_table_with_chunks(
-                        table_name, current_timestamp
+                        table_name, current_timestamp, limit
                     )
                     
                     table_duration = time.time() - table_start_time
@@ -299,7 +299,8 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
     def _process_table_with_chunks(
         self, 
         table_name: str, 
-        current_timestamp: str
+        current_timestamp: str,
+        limit: Optional[int] = None
     ) -> bool:
         """
         Process a single table by splitting it into time chunks.
