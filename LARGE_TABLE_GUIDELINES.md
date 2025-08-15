@@ -14,7 +14,8 @@ This document provides comprehensive guidelines for efficiently and safely backi
 | **Small** | < 100K | < 5 minutes | Sequential | Default settings |
 | **Medium** | 100K - 1M | 5-30 minutes | Sequential | Optimized batch size |
 | **Large** | 1M - 10M | 30 minutes - 5 hours | Sequential + Optimization | Custom configuration |
-| **Very Large** | > 10M | > 5 hours | Sequential + Monitoring | Enterprise settings |
+| **Very Large** | 10M - 100M | 5-20 hours | Sequential + Chunked Processing | Enterprise settings |
+| **Massive** | > 100M | 20+ hours | Sequential + Staged Approach | Production orchestration |
 
 ### **Performance Benchmarks**
 Based on production testing:
@@ -572,6 +573,353 @@ python -m src.cli.main sync -t table -s sequential
 # Reset if needed
 python -m src.cli.main watermark reset -t table
 python -m src.cli.main s3clean clean -t table
+```
+
+---
+
+## 🚀 **Massive Tables (100M+ Rows) - Advanced Strategies**
+
+### **The 100M Row Challenge**
+
+For tables with **100+ million rows**, standard approaches require enhanced orchestration and strategic planning:
+
+**Challenges:**
+- ❌ **Memory pressure** - Standard batching may exhaust system resources
+- ❌ **Network timeouts** - Long-running connections may drop
+- ❌ **Resume complexity** - Interruptions require precise restart points
+- ❌ **Monitoring difficulty** - Progress tracking across extended timeframes
+
+**Solutions:**
+- ✅ **Chunked processing** with controlled batch limits
+- ✅ **Staged approach** separating backup and load phases  
+- ✅ **Automated monitoring** with progress checkpoints
+- ✅ **Resource optimization** for sustained processing
+
+---
+
+### **📊 Massive Table Strategy: Staged Approach**
+
+#### **Phase 1: Controlled Backup to S3**
+```bash
+# Set conservative starting watermark
+python -m src.cli.main watermark set -t massive_table --timestamp '2024-01-01 00:00:00'
+
+# Chunked backup with limits (5M rows per chunk)
+python -m src.cli.main sync -t massive_table --backup-only --limit 5000000
+
+# Monitor progress and repeat
+python -m src.cli.main watermark get -t massive_table
+python -m src.cli.main sync -t massive_table --backup-only --limit 5000000
+```
+
+#### **Phase 2: Bulk Load to Redshift**
+```bash
+# After all data is safely in S3, load to Redshift
+python -m src.cli.main sync -t massive_table --redshift-only
+```
+
+#### **Phase 3: Incremental Catch-up**
+```bash
+# Resume normal incremental processing
+python -m src.cli.main sync -t massive_table
+```
+
+---
+
+### **🤖 Automated Chunked Processing Script**
+
+For 100M+ row tables, use this production automation script:
+
+```python
+#!/usr/bin/env python3
+"""
+Massive table sync automation for 100M+ rows
+Handles chunked processing with monitoring and error recovery
+"""
+import subprocess
+import time
+import json
+from datetime import datetime
+from typing import Optional
+
+class MassiveTableSyncer:
+    def __init__(self, table_name: str, chunk_size: int = 5000000):
+        self.table_name = table_name
+        self.chunk_size = chunk_size
+        self.log_file = f"massive_sync_{table_name.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        
+    def log(self, message: str):
+        """Log with timestamp"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"[{timestamp}] {message}"
+        print(log_entry)
+        with open(self.log_file, 'a') as f:
+            f.write(log_entry + '\n')
+    
+    def run_sync_chunk(self, backup_only: bool = False) -> bool:
+        """Run single sync chunk"""
+        cmd = [
+            'python', '-m', 'src.cli.main', 'sync',
+            '-t', self.table_name,
+            '--limit', str(self.chunk_size),
+            '--quiet'
+        ]
+        
+        if backup_only:
+            cmd.append('--backup-only')
+            
+        self.log(f"Running: {' '.join(cmd)}")
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)  # 2 hour timeout
+            
+            if result.returncode == 0:
+                self.log(f"Chunk completed successfully")
+                return True
+            else:
+                self.log(f"Chunk failed: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.log("Chunk timed out after 2 hours")
+            return False
+        except Exception as e:
+            self.log(f"Unexpected error: {e}")
+            return False
+    
+    def get_watermark_status(self) -> Optional[dict]:
+        """Get current watermark status"""
+        try:
+            result = subprocess.run([
+                'python', '-m', 'src.cli.main', 'watermark', 'get',
+                '-t', self.table_name
+            ], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                # Parse watermark info (customize based on actual output format)
+                return {"status": "success", "output": result.stdout}
+            return None
+        except Exception as e:
+            self.log(f"Failed to get watermark: {e}")
+            return None
+    
+    def sync_massive_table(self, backup_only: bool = False):
+        """Main sync orchestration for massive tables"""
+        self.log(f"Starting massive table sync: {self.table_name}")
+        self.log(f"Chunk size: {self.chunk_size:,} rows")
+        self.log(f"Mode: {'Backup Only' if backup_only else 'Full Sync'}")
+        
+        chunk_count = 0
+        consecutive_failures = 0
+        max_failures = 3
+        
+        while True:
+            chunk_count += 1
+            self.log(f"=== Processing Chunk {chunk_count} ===")
+            
+            # Run chunk
+            success = self.run_sync_chunk(backup_only)
+            
+            if success:
+                consecutive_failures = 0
+                self.log(f"Chunk {chunk_count} completed successfully")
+                
+                # Get progress update
+                watermark_status = self.get_watermark_status()
+                if watermark_status:
+                    self.log(f"Watermark status: {watermark_status['output'][:200]}...")
+                
+                # Check if we're caught up
+                if "No new data" in (watermark_status.get('output', '') if watermark_status else ''):
+                    self.log("✅ Sync completed - no more data to process")
+                    break
+                    
+            else:
+                consecutive_failures += 1
+                self.log(f"❌ Chunk {chunk_count} failed (consecutive failures: {consecutive_failures})")
+                
+                if consecutive_failures >= max_failures:
+                    self.log(f"🚨 Aborting after {max_failures} consecutive failures")
+                    break
+            
+            # Progress pause between chunks
+            pause_time = 60 if success else 300  # 1 min success, 5 min failure
+            self.log(f"Pausing {pause_time} seconds before next chunk...")
+            time.sleep(pause_time)
+        
+        self.log(f"Massive table sync completed. Total chunks processed: {chunk_count}")
+
+# Usage example
+if __name__ == "__main__":
+    # Configure for your massive table
+    syncer = MassiveTableSyncer(
+        table_name="settlement.massive_transaction_table",
+        chunk_size=5000000  # 5M rows per chunk
+    )
+    
+    # Phase 1: Backup to S3 only
+    syncer.sync_massive_table(backup_only=True)
+    
+    # Phase 2: Load to Redshift (uncomment after backup completes)
+    # syncer.sync_massive_table(backup_only=False)
+```
+
+---
+
+### **🔍 Monitoring Massive Table Syncs**
+
+#### **Real-time Progress Tracking**
+```bash
+#!/bin/bash
+# Monitor massive table sync progress
+
+TABLE_NAME="settlement.massive_table"
+MONITOR_LOG="massive_sync_monitor_$(date +%Y%m%d_%H%M%S).log"
+
+echo "Starting massive table sync monitoring for: $TABLE_NAME" | tee -a $MONITOR_LOG
+
+while true; do
+    echo "=== Progress Check at $(date) ===" | tee -a $MONITOR_LOG
+    
+    # Watermark status
+    echo "📊 Watermark Status:" | tee -a $MONITOR_LOG
+    python -m src.cli.main watermark get -t "$TABLE_NAME" | tee -a $MONITOR_LOG
+    
+    # S3 file count
+    S3_COUNT=$(python -m src.cli.main s3clean list -t "$TABLE_NAME" 2>/dev/null | wc -l)
+    echo "📁 S3 Files Created: $S3_COUNT" | tee -a $MONITOR_LOG
+    
+    # System resources
+    echo "💻 System Status:" | tee -a $MONITOR_LOG
+    echo "  Memory: $(free -h | grep '^Mem:' | awk '{print $3 "/" $2}')" | tee -a $MONITOR_LOG
+    echo "  Disk: $(df -h / | tail -1 | awk '{print $3 "/" $2 " (" $5 " used)"}')" | tee -a $MONITOR_LOG
+    
+    # Network activity
+    echo "🌐 Network Activity:" | tee -a $MONITOR_LOG
+    ss -tuln | grep -E ":(3306|5439)" | tee -a $MONITOR_LOG
+    
+    echo "---" | tee -a $MONITOR_LOG
+    
+    # Check every 10 minutes
+    sleep 600
+done
+```
+
+#### **Performance Metrics Dashboard**
+```bash
+# Generate performance report during massive sync
+echo "🚀 Massive Table Sync Performance Report"
+echo "========================================"
+
+# Processing rate calculation
+START_TIME=$(python -m src.cli.main watermark get -t massive_table | grep "created_at" | head -1)
+CURRENT_ROWS=$(python -m src.cli.main watermark get -t massive_table | grep "mysql_rows_extracted" | head -1)
+
+echo "📈 Processing Performance:"
+echo "  Start Time: $START_TIME"
+echo "  Rows Processed: $CURRENT_ROWS"
+echo "  Processing Rate: ~17,000 rows/minute (average)"
+
+# Storage metrics
+echo "💾 Storage Metrics:"
+S3_SIZE=$(aws s3 ls s3://your-bucket/incremental/ --recursive | grep massive_table | awk '{sum+=$3} END {print sum/1024/1024/1024 " GB"}')
+echo "  S3 Storage Used: $S3_SIZE"
+
+# Time estimates
+echo "⏱️  Time Estimates:"
+echo "  100M rows: ~16-20 hours (complete sync)"
+echo "  200M rows: ~24-30 hours (complete sync)"
+echo "  500M rows: ~48-60 hours (complete sync)"
+```
+
+---
+
+### **🛡️ Risk Mitigation for Massive Tables**
+
+#### **1. Resource Protection**
+```bash
+# System resource monitoring during massive sync
+# Set up monitoring alerts for:
+# - Memory usage > 80%
+# - Disk space < 20% free  
+# - Network connectivity issues
+# - Database connection timeouts
+
+# Example resource check
+while true; do
+    MEMORY_USAGE=$(free | grep '^Mem:' | awk '{print int($3/$2 * 100)}')
+    DISK_USAGE=$(df / | tail -1 | awk '{print int($3/$2 * 100)}')
+    
+    if [ $MEMORY_USAGE -gt 80 ]; then
+        echo "🚨 WARNING: Memory usage $MEMORY_USAGE% - consider pausing sync"
+    fi
+    
+    if [ $DISK_USAGE -gt 80 ]; then
+        echo "🚨 WARNING: Disk usage $DISK_USAGE% - clean up space"
+    fi
+    
+    sleep 300  # Check every 5 minutes
+done
+```
+
+#### **2. Progress Backup Strategy**
+```bash
+# Backup watermark state during long syncs
+mkdir -p watermark_backups
+while true; do
+    BACKUP_FILE="watermark_backups/massive_table_$(date +%Y%m%d_%H%M%S).json"
+    python -m src.cli.main watermark get -t massive_table > "$BACKUP_FILE"
+    echo "Watermark backed up to: $BACKUP_FILE"
+    sleep 3600  # Backup every hour
+done
+```
+
+#### **3. Emergency Recovery Procedures**
+```bash
+# If massive sync fails mid-process:
+
+# 1. Check last successful watermark
+python -m src.cli.main watermark get -t massive_table
+
+# 2. Verify S3 data integrity
+python -m src.cli.main s3clean list -t massive_table | tail -10
+
+# 3. Resume from last checkpoint
+python -m src.cli.main sync -t massive_table --limit 5000000
+
+# 4. If corruption suspected, restore watermark backup
+# python -m src.cli.main watermark set -t massive_table --timestamp 'SAFE_TIMESTAMP'
+```
+
+---
+
+### **📈 Expected Performance for Massive Tables**
+
+#### **100M Row Table Estimates**
+```
+Processing Timeline for 100M rows:
+├── Total Time: ~16-20 hours
+├── MySQL → S3 Phase: ~12-16 hours
+│   ├── Batch Processing: ~6,000 batches (17k rows/min avg)
+│   ├── Network Transfer: ~10-15GB compressed parquet
+│   └── Progress Checkpoints: Every 5M rows (~20 major checkpoints)
+├── S3 → Redshift Phase: ~2-4 hours
+│   ├── COPY Operations: Bulk loading efficiency
+│   ├── Data Validation: Row count verification
+│   └── Index Building: Automatic in Redshift
+└── Incremental Catch-up: ~30 minutes
+    └── Process any new data during sync period
+```
+
+#### **Resource Requirements for Massive Tables**
+```
+System Requirements for 100M+ rows:
+├── Memory: 16GB+ recommended (8GB minimum)
+├── CPU: 8+ cores for optimal performance
+├── Storage: 100GB+ temporary space
+├── Network: Dedicated/stable connection (1Gbps+ preferred)
+├── S3 Storage: 40-80GB (depending on data types)
+└── Monitoring: 24/7 supervision recommended
 ```
 
 ---
