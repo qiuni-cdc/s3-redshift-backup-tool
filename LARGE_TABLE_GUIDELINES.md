@@ -125,10 +125,17 @@ Next backup starts from: WHERE update_at > watermark_timestamp
   "redshift_rows_loaded": 1250000,                       // ← Verification
   "backup_strategy": "sequential",                        // ← Strategy used
   "s3_file_count": 250,                                  // ← Files created
+  "processed_s3_files": [                                // ← NEW: File tracking
+    "s3://bucket/path/file1.parquet",
+    "s3://bucket/path/file2.parquet"
+  ],
   "created_at": "2025-08-14T20:58:18Z",                 // ← First backup
   "updated_at": "2025-08-14T22:45:33Z"                  // ← Last update
 }
 ```
+
+**New Field (August 2025):**
+- **`processed_s3_files`**: Prevents duplicate loading of S3 files to Redshift
 
 ### **Watermark Best Practices**
 
@@ -169,6 +176,32 @@ python -m src.cli.main s3clean list -t large_table
 ```
 
 ### **Watermark Data Loss Prevention**
+
+#### **🐛 Critical Bug Fixes Applied (August 2025)**
+
+**Fixed Watermark Timestamp Calculation:**
+```python
+# ❌ BEFORE (Bug): Used MAX timestamp from ALL data in time range
+SELECT MAX(update_at) FROM table WHERE update_at > watermark
+
+# ✅ AFTER (Fixed): Uses MAX timestamp from ONLY extracted rows  
+SELECT MAX(update_at) FROM (
+    SELECT update_at FROM table 
+    WHERE update_at > watermark 
+    ORDER BY update_at, ID 
+    LIMIT rows_extracted
+) as extracted_data
+```
+
+**Impact**: Watermarks now accurately reflect the last processed row, preventing data gaps.
+
+**Fixed S3 File Deduplication:**
+```python
+# ❌ BEFORE: Could re-load previously processed S3 files
+# ✅ AFTER: Tracks processed_s3_files to prevent duplicates
+```
+
+**Impact**: Eliminates duplicate data in incremental syncs.
 
 #### **Atomic Updates**
 ```
@@ -933,5 +966,11 @@ System Requirements for 100M+ rows:
 - **Troubleshooting**: This document's troubleshooting section
 
 ---
+
+---
+
+*Last Updated: August 15, 2025*  
+*Status: ✅ Updated with critical watermark fixes and S3 deduplication*  
+*All guidelines now reflect the bug-free production system*
 
 *🤖 Generated with [Claude Code](https://claude.ai/code) - Production-ready guidelines for large table backup operations*
