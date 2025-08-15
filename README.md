@@ -68,7 +68,7 @@ This repository implements **comprehensive credential protection**:
 
 ## ⚡ Features
 
-- **Multiple Backup Strategies**: Sequential, inter-table parallel, and intra-table parallel processing
+- **Multiple Backup Strategies**: Sequential and inter-table parallel processing
 - **Incremental Processing**: High-watermark based incremental data processing  
 - **Production Ready**: Proper error handling, logging, monitoring, and testing
 - **Configurable**: Environment-based configuration with validation
@@ -119,7 +119,6 @@ Copy `.env.template` to `.env` and configure:
                     │  Backup System  │
                     │  - Sequential   │
                     │  - Inter-table  │
-                    │  - Intra-table  │
                     └─────────────────┘
 ```
 

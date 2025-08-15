@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="cryptogra
 from src.config.settings import AppConfig
 from src.backup.sequential import SequentialBackupStrategy
 from src.backup.inter_table import InterTableBackupStrategy
-from src.backup.intra_table import IntraTableBackupStrategy
+# from src.backup.intra_table import IntraTableBackupStrategy  # Disabled: complex with bugs
 from src.utils.logging import setup_logging, configure_logging_from_config
 from src.utils.exceptions import BackupSystemError, ConfigurationError
 from src.core.connections import ConnectionManager
@@ -31,7 +31,7 @@ from src.core.connections import ConnectionManager
 STRATEGIES = {
     'sequential': SequentialBackupStrategy,
     'inter-table': InterTableBackupStrategy,
-    'intra-table': IntraTableBackupStrategy
+    # 'intra-table': IntraTableBackupStrategy  # Disabled: complex with boundary bugs
 }
 
 
@@ -116,7 +116,7 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
 @click.option('--tables', '-t', multiple=True, required=True, 
               help='Tables to backup (format: schema.table_name)')
 @click.option('--strategy', '-s', 
-              type=click.Choice(['sequential', 'inter-table', 'intra-table']),
+              type=click.Choice(['sequential', 'inter-table']),
               default='sequential', 
               help='Backup strategy to use')
 @click.option('--max-workers', type=int, 
@@ -136,7 +136,7 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
     Examples:
         s3-backup backup -t settlement.settlement_normal_delivery_detail -s sequential
         s3-backup backup -t table1 -t table2 -s inter-table --max-workers 8
-        s3-backup backup -t large_table -s intra-table --estimate
+        s3-backup backup -t table1 -s sequential --estimate
     """
     config = ctx.obj['config']
     backup_logger = ctx.obj['backup_logger']
@@ -261,7 +261,7 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
 @click.option('--tables', '-t', multiple=True, required=True, 
               help='Tables to sync (format: schema.table_name)')
 @click.option('--strategy', '-s', 
-              type=click.Choice(['sequential', 'inter-table', 'intra-table']),
+              type=click.Choice(['sequential', 'inter-table']),
               default='sequential', 
               help='Backup strategy to use')
 @click.option('--max-workers', type=int, 
@@ -671,7 +671,7 @@ def status(ctx):
 
 
 @cli.command()
-@click.option('--strategy', type=click.Choice(['sequential', 'inter-table', 'intra-table']), 
+@click.option('--strategy', type=click.Choice(['sequential', 'inter-table']), 
               help='Show info for specific strategy')
 @click.pass_context
 def info(ctx, strategy: str):

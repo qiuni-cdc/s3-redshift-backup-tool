@@ -29,12 +29,14 @@ SELECT * FROM target_table LIMIT 5;
 - ❌ Claiming testing passed without actual data verification
 - ❌ Making assumptions about data movement without proof
 
+### 🧪 **Testing Memories**
+- Please test with real env when the change impact the core functionality
+
 ## Project Overview
 
-This system implements three backup strategies:
-- **Sequential Backup**: Process tables one by one
-- **Inter-table Parallel**: Process multiple tables simultaneously 
-- **Intra-table Parallel**: Split large tables into time-based chunks
+This system implements two backup strategies:
+- **Sequential Backup**: Process tables one by one (recommended for most use cases)
+- **Inter-table Parallel**: Process multiple tables simultaneously
 
 ## Complete MySQL → S3 → Redshift Pipeline
 
@@ -73,7 +75,7 @@ Watermark Components:
 ├── last_mysql_extraction_time    # When backup process ran
 ├── mysql_status                  # pending/success/failed
 ├── redshift_status              # pending/success/failed  
-├── backup_strategy              # sequential/inter-table/intra-table/manual_cli
+├── backup_strategy              # sequential/inter-table/manual_cli
 └── metadata                     # Additional tracking information
 ```
 

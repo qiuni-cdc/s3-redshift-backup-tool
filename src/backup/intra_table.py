@@ -313,8 +313,8 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
             True if table processed successfully
         """
         try:
-            # Get last watermark
-            last_watermark = self.watermark_manager.get_last_watermark()
+            # Get last watermark for this specific table
+            last_watermark = self.get_table_watermark_timestamp(table_name)
             
             # Calculate time chunks
             time_chunks = self.calculate_time_chunks(
@@ -354,6 +354,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
                         chunk_end,
                         chunk_index + 1,
                         len(time_chunks),
+                        current_timestamp,
                         limit
                     ): (chunk_index, chunk_start, chunk_end)
                     for chunk_index, (chunk_start, chunk_end) in enumerate(time_chunks)
@@ -447,6 +448,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
         chunk_end: str,
         chunk_index: int,
         total_chunks: int,
+        current_timestamp: str,
         limit: Optional[int] = None
     ) -> Dict[str, Any]:
         """
@@ -498,7 +500,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
             # Create dedicated database session for this thread using shared SSH tunnel
             with self.thread_safe_database_session() as db_conn:
                 chunk_result = self._process_single_chunk(
-                    db_conn, table_name, chunk_start, chunk_end, chunk_id, thread_id, limit
+                    db_conn, table_name, chunk_start, chunk_end, chunk_id, thread_id, current_timestamp, limit
                 )
                 
                 chunk_duration = time.time() - chunk_start_time
@@ -539,6 +541,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
         chunk_end: str,
         chunk_id: str,
         thread_id: int,
+        current_timestamp: str,
         limit: Optional[int] = None
     ) -> Dict[str, Any]:
         """
@@ -604,7 +607,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
                 # Process batch with chunk-specific S3 key
                 batch_success = self._process_chunk_batch(
                     batch_data, table_name, f"{chunk_id}_batch_{batch_id}", 
-                    chunk_end, thread_id  # Use chunk_end as timestamp for S3 key
+                    current_timestamp, thread_id  # Use current_timestamp for consistent S3 key
                 )
                 
                 if not batch_success:

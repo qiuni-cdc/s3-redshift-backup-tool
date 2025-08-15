@@ -27,7 +27,7 @@ The S3 to Redshift Backup System is a production-grade data pipeline that:
 - **Provides multiple strategies** for different data sizes and requirements
 
 ### Key Features
-- ✅ **Three backup strategies** (Sequential, Inter-table Parallel, Intra-table Parallel)
+- ✅ **Two backup strategies** (Sequential, Inter-table Parallel)
 - ✅ **Complete S3 to Redshift pipeline** with CSV conversion method
 - ✅ **Latest status views** for parcel tracking deduplication
 - ✅ **Production-ready table structure** with performance optimizations
@@ -200,7 +200,7 @@ python -m src.cli.main backup [OPTIONS]
 
 **Options:**
 - `-t, --tables` (required): Table names to backup
-- `-s, --strategy` (required): Backup strategy (sequential|inter-table|intra-table)
+- `-s, --strategy` (required): Backup strategy (sequential|inter-table)
 - `--dry-run`: Show what would be backed up without actually doing it
 - `--estimate`: Show time estimates before starting
 - `--config-file`: Use custom configuration file
@@ -220,10 +220,10 @@ python -m src.cli.main backup \
   -t settlement.settlement_claim_detail \
   -s inter-table
 
-# Large table with chunking
+# Large table processing
 python -m src.cli.main backup \
   -t settlement.settlement_normal_delivery_detail \
-  -s intra-table
+  -s sequential
 
 # Dry run with time estimation
 python -m src.cli.main backup \
@@ -255,7 +255,7 @@ python -m src.cli.main sync [OPTIONS]
 
 **Options:**
 - `-t, --tables` (required): Table names to sync
-- `-s, --strategy`: Backup strategy (sequential|inter-table|intra-table)
+- `-s, --strategy`: Backup strategy (sequential|inter-table)
 - `--backup-only`: Only run backup (MySQL → S3), skip Redshift loading
 - `--redshift-only`: Only run Redshift loading (S3 → Redshift), skip backup
 - `--limit`: Limit rows per query (for testing/development)
@@ -482,21 +482,14 @@ python -m src.cli.main backup \
 - ⚠️ Higher memory and connection usage
 - 🎯 Use when: Multiple tables need backup, system can handle parallelism
 
-### 3. Intra-table Parallel Strategy
-**Best for:** Very large tables (millions of rows), time-series data
+### Strategy Recommendation
 
-```bash
-python -m src.cli.main backup \
-  -t settlement.settlement_normal_delivery_detail \
-  -s intra-table
-```
+**For most use cases, use `sequential` strategy** - it's reliable, fast, and handles all table sizes efficiently.
 
-**Characteristics:**
-- ✅ Splits large tables into time-based chunks
-- ✅ Processes chunks in parallel
-- ✅ Excellent for huge datasets
-- ⚠️ More complex coordination
-- 🎯 Use when: Single table is very large, time-series data
+**Use `inter-table` only when:**
+- You have multiple tables to backup simultaneously
+- Your system can handle parallel connections
+- You need to optimize total processing time across multiple tables
 
 ### Strategy Selection Guide
 
@@ -504,7 +497,7 @@ python -m src.cli.main backup \
 |------------|------------------|---------------------|---------|
 | Small-Medium | 1 | Sequential | Single claim table |
 | Small-Medium | 2-10 | Inter-table | Multiple settlement tables |
-| Large | 1 | Intra-table | Delivery detail table |
+| Large | 1 | Sequential | Delivery detail table |
 | Mixed | Mixed | Sequential (safe) | Production environments |
 
 ---
@@ -1172,7 +1165,7 @@ BACKUP_MAX_WORKERS=4
 BACKUP_BATCH_SIZE=50000
 BACKUP_MAX_WORKERS=4
 BACKUP_NUM_CHUNKS=8
-# Strategy: intra-table
+# Strategy: sequential (recommended)
 ```
 
 #### Network Optimization
