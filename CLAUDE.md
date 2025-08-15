@@ -171,3 +171,22 @@ python -m src.cli.main s3clean clean -t settlement.table_name --force
 - **Error Recovery**: Robust handling of network failures and partial loads
 - **Monitoring Support**: Integration with external monitoring systems
 - **Automated Testing**: Full test coverage with CI/CD integration
+
+---
+
+## 📚 **Documentation Library**
+
+### **📊 Production Guides**
+- **`LARGE_TABLE_GUIDELINES.md`** - Complete guidelines for backing up large tables (1M+ rows)
+- **`WATERMARK_DEEP_DIVE.md`** - Technical deep-dive into watermark-based data loss prevention  
+- **`ORPHANED_FILES_HANDLING.md`** - Managing intermediate files during resume operations
+
+### **🔧 User References**
+- **`USER_MANUAL.md`** - Comprehensive CLI usage guide
+- **`WATERMARK_CLI_GUIDE.md`** - Watermark management commands
+- **`README.md`** - Project overview and quick start
+
+### **🚀 Recommended Reading Path**
+1. **Basic Usage**: `USER_MANUAL.md` 
+2. **Large Tables**: `LARGE_TABLE_GUIDELINES.md`
+3. **Advanced Topics**: `WATERMARK_DEEP_DIVE.md`
