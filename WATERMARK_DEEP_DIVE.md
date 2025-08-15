@@ -64,6 +64,10 @@ s3://your-bucket/watermarks/
   "redshift_status": "success",
   "backup_strategy": "sequential",
   "s3_file_count": 250,
+  "processed_s3_files": [
+    "s3://bucket/path/file1.parquet",
+    "s3://bucket/path/file2.parquet"
+  ],
   "last_error": null,
   "created_at": "2025-08-14T20:58:18.585905Z",
   "updated_at": "2025-08-14T22:45:33.970251Z",
@@ -74,6 +78,11 @@ s3://your-bucket/watermarks/
   }
 }
 ```
+
+**New Field Added (August 2025):**
+- **`processed_s3_files`**: List of S3 files already loaded to Redshift
+- **Purpose**: Prevents duplicate loading of the same S3 files
+- **Impact**: Eliminates duplicate data in incremental syncs
 
 ---
 
@@ -116,6 +125,40 @@ def process_batch_safe(batch_data):
         log.error(f"Batch failed: {e}")
         return False
 ```
+
+### **🐛 Critical Bug Fixes Applied (August 2025)**
+
+**Fixed Watermark Timestamp Calculation:**
+```python
+# ❌ BEFORE (Bug): Used MAX from ALL data in time range
+def get_watermark_timestamp_old(table_name, last_watermark):
+    query = f"""
+    SELECT MAX(update_at) 
+    FROM {table_name} 
+    WHERE update_at > '{last_watermark}' 
+    AND update_at <= NOW()
+    """
+    # Problem: Returns future timestamps not yet extracted
+    
+# ✅ AFTER (Fixed): Uses MAX from ONLY extracted rows
+def get_watermark_timestamp_fixed(table_name, last_watermark, limit):
+    query = f"""
+    SELECT MAX(update_at) as max_update_at 
+    FROM (
+        SELECT update_at
+        FROM {table_name} 
+        WHERE update_at > '{last_watermark}' 
+        ORDER BY update_at, ID
+        LIMIT {limit}
+    ) as extracted_rows
+    """
+    # Solution: Watermark reflects actual last processed row
+```
+
+**Impact of Fix:**
+- ✅ **Accurate Watermarks**: Now reflects actual data extracted
+- ✅ **Predictable Progression**: Watermark advances with actual work done
+- ✅ **No Data Gaps**: Prevents skipping unprocessed data
 
 ### **2. Dual-Stage Tracking**
 
