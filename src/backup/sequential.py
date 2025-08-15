@@ -268,15 +268,20 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 table_name, total_rows_processed, batch_id, table_duration
             )
             
-            # Get max data timestamp from processed data for watermark
+            # Get max data timestamp from ACTUALLY EXTRACTED data for watermark
             max_data_timestamp = None
             if total_rows_processed > 0:
-                # Get last batch to find max timestamp
+                # Get the exact same query as backup, but only get the MAX timestamp from extracted rows
+                # This ensures watermark matches the last row actually processed
                 cursor.execute(f"""
                     SELECT MAX(`update_at`) as max_update_at 
-                    FROM {table_name} 
-                    WHERE `update_at` > '{last_watermark}' 
-                    AND `update_at` <= '{current_timestamp}'
+                    FROM (
+                        SELECT `update_at`
+                        FROM {table_name} 
+                        WHERE `update_at` > '{last_watermark}' 
+                        ORDER BY `update_at`, `ID`
+                        LIMIT {total_rows_processed}
+                    ) as extracted_rows
                 """)
                 result = cursor.fetchone()
                 if result and result.get('max_update_at'):

@@ -98,7 +98,7 @@ class GeminiRedshiftLoader:
             if not s3_files:
                 logger.warning(f"No S3 parquet files found for {table_name}")
                 # This might be OK if no new data, set success
-                self._set_success_status(table_name, load_start_time, 0)
+                self._set_success_status(table_name, load_start_time, 0, [])
                 return True
             
             logger.info(f"Found {len(s3_files)} S3 parquet files for {table_name}")
@@ -125,8 +125,8 @@ class GeminiRedshiftLoader:
                 self._set_error_status(table_name, "All COPY operations failed")
                 return False
             
-            # Step 5: Update success status
-            self._set_success_status(table_name, load_start_time, total_rows_loaded)
+            # Step 5: Update success status with processed files list
+            self._set_success_status(table_name, load_start_time, total_rows_loaded, s3_files)
             
             logger.info(f"Gemini Redshift load completed for {table_name}: {total_rows_loaded} rows from {successful_files}/{len(s3_files)} files")
             return True
@@ -255,11 +255,30 @@ class GeminiRedshiftLoader:
             parquet_files = []
             filtered_files = []
             
+            # Get list of already processed files to prevent duplicates
+            processed_files = []
+            if watermark and watermark.processed_s3_files:
+                processed_files = watermark.processed_s3_files
+                logger.info(f"Found {len(processed_files)} previously processed files to exclude")
+            else:
+                logger.info(f"No previously processed files to exclude")
+            
             for obj in response.get('Contents', []):
                 key = obj['Key']
+                logger.debug(f"Examining S3 object: {key}")
+                
                 # Filter for parquet files that match our table name
                 if key.endswith('.parquet') and clean_table_name in key:
                     parquet_files.append(key)
+                    s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
+                    logger.debug(f"Found matching parquet file: {key} -> {s3_uri}")
+                    
+                    # CRITICAL: Skip files that were already processed
+                    if s3_uri in processed_files:
+                        logger.debug(f"Skipping file (already processed): {key}")
+                        continue
+                    
+                    logger.debug(f"File not in processed list, checking time filters...")
                     
                     # Apply timestamp filtering for incremental loading
                     file_modified_time = obj['LastModified']
@@ -269,7 +288,6 @@ class GeminiRedshiftLoader:
                     if session_start and session_end:
                         # Session-based filtering: narrow time window around extraction
                         if session_start <= file_modified_time <= session_end:
-                            s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
                             filtered_files.append(s3_uri)
                             logger.debug(f"Including file (current session): {key} - modified {file_modified_time}")
                         else:
@@ -277,14 +295,12 @@ class GeminiRedshiftLoader:
                     elif cutoff_time:
                         # Watermark-based filtering: files after watermark timestamp
                         if file_modified_time > cutoff_time:
-                            s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
                             filtered_files.append(s3_uri)
                             logger.debug(f"Including file (after watermark): {key} - modified {file_modified_time}")
                         else:
                             logger.debug(f"Skipping file (before watermark): {key} - modified {file_modified_time}")
                     else:
                         # No cutoff - include all files (full load)
-                        s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
                         filtered_files.append(s3_uri)
                         logger.debug(f"Including file (full load): {key}")
             
@@ -398,14 +414,15 @@ class GeminiRedshiftLoader:
             logger.error(f"Failed to connect to Redshift: {e}")
             raise DatabaseError(f"Redshift connection failed: {e}")
     
-    def _set_success_status(self, table_name: str, load_time: datetime, rows_loaded: int):
-        """Set successful load status in watermark"""
+    def _set_success_status(self, table_name: str, load_time: datetime, rows_loaded: int, processed_files: List[str] = None):
+        """Set successful load status in watermark with processed files tracking"""
         try:
             self.watermark_manager.update_redshift_watermark(
                 table_name=table_name,
                 load_time=load_time,
                 rows_loaded=rows_loaded,
-                status='success'
+                status='success',
+                processed_files=processed_files or []
             )
         except Exception as e:
             logger.warning(f"Failed to update success watermark for {table_name}: {e}")

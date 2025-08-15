@@ -31,6 +31,7 @@ class S3TableWatermark:
     redshift_status: str = 'pending'
     backup_strategy: str = 'sequential'
     s3_file_count: int = 0
+    processed_s3_files: Optional[List[str]] = None  # Track loaded S3 files to prevent duplicates
     last_error: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -173,6 +174,7 @@ class S3WatermarkManager:
         load_time: datetime,
         rows_loaded: int = 0,
         status: str = 'success',
+        processed_files: Optional[List[str]] = None,
         error_message: Optional[str] = None
     ) -> bool:
         """Update Redshift load watermark"""
@@ -187,6 +189,15 @@ class S3WatermarkManager:
             watermark.redshift_rows_loaded = rows_loaded
             watermark.redshift_status = status
             watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
+            
+            # Track processed S3 files to prevent re-loading
+            if processed_files:
+                if not watermark.processed_s3_files:
+                    watermark.processed_s3_files = []
+                # Add new files to the list (avoid duplicates)
+                for file_path in processed_files:
+                    if file_path not in watermark.processed_s3_files:
+                        watermark.processed_s3_files.append(file_path)
             
             if error_message:
                 watermark.last_error = error_message
