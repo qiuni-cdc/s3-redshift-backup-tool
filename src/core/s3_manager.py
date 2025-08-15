@@ -259,47 +259,57 @@ class S3Manager:
         s3_key: str,
         schema: Optional[pa.Schema] = None,
         use_schema_alignment: bool = True,
+        compression: str = "snappy",
         **kwargs
     ) -> bool:
         """
-        Upload pandas DataFrame as parquet to S3 with Feature 1 schema alignment.
+        Upload DataFrame using PoC-compatible approach.
+        
+        Uses the exact approach from the working PoC for Redshift COPY compatibility.
         
         Args:
             df: Pandas DataFrame to upload
             s3_key: S3 key for the upload
-            schema: Optional PyArrow schema for validation and alignment
-            use_schema_alignment: Enable Feature 1 schema alignment (default: True)
-            **kwargs: Additional arguments passed to upload_parquet
+            schema: Optional PyArrow schema from PoC
+            use_schema_alignment: Enable PoC alignment (default: True)
+            compression: Compression method
+            **kwargs: Additional arguments
         
         Returns:
             True if upload successful
         """
         try:
-            # Feature 1: Schema Alignment for Redshift Compatibility
-            if schema and use_schema_alignment:
-                logger.debug("Using Feature 1 schema alignment", s3_key=s3_key)
-                # Apply Feature 1 schema alignment for perfect Redshift compatibility
-                table = self.align_dataframe_to_redshift_schema(df, schema)
-            elif schema:
-                logger.debug("Using legacy schema validation", s3_key=s3_key)
-                # Legacy approach - basic schema validation only
+            logger.info(
+                "Starting PoC-compatible DataFrame upload",
+                s3_key=s3_key,
+                rows=len(df),
+                columns=len(df.columns),
+                use_schema_alignment=use_schema_alignment,
+                compression=compression
+            )
+            
+            # Use PoC schema alignment if enabled and schema provided
+            if use_schema_alignment and schema:
+                logger.info("Applying PoC schema alignment")
+                df = self._align_dataframe_to_poc_schema(df, schema)
+            
+            # Convert DataFrame to PyArrow table
+            if schema:
                 table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
             else:
-                logger.debug("No schema provided - using automatic inference", s3_key=s3_key)
-                # No schema - use automatic inference
                 table = pa.Table.from_pandas(df, preserve_index=False)
             
-            # Skip DataFrame metadata for Redshift compatibility
-            # Remove any existing metadata parameter to avoid issues
-            kwargs.pop('metadata', None)
-            
-            return self.upload_parquet(table, s3_key, **kwargs)
+            # Upload with PoC-compatible settings
+            return self._upload_table_to_s3_poc(table, s3_key, compression)
             
         except Exception as e:
-            logger.error("DataFrame upload failed", error=str(e), 
-                        use_schema_alignment=use_schema_alignment,
-                        has_schema=schema is not None)
-            raise S3Error(f"DataFrame upload failed: {e}")
+            logger.error(
+                "PoC DataFrame upload failed",
+                s3_key=s3_key,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            return False
     
     def list_backup_files(
         self,
@@ -515,100 +525,164 @@ class S3Manager:
             'failed_uploads': 0
         }
     
-    def align_dataframe_to_redshift_schema(self, df: pd.DataFrame, schema: pa.Schema) -> pa.Table:
+    def _align_dataframe_to_poc_schema(self, df: pd.DataFrame, schema: pa.Schema) -> pd.DataFrame:
         """
-        Feature 1: Align DataFrame to Redshift-compatible schema with robust error handling.
+        Align DataFrame using the proven PoC approach.
         
-        This function ensures perfect schema compatibility by:
-        1. Reordering columns to match target schema
-        2. Adding missing columns as nulls
-        3. Removing extra columns not in schema
-        4. Type casting with fallback to nulls for incompatible data
+        This method replicates the exact schema alignment from the working PoC:
+        1. Use explicit Decimal conversion for decimal types
+        2. Simple type conversion without complex type checking
+        3. Direct pandas to PyArrow conversion
         
         Args:
-            df: Source DataFrame to align
-            schema: Target PyArrow schema for Redshift compatibility
+            df: Source DataFrame
+            schema: Target PyArrow schema
             
         Returns:
-            PyArrow Table aligned to target schema
-            
-        Raises:
-            S3Error: If schema alignment fails completely
+            Aligned DataFrame compatible with PoC approach
         """
-        import time
-        start_time = time.time()
-        
         try:
-            logger.debug("Starting Feature 1 schema alignment", 
-                        source_columns=len(df.columns), 
-                        target_columns=len(schema))
+            logger.debug("Starting PoC schema alignment", target_fields=len(schema))
             
-            # Get target column names and types
-            target_columns = [field.name for field in schema]
-            source_columns = df.columns.tolist()
+            # Import decimal for proper decimal handling
+            import decimal
             
-            # Performance tracking
-            columns_casted = 0
-            columns_missing = 0
-            columns_nullified = 0
+            # Create copy of dataframe
+            aligned_df = df.copy()
             
-            # Step 1: Reorder and select columns
-            aligned_df = pd.DataFrame()
-            
+            # Apply PoC type conversions
             for field in schema:
                 col_name = field.name
                 target_type = field.type
                 
-                if col_name in df.columns:
-                    # Column exists - perform type conversion
-                    try:
-                        if pa.types.is_integer(target_type):
-                            aligned_df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('Int64')
-                        elif pa.types.is_floating(target_type):
-                            aligned_df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('float64')
-                        elif pa.types.is_decimal(target_type):
-                            # Special handling for decimal types - convert to float for Redshift compatibility
-                            aligned_df[col_name] = pd.to_numeric(df[col_name], errors='coerce').astype('float64')
-                        elif pa.types.is_string(target_type):
-                            aligned_df[col_name] = df[col_name].astype('string')
-                        elif pa.types.is_timestamp(target_type):
-                            aligned_df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-                        elif pa.types.is_date(target_type):
-                            aligned_df[col_name] = pd.to_datetime(df[col_name], errors='coerce').dt.date
-                        else:
-                            # Default: preserve as-is
-                            aligned_df[col_name] = df[col_name]
-                        
-                        columns_casted += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Type conversion failed for column {col_name}", error=str(e))
-                        aligned_df[col_name] = None
-                        columns_nullified += 1
-                else:
-                    # Column missing - add as nulls
+                if col_name not in aligned_df.columns:
+                    # Add missing column
                     aligned_df[col_name] = None
-                    columns_missing += 1
+                    continue
+                
+                # PoC conversion logic
+                if pa.types.is_decimal(target_type):
+                    # Use exact PoC decimal conversion
+                    precision = target_type.precision
+                    scale = target_type.scale
+                    
+                    def convert_to_decimal(value):
+                        if pd.isna(value) or value is None:
+                            return None
+                        try:
+                            # Convert to Decimal with proper scale
+                            decimal_val = decimal.Decimal(str(float(value)))
+                            quantizer = decimal.Decimal('0.' + '0' * scale)
+                            return decimal_val.quantize(quantizer)
+                        except (ValueError, decimal.InvalidOperation):
+                            return None
+                    
+                    aligned_df[col_name] = aligned_df[col_name].apply(convert_to_decimal)
+                
+                elif pa.types.is_timestamp(target_type):
+                    # Simple timestamp conversion
+                    aligned_df[col_name] = pd.to_datetime(aligned_df[col_name], errors='coerce')
+                
+                elif pa.types.is_integer(target_type):
+                    # Simple integer conversion
+                    aligned_df[col_name] = pd.to_numeric(aligned_df[col_name], errors='coerce').astype('Int64')
+                
+                elif pa.types.is_string(target_type):
+                    # Simple string conversion
+                    aligned_df[col_name] = aligned_df[col_name].astype(str)
+                    aligned_df[col_name] = aligned_df[col_name].replace('nan', None)
             
-            # Step 2: Convert to PyArrow Table with target schema
-            table = pa.table(aligned_df, schema=schema)
+            # Reorder columns to match schema
+            schema_columns = [field.name for field in schema]
+            aligned_df = aligned_df[schema_columns]
             
-            alignment_time = time.time() - start_time
+            logger.info(
+                "PoC schema alignment completed",
+                original_columns=len(df.columns),
+                aligned_columns=len(aligned_df.columns)
+            )
             
-            # Log performance metrics
-            logger.info("Schema alignment successful",
-                       casted=columns_casted,
-                       columns=len(schema), 
-                       missing=columns_missing,
-                       nullified=columns_nullified,
-                       rows=len(df),
-                       duration_seconds=round(alignment_time, 3))
-            
-            return table
+            return aligned_df
             
         except Exception as e:
-            error_msg = f"Feature 1 schema alignment failed: {str(e)}"
-            logger.error("Schema alignment error", error=error_msg, 
-                        source_columns=len(df.columns) if df is not None else 0,
-                        target_columns=len(schema))
-            raise S3Error(error_msg)
+            logger.error(
+                "PoC schema alignment failed",
+                error=str(e),
+                schema_fields=len(schema)
+            )
+            raise
+    
+    def _upload_table_to_s3_poc(self, table: pa.Table, s3_key: str, compression: str = "snappy") -> bool:
+        """
+        Upload PyArrow table to S3 using PoC-compatible settings.
+        
+        Uses the exact parquet generation settings from the working PoC
+        to ensure Redshift COPY compatibility.
+        
+        Args:
+            table: PyArrow table to upload
+            s3_key: S3 key for the file
+            compression: Compression method
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Create parquet file in memory
+            parquet_buffer = BytesIO()
+            
+            # PoC-compatible parquet settings for Redshift
+            writer_options = {
+                'compression': compression,
+                'use_dictionary': False,       # PoC setting
+                'write_statistics': False,     # PoC setting
+                'store_schema': False         # PoC setting
+            }
+            
+            # Write with PoC settings
+            pq.write_table(
+                table,
+                parquet_buffer,
+                **writer_options
+            )
+            
+            # Get parquet data
+            parquet_data = parquet_buffer.getvalue()
+            file_size = len(parquet_data)
+            
+            logger.info(
+                "Generated PoC-compatible parquet data",
+                s3_key=s3_key,
+                size_bytes=file_size,
+                writer_options=writer_options
+            )
+            
+            # Upload to S3
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=parquet_data,
+                ContentType='application/octet-stream'
+            )
+            
+            # Update statistics
+            self._upload_stats['total_files'] += 1
+            self._upload_stats['total_bytes'] += file_size
+            
+            logger.info(
+                "Successfully uploaded PoC-compatible file to S3",
+                s3_key=s3_key,
+                bucket=self.bucket_name,
+                size_bytes=file_size
+            )
+            
+            return True
+            
+        except Exception as e:
+            self._upload_stats['failed_uploads'] += 1
+            logger.error(
+                "PoC S3 upload failed",
+                s3_key=s3_key,
+                error=str(e)
+            )
+            return False

@@ -130,7 +130,8 @@ class WatermarkManager:
         timestamp: str,
         table_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        atomic: bool = True
+        atomic: bool = True,
+        force_backwards: bool = False
     ) -> bool:
         """
         Update the watermark timestamp.
@@ -140,6 +141,7 @@ class WatermarkManager:
             table_name: Optional table-specific watermark
             metadata: Additional metadata to store with watermark
             atomic: Whether to perform atomic update (safer but slower)
+            force_backwards: Allow setting watermark to earlier timestamp (bypasses safety check)
         
         Returns:
             True if update successful
@@ -185,8 +187,8 @@ class WatermarkManager:
                 # Atomic update: read current, compare, then update
                 old_watermark = self.get_last_watermark(table_name)
                 
-                # Validate that new watermark is not going backwards
-                if self._compare_timestamps(timestamp, old_watermark) < 0:
+                # Validate that new watermark is not going backwards (unless forced)
+                if not force_backwards and self._compare_timestamps(timestamp, old_watermark) < 0:
                     raise WatermarkError(
                         f"New watermark ({timestamp}) is earlier than current ({old_watermark})",
                         watermark_value=timestamp

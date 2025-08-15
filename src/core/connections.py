@@ -130,6 +130,79 @@ class ConnectionManager:
                 logger.info("SSH tunnel closed")
                 self._ssh_tunnel = None
     
+    @contextmanager
+    def redshift_ssh_tunnel(self) -> Generator[int, None, None]:
+        """
+        Create SSH tunnel for Redshift connection and return local port.
+        
+        Yields:
+            Local port number for the established Redshift tunnel
+            
+        Raises:
+            ConnectionError: If tunnel establishment fails
+        """
+        tunnel = None
+        try:
+            logger.info("Establishing Redshift SSH tunnel", bastion_host=self.config.redshift_ssh.bastion_host)
+            
+            # Create SSH tunnel for Redshift
+            tunnel = SSHTunnelForwarder(
+                (self.config.redshift_ssh.bastion_host, 22),
+                ssh_username=self.config.redshift_ssh.bastion_user,
+                ssh_pkey=self.config.redshift_ssh.bastion_key_path,
+                remote_bind_address=(self.config.redshift.host, self.config.redshift.port),
+                local_bind_address=('127.0.0.1', self.config.redshift_ssh.local_port)
+            )
+            
+            # Start tunnel with retry logic
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    tunnel.start()
+                    break
+                except Exception as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    logger.warning(
+                        "Redshift SSH tunnel attempt failed, retrying",
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        error=str(e)
+                    )
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
+            local_port = tunnel.local_bind_port
+            self._redshift_ssh_tunnel = tunnel
+            
+            logger.info(
+                "Redshift SSH tunnel established",
+                local_port=local_port,
+                remote_host=self.config.redshift.host,
+                remote_port=self.config.redshift.port
+            )
+            
+            # Test connectivity
+            if not self._test_tunnel_connectivity(local_port):
+                raise ConnectionError("Redshift SSH tunnel connectivity test failed")
+            
+            yield local_port
+            
+        except Exception as e:
+            if tunnel:
+                try:
+                    tunnel.stop()
+                except:
+                    pass
+            error_msg = f"Failed to establish Redshift SSH tunnel: {e}"
+            logger.error(error_msg, bastion_host=self.config.redshift_ssh.bastion_host)
+            raise_connection_error("redshift_ssh_tunnel", error_msg)
+        
+        finally:
+            if tunnel and tunnel.is_active:
+                tunnel.stop()
+                logger.info("Redshift SSH tunnel closed")
+                self._redshift_ssh_tunnel = None
+    
     def _test_tunnel_connectivity(self, local_port: int) -> bool:
         """Test if tunnel is working by attempting to connect to local port"""
         try:
@@ -406,5 +479,46 @@ class ConnectionManager:
                     health['database'] = 'OK'
         except Exception as e:
             health['database'] = f'ERROR: {str(e)}'
+        
+        # Test Redshift connectivity (if configured)
+        try:
+            if hasattr(self.config, 'redshift') and self.config.redshift.host:
+                import psycopg2
+                
+                # Use Redshift SSH tunnel if configured
+                if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.bastion_host:
+                    with self.redshift_ssh_tunnel() as local_port:
+                        conn = psycopg2.connect(
+                            host='localhost',
+                            port=local_port,
+                            database=self.config.redshift.database,
+                            user=self.config.redshift.user,
+                            password=self.config.redshift.password.get_secret_value()
+                        )
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                        cursor.close()
+                        conn.close()
+                        health['redshift'] = 'OK'
+                else:
+                    # Direct connection
+                    conn = psycopg2.connect(
+                        host=self.config.redshift.host,
+                        port=self.config.redshift.port,
+                        database=self.config.redshift.database,
+                        user=self.config.redshift.user,
+                        password=self.config.redshift.password.get_secret_value()
+                    )
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                    cursor.close()
+                    conn.close()
+                    health['redshift'] = 'OK'
+            else:
+                health['redshift'] = 'SKIPPED: Not configured'
+        except Exception as e:
+            health['redshift'] = f'ERROR: {str(e)}'
         
         return health
