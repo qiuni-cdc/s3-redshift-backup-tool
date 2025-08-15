@@ -124,14 +124,17 @@ python -m src.cli.main backup \
 ### 4. Explore Your Data
 
 ```bash
-# View S3 backup data
-python display_s3_data.py
+# View S3 backup files
+python -m src.cli.main s3clean list -t settlement.settlement_normal_delivery_detail
 
-# Comprehensive dashboard
-python backup_dashboard.py
+# Check system status and connectivity
+python -m src.cli.main status
 
-# Detailed data inspection
-python inspect_backup_data.py
+# View watermark status (comprehensive dashboard)
+python -m src.cli.main watermark get -t settlement.settlement_normal_delivery_detail
+
+# List all table watermarks
+python -m src.cli.main watermark list
 ```
 
 ---
@@ -182,9 +185,8 @@ DEBUG=false
 # Validate all configuration settings
 python -m src.cli.main config
 
-# Test specific connections
-python test_exact_colab.py  # Database connectivity
-python display_s3_data.py   # S3 connectivity
+# Test system connectivity
+python -m src.cli.main status    # Database and S3 connectivity
 ```
 
 ---
@@ -523,7 +525,7 @@ python backup_dashboard.py
 
 ```bash
 # Browse S3 backup structure
-python display_s3_data.py
+python -m src.cli.main s3clean list -t your_table_name
 ```
 
 **Shows:**
@@ -535,15 +537,24 @@ python display_s3_data.py
 ### Detailed Data Inspection
 
 ```bash
-# Inspect parquet file contents
-python inspect_backup_data.py
+# Get detailed table information including schema
+python -m src.cli.main info --strategy sequential
+
+# Check watermark details and processing history
+python -m src.cli.main watermark get -t your_table_name
+
+# Verify data integrity after sync
+python -m src.cli.main sync -t your_table_name --verify-data
+
+# Check S3 file details
+python -m src.cli.main s3clean list -t your_table_name
 ```
 
 **Provides:**
-- Schema analysis
-- Sample data preview
-- Column statistics
-- Data quality assessment
+- Strategy information and configuration
+- Watermark status and processing history
+- Data verification and row count validation
+- S3 file organization and storage details
 
 ### Log Analysis
 
@@ -806,7 +817,7 @@ pip list | grep paramiko
 **Solutions:**
 ```bash
 # Test database connectivity
-python test_exact_colab.py
+python -m src.cli.main status
 
 # Check credentials in .env file
 grep DB_ .env
@@ -825,7 +836,7 @@ python check_claim_simple.py
 **Solutions:**
 ```bash
 # Test S3 connectivity
-python display_s3_data.py
+python -m src.cli.main status
 
 # Check AWS credentials
 grep S3_ .env
@@ -1285,8 +1296,7 @@ cat > RECOVERY.md << 'EOF'
 1. Restore virtual environment: `python -m venv test_env`
 2. Install dependencies: `pip install -r requirements.txt`
 3. Restore .env configuration
-4. Test connectivity: `python test_exact_colab.py`
-5. Verify S3 access: `python display_s3_data.py`
+4. Test connectivity: `python -m src.cli.main status`
 
 ## Data Recovery
 1. List available S3 backups: `aws s3 ls s3://bucket/incremental/`
