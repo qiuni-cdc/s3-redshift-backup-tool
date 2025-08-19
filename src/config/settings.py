@@ -42,7 +42,7 @@ class SSHConfig(BaseSettings):
 
 
 class S3Config(BaseSettings):
-    """S3 storage configuration"""
+    """S3 storage configuration with performance optimizations"""
     bucket_name: str = Field(..., description="S3 bucket name")
     access_key: str = Field(..., description="AWS access key")
     secret_key: SecretStr = Field(..., description="AWS secret key")
@@ -51,6 +51,38 @@ class S3Config(BaseSettings):
     high_watermark_key: str = Field(
         "/high_watermark/last_run_timestamp.txt", 
         description="S3 key for high watermark file"
+    )
+    
+    # Performance optimization settings
+    multipart_threshold: int = Field(
+        104857600,  # 100MB in bytes
+        description="File size threshold for multipart upload (bytes)"
+    )
+    multipart_chunksize: int = Field(
+        52428800,   # 50MB in bytes
+        description="Size of each multipart upload chunk (bytes)"
+    )
+    max_concurrency: int = Field(
+        10, 
+        description="Maximum concurrent S3 upload threads"
+    )
+    max_bandwidth: Optional[int] = Field(
+        None, 
+        description="Maximum bandwidth for uploads in bytes/sec (None for unlimited)"
+    )
+    
+    # Connection and retry settings
+    max_pool_connections: int = Field(
+        20,
+        description="Maximum number of connections in the connection pool"
+    )
+    retry_max_attempts: int = Field(
+        3,
+        description="Maximum retry attempts for failed S3 operations"
+    )
+    retry_mode: str = Field(
+        "adaptive",
+        description="Retry mode: standard, adaptive, or legacy"
     )
     
     class Config:
@@ -98,12 +130,36 @@ class RedshiftConfig(BaseSettings):
 
 
 class BackupConfig(BaseSettings):
-    """Backup operation configuration"""
+    """Backup operation configuration with performance optimizations"""
     batch_size: int = Field(10000, description="Number of rows per batch")
     max_workers: int = Field(4, description="Maximum parallel workers")
-    num_chunks: int = Field(4, description="Number of time chunks for intra-table strategy")
+    num_chunks: int = Field(4, description="Number of time chunks for intra-table strategy (deprecated)")
     retry_attempts: int = Field(3, description="Number of retry attempts for failed operations")
     timeout_seconds: int = Field(300, description="Timeout for operations in seconds")
+    
+    # Memory management settings
+    memory_limit_mb: int = Field(
+        4096, 
+        description="Memory limit in MB for backup processes"
+    )
+    gc_threshold: int = Field(
+        1000, 
+        description="Number of batches before forcing garbage collection"
+    )
+    memory_check_interval: int = Field(
+        10,
+        description="Check memory usage every N batches"
+    )
+    
+    # Performance settings
+    enable_compression: bool = Field(
+        True,
+        description="Enable compression for parquet files"
+    )
+    compression_level: int = Field(
+        6,
+        description="Compression level (1-9, higher = more compression)"
+    )
     
     class Config:
         env_prefix = "BACKUP_"

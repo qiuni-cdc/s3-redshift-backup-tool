@@ -97,7 +97,11 @@ python -m src.cli.main sync -t settlement.table_name --redshift-only
 
 **3. Check Current Watermark Status:**
 ```bash
+# Basic watermark information
 python -m src.cli.main watermark get -t settlement.table_name
+
+# Show processed S3 files list
+python -m src.cli.main watermark get -t settlement.table_name --show-files
 ```
 
 ### Filtering Logic
@@ -114,6 +118,7 @@ python -m src.cli.main watermark get -t settlement.table_name
 ```bash
 # Safe exploration and preview
 python -m src.cli.main s3clean list -t table_name
+python -m src.cli.main s3clean list -t table_name --show-timestamps  # Detailed timestamps
 python -m src.cli.main s3clean clean -t table_name --dry-run
 
 # Targeted cleanup operations  

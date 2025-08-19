@@ -8,6 +8,9 @@ for all backup strategies in the S3 to Redshift backup system.
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple, Generator
 import time
+import gc
+import psutil
+import os
 from datetime import datetime, timedelta
 import pandas as pd
 import pyarrow as pa
@@ -89,6 +92,73 @@ class BackupMetrics:
         }
 
 
+class MemoryManager:
+    """Memory management utilities for backup operations"""
+    
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.memory_limit_bytes = self.config.backup.memory_limit_mb * 1024 * 1024
+        self.gc_threshold = self.config.backup.gc_threshold
+        self.check_interval = self.config.backup.memory_check_interval
+        self.batch_count = 0
+        self.process = psutil.Process(os.getpid())
+        
+    def get_memory_usage(self) -> Dict[str, float]:
+        """Get current memory usage statistics"""
+        memory_info = self.process.memory_info()
+        return {
+            'rss_mb': memory_info.rss / 1024 / 1024,
+            'vms_mb': memory_info.vms / 1024 / 1024,
+            'percent': self.process.memory_percent(),
+            'available_mb': psutil.virtual_memory().available / 1024 / 1024
+        }
+    
+    def check_memory_usage(self, batch_number: int) -> bool:
+        """
+        Check if memory usage is within limits.
+        
+        Returns:
+            True if memory usage is acceptable, False if over limit
+        """
+        if batch_number % self.check_interval != 0:
+            return True
+            
+        memory = self.get_memory_usage()
+        memory_limit_mb = self.memory_limit_bytes / 1024 / 1024
+        
+        if memory['rss_mb'] > memory_limit_mb:
+            logger.warning(
+                "Memory usage approaching limit",
+                current_mb=round(memory['rss_mb'], 2),
+                limit_mb=memory_limit_mb,
+                percent=round(memory['percent'], 2)
+            )
+            return False
+        
+        return True
+    
+    def force_gc_if_needed(self, batch_number: int):
+        """Force garbage collection based on batch count and memory usage"""
+        self.batch_count += 1
+        
+        if self.batch_count >= self.gc_threshold:
+            logger.debug("Forcing garbage collection", batches_processed=self.batch_count)
+            gc.collect()
+            self.batch_count = 0
+    
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get comprehensive memory statistics"""
+        memory = self.get_memory_usage()
+        return {
+            'current_usage_mb': round(memory['rss_mb'], 2),
+            'memory_limit_mb': self.memory_limit_bytes / 1024 / 1024,
+            'usage_percent': round(memory['percent'], 2),
+            'available_mb': round(memory['available_mb'], 2),
+            'gc_threshold': self.gc_threshold,
+            'batches_since_gc': self.batch_count
+        }
+
+
 class BaseBackupStrategy(ABC):
     """
     Abstract base class for all backup strategies.
@@ -104,6 +174,7 @@ class BaseBackupStrategy(ABC):
         self.watermark_manager = S3WatermarkManager(config)
         self.logger = get_backup_logger()
         self.metrics = BackupMetrics()
+        self.memory_manager = MemoryManager(config)
         
         # Initialize components with S3 client
         self.s3_client = None
@@ -667,10 +738,17 @@ class BaseBackupStrategy(ABC):
         """
         try:
             return self.watermark_manager.get_incremental_start_timestamp(table_name)
+        except ValueError as e:
+            # User needs to set initial watermark
+            self.logger.error(f"Watermark not found for {table_name}: {e}")
+            raise e
         except Exception as e:
             self.logger.error_occurred(e, f"watermark_retrieval_{table_name}")
-            # Fallback to default
-            return "2025-01-01 00:00:00"
+            # For other errors, suggest checking connectivity and trying again
+            raise RuntimeError(
+                f"Failed to retrieve watermark for '{table_name}' due to system error: {e}. "
+                f"Please check S3 connectivity and try again, or reset the watermark if corrupted."
+            )
     
     def cleanup_resources(self):
         """Clean up resources after backup operation"""

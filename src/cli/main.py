@@ -864,8 +864,9 @@ def config(ctx, output: str):
 @click.argument('operation', type=click.Choice(['get', 'set', 'reset', 'list']))
 @click.option('--table', '-t', help='Table name for table-specific watermark')
 @click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
+@click.option('--show-files', is_flag=True, help='Show processed S3 files list (for get operation)')
 @click.pass_context
-def watermark(ctx, operation: str, table: str, timestamp: str):
+def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool):
     """
     Manage table-specific watermark timestamps for incremental backups.
     
@@ -877,6 +878,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str):
     
     Examples:
         s3-backup watermark get -t settlement.settlement_claim_detail
+        s3-backup watermark get -t settlement.settlement_claim_detail --show-files
         s3-backup watermark set -t settlement.settlement_claim_detail --timestamp "2025-08-11 10:00:00"
         s3-backup watermark reset -t settlement.settlement_claim_detail
         s3-backup watermark list
@@ -932,6 +934,25 @@ def watermark(ctx, operation: str, table: str, timestamp: str):
                 click.echo("   🔜 Next Incremental Backup:")
                 click.echo(f"      Will start from: {start_timestamp}")
                 click.echo()
+                
+                # Show processed S3 files if requested
+                if show_files and watermark.processed_s3_files:
+                    click.echo("   📁 Processed S3 Files:")
+                    if len(watermark.processed_s3_files) > 10:
+                        click.echo(f"      Total: {len(watermark.processed_s3_files)} files")
+                        click.echo("      Recent files (last 10):")
+                        for file_path in watermark.processed_s3_files[-10:]:
+                            filename = file_path.split('/')[-1]
+                            click.echo(f"        • {filename}")
+                        click.echo(f"      ... and {len(watermark.processed_s3_files) - 10} more files")
+                    else:
+                        for file_path in watermark.processed_s3_files:
+                            filename = file_path.split('/')[-1]
+                            click.echo(f"        • {filename}")
+                    click.echo()
+                elif show_files and not watermark.processed_s3_files:
+                    click.echo("   📁 Processed S3 Files: None")
+                    click.echo()
                 
                 # Errors and Storage Info
                 if watermark.last_error:
@@ -1056,8 +1077,9 @@ def watermark(ctx, operation: str, table: str, timestamp: str):
 @click.option('--pattern', help='File pattern to match (e.g., "batch_*", "*.parquet")')
 @click.option('--dry-run', is_flag=True, help='Show what would be deleted without actually deleting')
 @click.option('--force', is_flag=True, help='Skip confirmation prompts')
+@click.option('--show-timestamps', is_flag=True, help='Show detailed timestamps for files (default: show simplified format)')
 @click.pass_context
-def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_run: bool, force: bool):
+def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_run: bool, force: bool, show_timestamps: bool):
     """
     Manage S3 backup files with safe cleanup operations.
     
@@ -1069,6 +1091,9 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
     Examples:
         # List files for specific table
         s3-backup s3clean list -t settlement.settlement_return_detail
+        
+        # List files with detailed timestamps
+        s3-backup s3clean list -t settlement.settlement_return_detail --show-timestamps
         
         # Clean all files for a table (with confirmation)
         s3-backup s3clean clean -t settlement.settlement_return_detail
@@ -1123,7 +1148,7 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                 sys.exit(1)
         
         if operation == 'list':
-            _s3_list_files(s3_client, config, table, older_than, pattern, cutoff_time)
+            _s3_list_files(s3_client, config, table, older_than, pattern, cutoff_time, show_timestamps)
             
         elif operation == 'clean':
             if not table:
@@ -1171,7 +1196,7 @@ def _parse_time_delta(time_str: str):
         return None
 
 
-def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time):
+def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, show_timestamps: bool = False):
     """List S3 files with filtering"""
     try:
         prefix = f"{config.s3.incremental_path.strip('/')}/"
@@ -1231,7 +1256,16 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
         sample_files = filtered_files[:10]
         for key, size, modified in sample_files:
             size_mb = size / 1024 / 1024
-            click.echo(f"     {key} ({size_mb:.2f} MB, {modified})")
+            filename = key.split('/')[-1]
+            
+            if show_timestamps:
+                # Show detailed format with full timestamp
+                click.echo(f"     {filename} ({size_mb:.2f} MB, {modified})")
+                click.echo(f"       Full path: {key}")
+            else:
+                # Show simplified format with just date
+                date_str = modified.strftime('%Y-%m-%d %H:%M')
+                click.echo(f"     {filename} ({size_mb:.2f} MB, {date_str})")
         
         if len(filtered_files) > 10:
             click.echo(f"     ... and {len(filtered_files) - 10} more files")

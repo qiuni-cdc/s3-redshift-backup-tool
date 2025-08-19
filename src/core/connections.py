@@ -315,20 +315,41 @@ class ConnectionManager:
             return self._s3_client
         
         try:
-            logger.info("Creating S3 client", region=self.config.s3.region)
+            logger.info("Creating optimized S3 client", region=self.config.s3.region)
             
-            # Create S3 client
+            # Import boto3 optimization components
+            from botocore.config import Config
+            
+            # Create optimized boto3 configuration
+            boto_config = Config(
+                region_name=self.config.s3.region,
+                retries={
+                    'max_attempts': self.config.s3.retry_max_attempts,
+                    'mode': self.config.s3.retry_mode
+                },
+                max_pool_connections=self.config.s3.max_pool_connections,
+                # Enable TCP keepalive for long-running connections
+                tcp_keepalive=True
+            )
+            
+            # Create optimized S3 client
             self._s3_client = boto3.client(
                 's3',
                 aws_access_key_id=self.config.s3.access_key,
                 aws_secret_access_key=self.config.s3.secret_key.get_secret_value(),
-                region_name=self.config.s3.region
+                config=boto_config
             )
             
             # Test S3 connectivity
             self._test_s3_connectivity()
             
-            logger.info("S3 client created successfully", bucket=self.config.s3.bucket_name)
+            logger.info(
+                "Optimized S3 client created successfully", 
+                bucket=self.config.s3.bucket_name,
+                multipart_threshold=f"{self.config.s3.multipart_threshold // 1024 // 1024}MB",
+                max_concurrency=self.config.s3.max_concurrency,
+                max_pool_connections=self.config.s3.max_pool_connections
+            )
             return self._s3_client
             
         except (ClientError, BotoCoreError) as e:
@@ -357,6 +378,32 @@ class ConnectionManager:
                 raise ConnectionError(f"Access denied to S3 bucket: {self.config.s3.bucket_name}")
             else:
                 raise ConnectionError(f"S3 connectivity test failed: {error_code}")
+    
+    def get_s3_transfer_config(self):
+        """
+        Get optimized S3 transfer configuration for large file uploads.
+        
+        Returns:
+            boto3.s3.transfer.TransferConfig: Optimized transfer configuration
+        """
+        from boto3.s3.transfer import TransferConfig
+        
+        transfer_config = TransferConfig(
+            multipart_threshold=self.config.s3.multipart_threshold,
+            multipart_chunksize=self.config.s3.multipart_chunksize,
+            max_concurrency=self.config.s3.max_concurrency,
+            max_bandwidth=self.config.s3.max_bandwidth,
+            use_threads=True
+        )
+        
+        logger.debug(
+            "S3 transfer config created",
+            multipart_threshold=f"{self.config.s3.multipart_threshold // 1024 // 1024}MB",
+            chunk_size=f"{self.config.s3.multipart_chunksize // 1024 // 1024}MB",
+            max_concurrency=self.config.s3.max_concurrency
+        )
+        
+        return transfer_config
     
     def create_connection_pool(self, pool_size: int = 5) -> MySQLConnectionPool:
         """

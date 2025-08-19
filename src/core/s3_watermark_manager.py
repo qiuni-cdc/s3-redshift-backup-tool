@@ -91,14 +91,41 @@ class S3WatermarkManager:
     
     def get_table_watermark(self, table_name: str) -> Optional[S3TableWatermark]:
         """
-        Get watermark for specific table.
+        Get watermark for specific table with automatic recovery from backup locations.
         
         Args:
             table_name: Name of the table (e.g., 'settlement.settlement_claim_detail')
             
         Returns:
-            S3TableWatermark object or None if not found
+            S3TableWatermark object or None if not found in any location
         """
+        # Try primary location first
+        watermark = self._get_watermark_from_primary(table_name)
+        if watermark:
+            logger.debug(f"Retrieved watermark for table {table_name} from primary location")
+            return watermark
+        
+        # Try recovery from backup locations
+        logger.info(f"Primary watermark not found for {table_name}, attempting recovery from backups")
+        watermark = self._recover_watermark_from_backups(table_name)
+        
+        if watermark:
+            logger.info(f"Successfully recovered watermark for {table_name} from backup location")
+            
+            # Restore the recovered watermark to primary location
+            try:
+                self._restore_primary_watermark(table_name, watermark)
+                logger.info(f"Restored watermark for {table_name} to primary location")
+            except Exception as e:
+                logger.warning(f"Failed to restore watermark to primary location: {e}")
+            
+            return watermark
+        
+        logger.debug(f"No watermark found for table {table_name} in any location")
+        return None
+    
+    def _get_watermark_from_primary(self, table_name: str) -> Optional[S3TableWatermark]:
+        """Get watermark from primary location"""
         try:
             s3_key = self._get_table_watermark_key(table_name)
             
@@ -108,17 +135,317 @@ class S3WatermarkManager:
             )
             
             data = json.loads(response['Body'].read().decode('utf-8'))
+            
+            # Remove backup metadata for clean watermark object
+            if 'backup_metadata' in data:
+                del data['backup_metadata']
+            
             watermark = S3TableWatermark.from_dict(data)
             
-            logger.debug(f"Retrieved watermark for table {table_name}")
-            return watermark
+            # Validate the watermark data
+            if self._validate_watermark_data(watermark):
+                return watermark
+            else:
+                logger.warning(f"Primary watermark for {table_name} failed validation")
+                return None
             
         except self.s3_client.exceptions.NoSuchKey:
-            logger.debug(f"No watermark found for table {table_name}")
             return None
         except Exception as e:
-            logger.error(f"Failed to get watermark for table {table_name}: {e}")
-            raise WatermarkError(f"Failed to retrieve watermark: {e}")
+            logger.warning(f"Failed to get primary watermark for {table_name}: {e}")
+            return None
+    
+    def _recover_watermark_from_backups(self, table_name: str) -> Optional[S3TableWatermark]:
+        """Recover watermark from backup locations in priority order"""
+        
+        # Recovery methods in priority order
+        recovery_methods = [
+            ("daily backup", self._recover_from_daily_backup),
+            ("latest session backup", self._recover_from_latest_session_backup),
+            ("any session backup", self._recover_from_any_session_backup)
+        ]
+        
+        for method_name, recovery_method in recovery_methods:
+            try:
+                logger.debug(f"Trying recovery method: {method_name}")
+                watermark = recovery_method(table_name)
+                if watermark and self._validate_watermark_data(watermark):
+                    logger.info(f"Watermark recovered successfully using {method_name}")
+                    return watermark
+                else:
+                    logger.debug(f"No valid watermark found using {method_name}")
+            except Exception as e:
+                logger.warning(f"Recovery method {method_name} failed: {e}")
+        
+        logger.error(f"All recovery methods failed for {table_name}")
+        return None
+    
+    def _recover_from_daily_backup(self, table_name: str) -> Optional[S3TableWatermark]:
+        """Recover from today's daily backup"""
+        try:
+            daily_key = self._get_daily_backup_key(table_name)
+            
+            response = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key=daily_key
+            )
+            
+            data = json.loads(response['Body'].read().decode('utf-8'))
+            
+            # Remove backup metadata
+            if 'backup_metadata' in data:
+                del data['backup_metadata']
+            
+            return S3TableWatermark.from_dict(data)
+            
+        except self.s3_client.exceptions.NoSuchKey:
+            return None
+        except Exception as e:
+            logger.debug(f"Daily backup recovery failed: {e}")
+            return None
+    
+    def _recover_from_latest_session_backup(self, table_name: str) -> Optional[S3TableWatermark]:
+        """Recover from the most recent session backup"""
+        try:
+            safe_name = table_name.replace('.', '_')
+            prefix = f"{self.watermark_prefix}backups/sessions/"
+            
+            # List all session backup directories
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=prefix,
+                Delimiter='/'
+            )
+            
+            session_dirs = []
+            for common_prefix in response.get('CommonPrefixes', []):
+                session_id = common_prefix['Prefix'].split('/')[-2]
+                session_dirs.append(session_id)
+            
+            # Sort by session ID (which includes timestamp) to get latest
+            if session_dirs:
+                latest_session = sorted(session_dirs)[-1]
+                session_key = self._get_session_backup_key(table_name, latest_session)
+                
+                response = self.s3_client.get_object(
+                    Bucket=self.bucket_name,
+                    Key=session_key
+                )
+                
+                data = json.loads(response['Body'].read().decode('utf-8'))
+                
+                # Remove backup metadata
+                if 'backup_metadata' in data:
+                    del data['backup_metadata']
+                
+                return S3TableWatermark.from_dict(data)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Latest session backup recovery failed: {e}")
+            return None
+    
+    def _recover_from_any_session_backup(self, table_name: str) -> Optional[S3TableWatermark]:
+        """Recover from any available session backup"""
+        try:
+            safe_name = table_name.replace('.', '_')
+            prefix = f"{self.watermark_prefix}backups/sessions/"
+            
+            # List all files in session backup area
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=prefix
+            )
+            
+            # Find files that match our table
+            matching_files = []
+            for obj in response.get('Contents', []):
+                if safe_name in obj['Key'] and obj['Key'].endswith('.json'):
+                    matching_files.append((obj['Key'], obj['LastModified']))
+            
+            if matching_files:
+                # Get the most recently modified file
+                latest_file = max(matching_files, key=lambda x: x[1])
+                
+                response = self.s3_client.get_object(
+                    Bucket=self.bucket_name,
+                    Key=latest_file[0]
+                )
+                
+                data = json.loads(response['Body'].read().decode('utf-8'))
+                
+                # Remove backup metadata
+                if 'backup_metadata' in data:
+                    del data['backup_metadata']
+                
+                return S3TableWatermark.from_dict(data)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Any session backup recovery failed: {e}")
+            return None
+    
+    def _validate_watermark_data(self, watermark: S3TableWatermark) -> bool:
+        """Validate that watermark data is consistent and usable"""
+        try:
+            # Check required fields exist
+            if not watermark.table_name:
+                return False
+            
+            # Check that statuses are valid
+            valid_statuses = ['pending', 'success', 'failed']
+            if watermark.mysql_status not in valid_statuses:
+                return False
+            if watermark.redshift_status not in valid_statuses:
+                return False
+            
+            # Check that extracted rows is not negative
+            if watermark.mysql_rows_extracted < 0:
+                return False
+            
+            logger.debug(f"Watermark validation passed for {watermark.table_name}")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Watermark validation failed: {e}")
+            return False
+    
+    def _restore_primary_watermark(self, table_name: str, watermark: S3TableWatermark):
+        """Restore recovered watermark to primary location"""
+        try:
+            # Add metadata indicating this is a restored watermark
+            watermark_data = watermark.to_dict()
+            watermark_data['backup_metadata'] = {
+                'restored_at': datetime.utcnow().isoformat() + 'Z',
+                'restoration_source': 'backup_recovery',
+                'backup_locations': ['primary_restored']
+            }
+            
+            primary_key = self._get_table_watermark_key(table_name)
+            
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=primary_key,
+                Body=json.dumps(watermark_data, indent=2),
+                ContentType='application/json',
+                Metadata={
+                    'table_name': watermark.table_name,
+                    'mysql_status': watermark.mysql_status,
+                    'redshift_status': watermark.redshift_status,
+                    'updated_at': watermark.updated_at or '',
+                    'backup_location': 'primary_restored',
+                    'restoration_source': 'backup_recovery'
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to restore primary watermark: {e}")
+            raise
+    
+    def get_watermark_backup_status(self, table_name: str) -> dict:
+        """Get status of all watermark backup locations for debugging"""
+        safe_name = table_name.replace('.', '_')
+        status = {
+            'table_name': table_name,
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'backup_locations': {}
+        }
+        
+        # Check primary location
+        primary_key = self._get_table_watermark_key(table_name)
+        status['backup_locations']['primary'] = self._check_backup_location(primary_key)
+        
+        # Check daily backup
+        daily_key = self._get_daily_backup_key(table_name)
+        status['backup_locations']['daily'] = self._check_backup_location(daily_key)
+        
+        # Check session backups
+        session_count = 0
+        try:
+            prefix = f"{self.watermark_prefix}backups/sessions/"
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=prefix
+            )
+            
+            for obj in response.get('Contents', []):
+                if safe_name in obj['Key'] and obj['Key'].endswith('.json'):
+                    session_count += 1
+        except:
+            pass
+        
+        status['backup_locations']['sessions'] = {
+            'status': 'available' if session_count > 0 else 'missing',
+            'count': session_count
+        }
+        
+        return status
+    
+    def _check_backup_location(self, s3_key: str) -> dict:
+        """Check if a backup location exists and get metadata"""
+        try:
+            response = self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            return {
+                'status': 'available',
+                'last_modified': response['LastModified'].isoformat(),
+                'size': response['ContentLength']
+            }
+        except self.s3_client.exceptions.NoSuchKey:
+            return {'status': 'missing'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+    
+    def cleanup_old_watermark_backups(self, days_to_keep: int = 7) -> dict:
+        """Clean up old watermark backup files"""
+        from datetime import timedelta
+        
+        cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+        cleanup_stats = {
+            'cleaned_daily_backups': 0,
+            'cleaned_session_backups': 0,
+            'errors': []
+        }
+        
+        try:
+            # Clean daily backups
+            daily_prefix = f"{self.watermark_prefix}backups/daily/"
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=daily_prefix
+            )
+            
+            for obj in response.get('Contents', []):
+                if obj['LastModified'].replace(tzinfo=None) < cutoff_date:
+                    try:
+                        self.s3_client.delete_object(Bucket=self.bucket_name, Key=obj['Key'])
+                        cleanup_stats['cleaned_daily_backups'] += 1
+                    except Exception as e:
+                        cleanup_stats['errors'].append(f"Failed to delete {obj['Key']}: {e}")
+            
+            # Clean session backups
+            sessions_prefix = f"{self.watermark_prefix}backups/sessions/"
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=sessions_prefix
+            )
+            
+            for obj in response.get('Contents', []):
+                if obj['LastModified'].replace(tzinfo=None) < cutoff_date:
+                    try:
+                        self.s3_client.delete_object(Bucket=self.bucket_name, Key=obj['Key'])
+                        cleanup_stats['cleaned_session_backups'] += 1
+                    except Exception as e:
+                        cleanup_stats['errors'].append(f"Failed to delete {obj['Key']}: {e}")
+            
+            logger.info(f"Watermark backup cleanup completed", cleanup_stats=cleanup_stats)
+            
+        except Exception as e:
+            cleanup_stats['errors'].append(f"Cleanup operation failed: {e}")
+            logger.error(f"Watermark backup cleanup failed: {e}")
+        
+        return cleanup_stats
     
     def update_mysql_watermark(
         self,
@@ -384,10 +711,13 @@ class S3WatermarkManager:
             logger.debug(f"Using incremental start timestamp for {table_name}: {timestamp}")
             return timestamp
         else:
-            # Fallback to default
-            default_timestamp = "2025-01-01 00:00:00"
-            logger.debug(f"Using default start timestamp for {table_name}: {default_timestamp}")
-            return default_timestamp
+            # No valid watermark found - require explicit user input
+            logger.warning(f"No valid watermark found for {table_name}")
+            raise ValueError(
+                f"No watermark found for table '{table_name}'. "
+                f"Please set an initial watermark using: "
+                f"python -m src.cli.main watermark set -t {table_name} --timestamp 'YYYY-MM-DD HH:MM:SS'"
+            )
     
     def get_last_watermark(self, table_name: Optional[str] = None) -> str:
         """
@@ -402,10 +732,12 @@ class S3WatermarkManager:
         if table_name:
             return self.get_incremental_start_timestamp(table_name)
         else:
-            # Return a reasonable default for global watermark queries
-            default_timestamp = "2025-01-01 00:00:00"
-            logger.debug(f"get_last_watermark called without table_name, returning default: {default_timestamp}")
-            return default_timestamp
+            # No table specified - cannot determine appropriate watermark
+            logger.warning("get_last_watermark called without table_name")
+            raise ValueError(
+                "No table name provided for watermark lookup. "
+                "Please specify a table name or use table-specific watermark methods."
+            )
     
     def get_watermark_metadata(self) -> Dict[str, Any]:
         """
@@ -487,24 +819,59 @@ class S3WatermarkManager:
             raise WatermarkError(f"Watermark deletion failed: {e}")
     
     def _save_watermark(self, watermark: S3TableWatermark) -> bool:
-        """Save watermark to S3"""
+        """Save watermark to S3 with multi-location backup"""
+        import time
+        
         try:
-            s3_key = self._get_table_watermark_key(watermark.table_name)
+            # Generate session ID for backup tracking
+            session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=s3_key,
-                Body=json.dumps(watermark.to_dict(), indent=2),
-                ContentType='application/json',
-                Metadata={
-                    'table_name': watermark.table_name,
-                    'mysql_status': watermark.mysql_status,
-                    'redshift_status': watermark.redshift_status,
-                    'updated_at': watermark.updated_at or ''
-                }
-            )
+            # Prepare watermark data with backup metadata
+            watermark_data = watermark.to_dict()
+            watermark_data['backup_metadata'] = {
+                'saved_at': datetime.utcnow().isoformat() + 'Z',
+                'session_id': session_id,
+                'backup_locations': ['primary', 'daily', 'session']
+            }
             
-            return True
+            watermark_json = json.dumps(watermark_data, indent=2)
+            
+            # Get all save locations
+            primary_key = self._get_table_watermark_key(watermark.table_name)
+            daily_key = self._get_daily_backup_key(watermark.table_name)
+            session_key = self._get_session_backup_key(watermark.table_name, session_id)
+            
+            # Save to primary location with retry
+            primary_success = self._save_with_retry(primary_key, watermark_json, watermark, location="primary")
+            
+            # Save to backup locations (don't fail if backups fail)
+            daily_success = self._save_to_backup_location(daily_key, watermark_json, watermark, location="daily")
+            session_success = self._save_to_backup_location(session_key, watermark_json, watermark, location="session")
+            
+            # Verify primary save integrity
+            verification_success = self._verify_watermark_save(primary_key, watermark)
+            
+            # Log backup results
+            backup_results = {
+                'primary': primary_success,
+                'daily': daily_success, 
+                'session': session_success,
+                'verification': verification_success
+            }
+            
+            if primary_success and verification_success:
+                logger.info(
+                    f"Watermark saved successfully for {watermark.table_name}",
+                    backup_results=backup_results
+                )
+            else:
+                logger.warning(
+                    f"Watermark save had issues for {watermark.table_name}",
+                    backup_results=backup_results
+                )
+            
+            # Return success only if primary and verification succeed
+            return primary_success and verification_success
             
         except Exception as e:
             logger.error(f"Failed to save watermark for {watermark.table_name}: {e}")
@@ -515,6 +882,106 @@ class S3WatermarkManager:
         # Convert settlement.settlement_claim_detail -> settlement_settlement_claim_detail.json
         safe_name = table_name.replace('.', '_')
         return f"{self.tables_prefix}{safe_name}.json"
+    
+    def _get_daily_backup_key(self, table_name: str) -> str:
+        """Generate S3 key for daily backup watermark"""
+        safe_name = table_name.replace('.', '_')
+        date_str = datetime.utcnow().strftime("%Y%m%d")
+        return f"{self.watermark_prefix}backups/daily/{safe_name}_{date_str}.json"
+    
+    def _get_session_backup_key(self, table_name: str, session_id: str) -> str:
+        """Generate S3 key for session backup watermark"""
+        safe_name = table_name.replace('.', '_')
+        return f"{self.watermark_prefix}backups/sessions/{session_id}/{safe_name}.json"
+    
+    def _save_with_retry(self, s3_key: str, watermark_json: str, watermark: S3TableWatermark, location: str, max_retries: int = 3) -> bool:
+        """Save watermark to S3 with retry logic"""
+        import time
+        
+        for attempt in range(max_retries):
+            try:
+                self.s3_client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=s3_key,
+                    Body=watermark_json,
+                    ContentType='application/json',
+                    Metadata={
+                        'table_name': watermark.table_name,
+                        'mysql_status': watermark.mysql_status,
+                        'redshift_status': watermark.redshift_status,
+                        'updated_at': watermark.updated_at or '',
+                        'backup_location': location,
+                        'save_attempt': str(attempt + 1)
+                    }
+                )
+                
+                # Verify the save by checking object exists
+                self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+                logger.debug(f"Successfully saved watermark to {location} location (attempt {attempt + 1})")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed to save watermark to {location} location: {e}")
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s
+                    sleep_time = 2 ** attempt
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(f"All {max_retries} attempts failed to save watermark to {location} location")
+        
+        return False
+    
+    def _save_to_backup_location(self, s3_key: str, watermark_json: str, watermark: S3TableWatermark, location: str) -> bool:
+        """Save watermark to backup location (single attempt, don't fail main operation)"""
+        try:
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=watermark_json,
+                ContentType='application/json',
+                Metadata={
+                    'table_name': watermark.table_name,
+                    'mysql_status': watermark.mysql_status,
+                    'redshift_status': watermark.redshift_status,
+                    'updated_at': watermark.updated_at or '',
+                    'backup_location': location,
+                    'backup_type': 'redundant'
+                }
+            )
+            
+            logger.debug(f"Successfully saved watermark backup to {location} location")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Failed to save watermark backup to {location} location: {e}")
+            return False
+    
+    def _verify_watermark_save(self, s3_key: str, expected_watermark: S3TableWatermark) -> bool:
+        """Verify that saved watermark matches expected data"""
+        try:
+            # Read back the saved watermark
+            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=s3_key)
+            saved_data = json.loads(response['Body'].read())
+            
+            # Remove backup metadata for comparison
+            if 'backup_metadata' in saved_data:
+                del saved_data['backup_metadata']
+            
+            # Verify critical fields match
+            expected_data = expected_watermark.to_dict()
+            critical_fields = ['table_name', 'last_mysql_data_timestamp', 'mysql_rows_extracted', 'mysql_status']
+            
+            for field in critical_fields:
+                if saved_data.get(field) != expected_data.get(field):
+                    logger.error(f"Watermark verification failed for {field}: saved={saved_data.get(field)}, expected={expected_data.get(field)}")
+                    return False
+            
+            logger.debug("Watermark save verification passed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Watermark save verification failed: {e}")
+            return False
     
     def _matches_pattern(self, text: str, pattern: str) -> bool:
         """Simple pattern matching with wildcards"""

@@ -226,8 +226,8 @@ class S3Manager:
                 }
             }
             
-            # Upload to S3 with simplified approach
-            self.s3_client.put_object(**upload_params)
+            # Use optimized upload method
+            self._upload_with_optimization(upload_params, buffer_size)
             
             # Update statistics
             self._upload_stats['total_files'] += 1
@@ -252,6 +252,73 @@ class S3Manager:
             self._upload_stats['failed_uploads'] += 1
             logger.error("Unexpected upload error", s3_key=s3_key, error=str(e))
             raise S3Error(f"Unexpected upload error: {e}", s3_key=s3_key)
+    
+    def _upload_with_optimization(self, upload_params: Dict[str, Any], file_size: int):
+        """
+        Upload to S3 with performance optimizations based on file size.
+        
+        Args:
+            upload_params: S3 upload parameters
+            file_size: Size of the file in bytes
+        """
+        from boto3.s3.transfer import TransferConfig
+        
+        # Get S3 optimization settings from config
+        multipart_threshold = getattr(self.config.s3, 'multipart_threshold', 104857600)  # 100MB
+        max_concurrency = getattr(self.config.s3, 'max_concurrency', 10)
+        
+        if file_size >= multipart_threshold:
+            # Use optimized multipart upload for large files
+            logger.debug(
+                "Using optimized multipart upload",
+                file_size_mb=round(file_size / 1024 / 1024, 2),
+                threshold_mb=round(multipart_threshold / 1024 / 1024, 2),
+                max_concurrency=max_concurrency
+            )
+            
+            # Create transfer config for optimization
+            transfer_config = TransferConfig(
+                multipart_threshold=getattr(self.config.s3, 'multipart_threshold', 104857600),
+                multipart_chunksize=getattr(self.config.s3, 'multipart_chunksize', 52428800),
+                max_concurrency=max_concurrency,
+                max_bandwidth=getattr(self.config.s3, 'max_bandwidth', None),
+                use_threads=True
+            )
+            
+            # Use transfer manager for optimized upload
+            from boto3.s3.transfer import create_transfer_manager
+            transfer_manager = create_transfer_manager(self.s3_client, transfer_config)
+            
+            # Extract body for transfer manager
+            body = upload_params.pop('Body')
+            bucket = upload_params.pop('Bucket')
+            key = upload_params.pop('Key')
+            
+            # Create upload future
+            future = transfer_manager.upload(
+                fileobj=BytesIO(body) if isinstance(body, bytes) else body,
+                bucket=bucket,
+                key=key,
+                extra_args=upload_params
+            )
+            
+            # Wait for completion with timeout
+            try:
+                future.result(timeout=300)  # 5 minute timeout
+                logger.debug("Optimized multipart upload completed", s3_key=key)
+            except Exception as e:
+                logger.error("Multipart upload failed", s3_key=key, error=str(e))
+                raise
+            finally:
+                transfer_manager._shutdown()
+        else:
+            # Use regular upload for smaller files
+            logger.debug(
+                "Using standard upload",
+                file_size_mb=round(file_size / 1024 / 1024, 2),
+                threshold_mb=round(multipart_threshold / 1024 / 1024, 2)
+            )
+            self.s3_client.put_object(**upload_params)
     
     def upload_dataframe(
         self,
