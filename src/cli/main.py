@@ -9,6 +9,7 @@ import click
 import sys
 import json
 import warnings
+import fnmatch
 from typing import List, Dict, Any
 from pathlib import Path
 import time
@@ -277,10 +278,12 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
 @click.option('--verify-data', is_flag=True, 
               help='Verify row counts after sync')
 @click.option('--limit', type=int, 
-              help='Limit rows per query (for testing purposes)')
+              help='Rows per chunk (chunk size)')
+@click.option('--max-chunks', type=int,
+              help='Maximum number of chunks to process (total rows = limit × max-chunks)')
 @click.pass_context
 def sync(ctx, tables: List[str], strategy: str, max_workers: int, 
-         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int):
+         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int):
     """
     Complete MySQL → S3 → Redshift synchronization with flexible schema discovery.
     
@@ -309,6 +312,9 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
         
         # Test run without execution
         s3-backup sync -t settlement.table_name --dry-run
+        
+        # Uses row-based chunking for reliable incremental processing
+        s3-backup sync -t settlement.table_name
     """
     config = ctx.obj['config']
     backup_logger = ctx.obj['backup_logger']
@@ -349,6 +355,7 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
     click.echo(f"   Strategy: {strategy}")
     click.echo(f"   Pipeline: {stages}")
     click.echo(f"   Tables: {len(tables)} table(s)")
+    click.echo(f"   Chunking: Row-based (incremental processing with watermarks)")
     click.echo(f"   Schema Discovery: Dynamic (flexible schema for each table)")
     click.echo()
     
@@ -386,7 +393,27 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
             
             # Create and execute backup strategy
             backup_strategy = STRATEGIES[strategy](config)
-            backup_success = backup_strategy.execute(list(tables), limit=limit)
+            
+            # Calculate parameters based on limit and max_chunks
+            chunk_size = limit if limit else config.backup.target_rows_per_chunk
+            max_total_rows = None
+            
+            if limit and max_chunks:
+                # limit = chunk size, max_chunks = number of chunks
+                # total rows = limit × max_chunks
+                max_total_rows = limit * max_chunks
+                click.echo(f"   📏 Row limits: {chunk_size} rows/chunk × {max_chunks} chunks = {max_total_rows} total rows")
+            elif limit and not max_chunks:
+                # limit = total row limit (user expectation for --limit 100)
+                max_total_rows = limit
+                chunk_size = min(limit, config.backup.target_rows_per_chunk)
+                click.echo(f"   📏 Total row limit: {max_total_rows} rows (chunk size: {chunk_size})")
+            elif max_chunks and not limit:
+                # max_chunks specified but no limit - use default chunk size
+                max_total_rows = chunk_size * max_chunks
+                click.echo(f"   📏 Row limits: {chunk_size} rows/chunk × {max_chunks} chunks = {max_total_rows} total rows")
+            
+            backup_success = backup_strategy.execute(list(tables), chunk_size=chunk_size, max_total_rows=max_total_rows)
             backup_summary = backup_strategy.get_backup_summary()
             
             if backup_success:
@@ -861,7 +888,7 @@ def config(ctx, output: str):
 
 
 @cli.command()
-@click.argument('operation', type=click.Choice(['get', 'set', 'reset', 'list']))
+@click.argument('operation', type=click.Choice(['get', 'set', 'reset', 'force-reset', 'list']))
 @click.option('--table', '-t', help='Table name for table-specific watermark')
 @click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
 @click.option('--show-files', is_flag=True, help='Show processed S3 files list (for get operation)')
@@ -874,6 +901,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
         get - Get current table watermark
         set - Set new watermark timestamp for table  
         reset - Delete watermark completely (fresh start)
+        force-reset - Force overwrite watermark to epoch start (bypasses backups)
         list - List all table watermarks
     
     Examples:
@@ -905,7 +933,12 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
                 
             # Get table-specific watermark
             watermark = watermark_manager.get_table_watermark(table)
-            start_timestamp = watermark_manager.get_incremental_start_timestamp(table)
+            
+            # Try to get start timestamp, but handle exceptions gracefully
+            try:
+                start_timestamp = watermark_manager.get_incremental_start_timestamp(table)
+            except ValueError as e:
+                start_timestamp = f"Error: {str(e)}"
             
             if watermark:
                 click.echo(f"📅 Current Watermark for {table}:")
@@ -918,6 +951,20 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
                 click.echo(f"      S3 Files Created: {watermark.s3_file_count}")
                 click.echo(f"      Last Data Timestamp: {watermark.last_mysql_data_timestamp}")
                 click.echo(f"      Last Extraction Time: {watermark.last_mysql_extraction_time}")
+                
+                # Show row-based chunking information if available
+                if hasattr(watermark, 'last_processed_id') and watermark.last_processed_id is not None:
+                    click.echo(f"      Last Processed ID: {watermark.last_processed_id:,} (row-based resume point)")
+                
+                # Show backup strategy information
+                if hasattr(watermark, 'backup_strategy') and watermark.backup_strategy:
+                    strategy_display = {
+                        'sequential': 'Sequential (Traditional)',
+                        'inter-table': 'Inter-table (Parallel)',
+                        'manual_cli': 'Manual CLI (User-controlled)'
+                    }.get(watermark.backup_strategy, watermark.backup_strategy)
+                    click.echo(f"      Chunking Strategy: {strategy_display}")
+                
                 click.echo()
                 
                 # S3 → Redshift Stage 
@@ -1030,6 +1077,35 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
             except Exception as e:
                 click.echo(f"❌ Reset failed: {e}", err=True)
                 sys.exit(1)
+                
+        elif operation == 'force-reset':
+            if not table:
+                click.echo("❌ Table name required for force-reset operation", err=True)
+                click.echo("   Use -t settlement.table_name")
+                sys.exit(1)
+            
+            # Confirm force reset
+            click.echo(f"⚠️  FORCE RESET will overwrite the watermark for {table}")
+            click.echo("   This bypasses all backup/recovery mechanisms")
+            click.echo("   Watermark will be set to epoch start (1970-01-01)")
+            if not click.confirm("   Continue with force reset?"):
+                click.echo("   Operation cancelled")
+                return
+            
+            try:
+                success = watermark_manager.force_reset_watermark(table)
+                
+                if success:
+                    click.echo(f"✅ Force reset completed for {table}")
+                    click.echo("   Watermark overwritten with epoch start")
+                    click.echo("   Next sync will start from 1970-01-01 00:00:00")
+                else:
+                    click.echo("❌ Force reset failed", err=True)
+                    sys.exit(1)
+                    
+            except Exception as e:
+                click.echo(f"❌ Force reset failed: {e}", err=True)
+                sys.exit(1)
         
         elif operation == 'list':
             # List table watermarks using S3WatermarkManager
@@ -1078,8 +1154,9 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
 @click.option('--dry-run', is_flag=True, help='Show what would be deleted without actually deleting')
 @click.option('--force', is_flag=True, help='Skip confirmation prompts')
 @click.option('--show-timestamps', is_flag=True, help='Show detailed timestamps for files (default: show simplified format)')
+@click.option('--simple-delete', is_flag=True, help='Use simple deletion (ignore versioning, faster)')
 @click.pass_context
-def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_run: bool, force: bool, show_timestamps: bool):
+def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_run: bool, force: bool, show_timestamps: bool, simple_delete: bool):
     """
     Manage S3 backup files with safe cleanup operations.
     
@@ -1117,7 +1194,6 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
         import boto3
         from datetime import datetime, timedelta
         import re
-        import fnmatch
         
         # Initialize S3 client
         s3_client = boto3.client(
@@ -1156,7 +1232,7 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
             
-            _s3_clean_table(s3_client, config, table, older_than, pattern, cutoff_time, dry_run, force)
+            _s3_clean_table(s3_client, config, table, older_than, pattern, cutoff_time, dry_run, force, simple_delete)
             
         elif operation == 'clean-all':
             if not force and not dry_run:
@@ -1201,45 +1277,47 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
     try:
         prefix = f"{config.s3.incremental_path.strip('/')}/"
         
-        response = s3_client.list_objects_v2(
-            Bucket=config.s3.bucket_name,
-            Prefix=prefix,
-            MaxKeys=1000
-        )
-        
+        # Handle pagination to get ALL files, not just first 1000
         all_files = []
         filtered_files = []
         total_size = 0
         
-        for obj in response.get('Contents', []):
-            key = obj['Key']
-            size = obj['Size']
-            modified = obj['LastModified']
-            
-            # Table filtering
-            if table:
-                clean_table_name = table.replace('.', '_').replace('-', '_')
-                if clean_table_name not in key:
-                    continue
-            
-            all_files.append((key, size, modified))
-            
-            # Apply filters
-            include_file = True
-            
-            # Pattern filtering
-            if pattern:
-                filename = key.split('/')[-1]
-                if not fnmatch.fnmatch(filename, pattern):
+        paginator = s3_client.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(
+            Bucket=config.s3.bucket_name,
+            Prefix=prefix
+        )
+        
+        for page in page_iterator:
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                size = obj['Size']
+                modified = obj['LastModified']
+                
+                # Table filtering
+                if table:
+                    clean_table_name = table.replace('.', '_').replace('-', '_')
+                    if clean_table_name not in key:
+                        continue
+                
+                all_files.append((key, size, modified))
+                
+                # Apply filters
+                include_file = True
+                
+                # Pattern filtering
+                if pattern:
+                    filename = key.split('/')[-1]
+                    if not fnmatch.fnmatch(filename, pattern):
+                        include_file = False
+                
+                # Time filtering
+                if cutoff_time and modified.replace(tzinfo=None) > cutoff_time:
                     include_file = False
-            
-            # Time filtering
-            if cutoff_time and modified.replace(tzinfo=None) > cutoff_time:
-                include_file = False
-            
-            if include_file:
-                filtered_files.append((key, size, modified))
-                total_size += size
+                
+                if include_file:
+                    filtered_files.append((key, size, modified))
+                    total_size += size
         
         # Display results
         if table:
@@ -1274,47 +1352,48 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
         click.echo(f"❌ Failed to list S3 files: {e}", err=True)
 
 
-def _s3_clean_table(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, dry_run: bool, force: bool):
+def _s3_clean_table(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, dry_run: bool, force: bool, simple_delete: bool = False):
     """Clean S3 files for a specific table"""
     try:
         clean_table_name = table.replace('.', '_').replace('-', '_')
         prefix = f"{config.s3.incremental_path.strip('/')}/"
         
-        # Find files to delete
-        response = s3_client.list_objects_v2(
-            Bucket=config.s3.bucket_name,
-            Prefix=prefix,
-            MaxKeys=1000
-        )
-        
+        # Find files to delete (handle pagination)
         files_to_delete = []
         total_size = 0
         
-        for obj in response.get('Contents', []):
-            key = obj['Key']
-            size = obj['Size']
-            modified = obj['LastModified']
-            
-            # Must match table name
-            if clean_table_name not in key or not key.endswith('.parquet'):
-                continue
-            
-            # Apply filters
-            include_file = True
-            
-            # Pattern filtering
-            if pattern:
-                filename = key.split('/')[-1]
-                if not fnmatch.fnmatch(filename, pattern):
+        paginator = s3_client.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(
+            Bucket=config.s3.bucket_name,
+            Prefix=prefix
+        )
+        
+        for page in page_iterator:
+            for obj in page.get('Contents', []):
+                key = obj['Key']
+                size = obj['Size']
+                modified = obj['LastModified']
+                
+                # Must match table name
+                if clean_table_name not in key or not key.endswith('.parquet'):
+                    continue
+                
+                # Apply filters
+                include_file = True
+                
+                # Pattern filtering
+                if pattern:
+                    filename = key.split('/')[-1]
+                    if not fnmatch.fnmatch(filename, pattern):
+                        include_file = False
+                
+                # Time filtering  
+                if cutoff_time and modified.replace(tzinfo=None) > cutoff_time:
                     include_file = False
-            
-            # Time filtering  
-            if cutoff_time and modified.replace(tzinfo=None) > cutoff_time:
-                include_file = False
-            
-            if include_file:
-                files_to_delete.append({'Key': key})
-                total_size += size
+                
+                if include_file:
+                    files_to_delete.append({'Key': key})
+                    total_size += size
         
         if not files_to_delete:
             click.echo(f"✅ No files found to delete for {table}")
@@ -1336,21 +1415,153 @@ def _s3_clean_table(s3_client, config, table: str, older_than: str, pattern: str
             click.echo("🧪 DRY RUN - Files would be deleted but no action taken")
             return
         
-        # Confirm deletion
+        # Confirm deletion with safety check for large deletions
         if not force:
             click.echo()
-            if not click.confirm(f"Delete {len(files_to_delete)} files for {table}?"):
-                click.echo("Operation cancelled")
-                return
+            if len(files_to_delete) > 5000:
+                click.echo(f"⚠️  WARNING: About to delete {len(files_to_delete)} files!")
+                click.echo("   This is a very large deletion operation.")
+                if not click.confirm(f"   Are you SURE you want to delete {len(files_to_delete)} files for {table}?"):
+                    click.echo("Operation cancelled")
+                    return
+            else:
+                if not click.confirm(f"Delete {len(files_to_delete)} files for {table}?"):
+                    click.echo("Operation cancelled")
+                    return
         
-        # Delete files
+        # Delete files using proper error checking
         click.echo("🗑️  Deleting files...")
-        s3_client.delete_objects(
-            Bucket=config.s3.bucket_name,
-            Delete={'Objects': files_to_delete}
-        )
         
-        click.echo(f"✅ Successfully deleted {len(files_to_delete)} files for {table}")
+        # For versioned buckets, we need to permanently delete files
+        # Extract just the keys for direct deletion
+        file_keys = [obj['Key'] for obj in files_to_delete]
+        
+        deleted_count = 0
+        error_count = 0
+        
+        try:
+            # Check if user wants simple deletion or if we should try versioned deletion
+            if simple_delete:
+                click.echo("📁 Using simple deletion (ignoring versioning)...")
+                is_versioned = False
+            else:
+                # Try to check if bucket has versioning (requires s3:GetBucketVersioning permission)
+                is_versioned = False
+                try:
+                    bucket_versioning = s3_client.get_bucket_versioning(Bucket=config.s3.bucket_name)
+                    is_versioned = bucket_versioning.get('Status') == 'Enabled'
+                    click.echo(f"🔍 Bucket versioning status: {bucket_versioning.get('Status', 'Disabled')}")
+                except Exception as version_error:
+                    click.echo(f"⚠️ Cannot check versioning (permission issue): {str(version_error)[:100]}...")
+                    click.echo("📁 Falling back to simple deletion...")
+                    is_versioned = False  # Use simple deletion when permissions are insufficient
+            
+            if is_versioned:
+                click.echo("🔄 Versioned bucket detected - performing permanent deletion...")
+                
+                # For versioned buckets, delete all versions of each object
+                for key in file_keys:
+                    try:
+                        # List all versions of this object (requires s3:ListBucketVersions)
+                        try:
+                            versions_response = s3_client.list_object_versions(
+                                Bucket=config.s3.bucket_name,
+                                Prefix=key,
+                                MaxKeys=100
+                            )
+                        except Exception as list_error:
+                            # If we can't list versions, try simple deletion
+                            click.echo(f"⚠️ Cannot list versions for {key}, using simple deletion: {list_error}")
+                            delete_response = s3_client.delete_objects(
+                                Bucket=config.s3.bucket_name,
+                                Delete={'Objects': [{'Key': key}]}
+                            )
+                            deleted_count += len(delete_response.get('Deleted', []))
+                            error_count += len(delete_response.get('Errors', []))
+                            continue
+                        
+                        # Delete all versions and delete markers
+                        objects_to_delete = []
+                        
+                        for version in versions_response.get('Versions', []):
+                            if version['Key'] == key:
+                                objects_to_delete.append({
+                                    'Key': key,
+                                    'VersionId': version['VersionId']
+                                })
+                        
+                        for delete_marker in versions_response.get('DeleteMarkers', []):
+                            if delete_marker['Key'] == key:
+                                objects_to_delete.append({
+                                    'Key': key,
+                                    'VersionId': delete_marker['VersionId']
+                                })
+                        
+                        if objects_to_delete:
+                            # Permanently delete all versions
+                            delete_response = s3_client.delete_objects(
+                                Bucket=config.s3.bucket_name,
+                                Delete={'Objects': objects_to_delete}
+                            )
+                            
+                            deleted_count += len(delete_response.get('Deleted', []))
+                            error_count += len(delete_response.get('Errors', []))
+                        
+                    except Exception as e:
+                        click.echo(f"⚠️ Error deleting {key}: {e}")
+                        error_count += 1
+                        
+            else:
+                # Non-versioned bucket - use regular deletion with batching
+                click.echo("📁 Non-versioned bucket - using standard deletion...")
+                
+                # AWS S3 delete_objects has a limit of 1000 objects per request
+                batch_size = 1000
+                total_batches = (len(file_keys) + batch_size - 1) // batch_size
+                
+                click.echo(f"🔄 Processing {len(file_keys)} files in {total_batches} batches...")
+                
+                for i in range(0, len(file_keys), batch_size):
+                    batch_keys = file_keys[i:i + batch_size]
+                    batch_num = (i // batch_size) + 1
+                    
+                    click.echo(f"   Batch {batch_num}/{total_batches}: {len(batch_keys)} files")
+                    
+                    delete_objects = [{'Key': key} for key in batch_keys]
+                    
+                    try:
+                        delete_response = s3_client.delete_objects(
+                            Bucket=config.s3.bucket_name,
+                            Delete={'Objects': delete_objects}
+                        )
+                        
+                        batch_deleted = len(delete_response.get('Deleted', []))
+                        batch_errors = len(delete_response.get('Errors', []))
+                        
+                        deleted_count += batch_deleted
+                        error_count += batch_errors
+                        
+                        if batch_errors > 0:
+                            click.echo(f"   ⚠️ Batch {batch_num}: {batch_deleted} deleted, {batch_errors} errors")
+                        else:
+                            click.echo(f"   ✅ Batch {batch_num}: {batch_deleted} deleted")
+                            
+                    except Exception as batch_error:
+                        click.echo(f"   ❌ Batch {batch_num} failed: {batch_error}")
+                        error_count += len(batch_keys)
+                
+        except Exception as e:
+            click.echo(f"❌ Deletion failed: {e}")
+            error_count = len(file_keys)
+        
+        # Report actual results
+        total_requested = len(file_keys)
+        
+        if error_count == 0:
+            click.echo(f"✅ Successfully deleted {deleted_count} files for {table}")
+        else:
+            click.echo(f"⚠️  Partial success: {deleted_count} deleted, {error_count} failed out of {total_requested} for {table}")
+            click.echo("❌ Some files could not be deleted - they may be in use or have permission issues")
         
     except Exception as e:
         click.echo(f"❌ Failed to clean S3 files for {table}: {e}", err=True)

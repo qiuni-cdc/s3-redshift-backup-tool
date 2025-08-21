@@ -24,11 +24,12 @@ class S3TableWatermark:
     table_name: str
     last_mysql_extraction_time: Optional[str] = None
     last_mysql_data_timestamp: Optional[str] = None
+    last_processed_id: Optional[int] = None  # Last processed ID for row-based pagination
     mysql_rows_extracted: int = 0
-    mysql_status: str = 'pending'  # pending, success, failed
+    mysql_status: str = 'pending'  # pending, success, failed, in_progress
     last_redshift_load_time: Optional[str] = None
     redshift_rows_loaded: int = 0
-    redshift_status: str = 'pending'
+    redshift_status: str = 'pending'  # pending, success, failed, in_progress
     backup_strategy: str = 'sequential'
     s3_file_count: int = 0
     processed_s3_files: Optional[List[str]] = None  # Track loaded S3 files to prevent duplicates
@@ -295,7 +296,7 @@ class S3WatermarkManager:
                 return False
             
             # Check that statuses are valid
-            valid_statuses = ['pending', 'success', 'failed']
+            valid_statuses = ['pending', 'success', 'failed', 'in_progress']
             if watermark.mysql_status not in valid_statuses:
                 return False
             if watermark.redshift_status not in valid_statuses:
@@ -452,6 +453,7 @@ class S3WatermarkManager:
         table_name: str,
         extraction_time: datetime,
         max_data_timestamp: Optional[datetime] = None,
+        last_processed_id: Optional[int] = None,
         rows_extracted: int = 0,
         status: str = 'success',
         backup_strategy: str = 'sequential',
@@ -468,8 +470,23 @@ class S3WatermarkManager:
             
             # Update MySQL-related fields
             watermark.last_mysql_extraction_time = extraction_time.isoformat() + 'Z'
-            watermark.last_mysql_data_timestamp = max_data_timestamp.isoformat() + 'Z' if max_data_timestamp else None
-            watermark.mysql_rows_extracted = rows_extracted
+            
+            # Update timestamp only if it's newer (forward progress)
+            if max_data_timestamp:
+                new_timestamp = max_data_timestamp.isoformat() + 'Z'
+                if not watermark.last_mysql_data_timestamp or new_timestamp > watermark.last_mysql_data_timestamp:
+                    watermark.last_mysql_data_timestamp = new_timestamp
+            
+            # Update last processed ID for row-based pagination
+            if last_processed_id is not None:
+                watermark.last_processed_id = last_processed_id
+            
+            # Make row extraction additive for cumulative progress tracking
+            if rows_extracted > 0:
+                current_rows = watermark.mysql_rows_extracted or 0
+                watermark.mysql_rows_extracted = current_rows + rows_extracted
+                logger.info(f"Additive watermark update: {current_rows} + {rows_extracted} = {watermark.mysql_rows_extracted}")
+            
             watermark.mysql_status = status
             watermark.backup_strategy = backup_strategy
             watermark.s3_file_count = s3_file_count
@@ -704,15 +721,17 @@ class S3WatermarkManager:
         """Get timestamp for incremental data extraction"""
         watermark = self.get_table_watermark(table_name)
         
-        if watermark and watermark.last_mysql_data_timestamp and watermark.mysql_status == 'success':
+        # A watermark is valid for incremental processing if it has a data timestamp,
+        # regardless of mysql_status (data may exist even if status is failed/pending)
+        if watermark and watermark.last_mysql_data_timestamp:
             # Convert from ISO format back to MySQL format
             dt = datetime.fromisoformat(watermark.last_mysql_data_timestamp.replace('Z', '+00:00'))
             timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
-            logger.debug(f"Using incremental start timestamp for {table_name}: {timestamp}")
+            logger.debug(f"Using incremental start timestamp for {table_name}: {timestamp} (mysql_status: {watermark.mysql_status})")
             return timestamp
         else:
             # No valid watermark found - require explicit user input
-            logger.warning(f"No valid watermark found for {table_name}")
+            logger.warning(f"No valid watermark found for {table_name} - missing data timestamp")
             raise ValueError(
                 f"No watermark found for table '{table_name}'. "
                 f"Please set an initial watermark using: "
@@ -798,25 +817,134 @@ class S3WatermarkManager:
             raise WatermarkError(f"Watermark backup failed: {e}")
     
     def delete_table_watermark(self, table_name: str, create_backup: bool = True) -> bool:
-        """Delete table watermark (with optional backup)"""
+        """Delete table watermark completely including all backup locations"""
         try:
             if create_backup:
                 backup_key = self.backup_watermark(table_name)
-                logger.info(f"Backup created before deletion: {backup_key}")
+                logger.info(f"Final backup created before complete deletion: {backup_key}")
             
-            s3_key = self._get_table_watermark_key(table_name)
+            deleted_locations = []
             
-            self.s3_client.delete_object(
-                Bucket=self.bucket_name,
-                Key=s3_key
-            )
+            # Delete primary location
+            try:
+                s3_key = self._get_table_watermark_key(table_name)
+                logger.info(f"Attempting to delete primary watermark at: {s3_key}")
+                response = self.s3_client.delete_object(
+                    Bucket=self.bucket_name,
+                    Key=s3_key
+                )
+                logger.info(f"Primary watermark delete response: {response}")
+                deleted_locations.append("primary")
+            except Exception as e:
+                logger.error(f"Could not delete primary watermark at {s3_key}: {e}")
+                # Don't continue if we can't delete the primary location
+                raise
             
-            logger.warning(f"Deleted watermark for table {table_name}")
-            return True
+            # Delete daily backup
+            try:
+                daily_key = self._get_daily_backup_key(table_name)
+                self.s3_client.delete_object(
+                    Bucket=self.bucket_name,
+                    Key=daily_key
+                )
+                deleted_locations.append("daily_backup")
+            except Exception as e:
+                logger.debug(f"Could not delete daily backup (may not exist): {e}")
+            
+            # Delete session backups - list and delete all
+            try:
+                session_prefix = f"{self.history_prefix}{table_name.replace('.', '_')}_"
+                
+                # List all session backups
+                paginator = self.s3_client.get_paginator('list_objects_v2')
+                page_iterator = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=session_prefix
+                )
+                
+                session_count = 0
+                for page in page_iterator:
+                    if 'Contents' in page:
+                        for obj in page['Contents']:
+                            try:
+                                self.s3_client.delete_object(
+                                    Bucket=self.bucket_name,
+                                    Key=obj['Key']
+                                )
+                                session_count += 1
+                            except Exception as e:
+                                logger.warning(f"Could not delete session backup {obj['Key']}: {e}")
+                
+                if session_count > 0:
+                    deleted_locations.append(f"{session_count}_session_backups")
+                    
+            except Exception as e:
+                logger.warning(f"Could not delete session backups: {e}")
+            
+            # Verify deletion by trying to read the primary watermark
+            try:
+                verify_key = self._get_table_watermark_key(table_name)
+                logger.info(f"Verifying deletion by checking: {verify_key}")
+                self.s3_client.head_object(Bucket=self.bucket_name, Key=verify_key)
+                logger.error(f"VERIFICATION FAILED: Watermark still exists at {verify_key} after deletion!")
+                return False
+            except self.s3_client.exceptions.NoSuchKey:
+                logger.info(f"VERIFICATION SUCCESS: Watermark confirmed deleted at {verify_key}")
+            except Exception as e:
+                logger.warning(f"Could not verify deletion: {e}")
+            
+            if deleted_locations:
+                logger.warning(f"Completely deleted watermark for table {table_name} from: {', '.join(deleted_locations)}")
+                return True
+            else:
+                logger.error(f"Failed to delete any watermark locations for {table_name}")
+                return False
             
         except Exception as e:
             logger.error(f"Failed to delete watermark for {table_name}: {e}")
             raise WatermarkError(f"Watermark deletion failed: {e}")
+    
+    def force_reset_watermark(self, table_name: str) -> bool:
+        """
+        Force reset watermark by creating a fresh watermark with epoch start.
+        
+        This bypasses all backup/recovery logic by directly overwriting the watermark
+        with a clean slate starting from epoch time.
+        """
+        try:
+            # Create a completely fresh watermark
+            fresh_watermark = S3TableWatermark(
+                table_name=table_name,
+                last_mysql_extraction_time=None,  # No previous extraction
+                last_mysql_data_timestamp='1970-01-01T00:00:00Z',  # Epoch start
+                last_processed_id=0,  # Start from beginning
+                mysql_rows_extracted=0,  # Reset count
+                mysql_status='pending',  # Fresh status
+                last_redshift_load_time=None,  # No Redshift loads yet
+                redshift_rows_loaded=0,
+                redshift_status='pending',
+                backup_strategy='row_based',  # Use the new strategy
+                s3_file_count=0,
+                processed_s3_files=None,
+                last_error=None,  # Clear all errors
+                created_at=datetime.utcnow().isoformat() + 'Z',
+                updated_at=datetime.utcnow().isoformat() + 'Z',
+                metadata={'force_reset': True, 'reset_time': datetime.utcnow().isoformat() + 'Z'}
+            )
+            
+            # Force save the fresh watermark (will overwrite everything)
+            success = self._save_watermark(fresh_watermark)
+            
+            if success:
+                logger.warning(f"Force reset completed for {table_name} - watermark set to epoch start")
+                return True
+            else:
+                logger.error(f"Force reset failed to save new watermark for {table_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Force reset failed for {table_name}: {e}")
+            raise WatermarkError(f"Force reset failed: {e}")
     
     def _save_watermark(self, watermark: S3TableWatermark) -> bool:
         """Save watermark to S3 with multi-location backup"""
@@ -1050,3 +1178,53 @@ class S3WatermarkManager:
         except Exception as e:
             logger.error(f"Failed to set manual watermark for {table_name}: {e}")
             raise WatermarkError(f"Failed to set manual watermark: {e}")
+    
+    def _update_watermark_direct(
+        self,
+        table_name: str,
+        watermark_data: Dict[str, Any]
+    ) -> bool:
+        """
+        Update watermark with direct values (bypassing additive logic).
+        
+        Used for final absolute watermark updates to prevent double-counting bugs.
+        
+        Args:
+            table_name: Name of the table
+            watermark_data: Dictionary of watermark fields to update
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Get existing watermark or create new one
+            watermark = self.get_table_watermark(table_name)
+            if not watermark:
+                watermark = S3TableWatermark(
+                    table_name=table_name,
+                    created_at=datetime.utcnow().isoformat() + 'Z'
+                )
+            
+            # Update fields directly from the data (no additive logic)
+            for field, value in watermark_data.items():
+                if hasattr(watermark, field):
+                    setattr(watermark, field, value)
+            
+            # Always update the timestamp
+            watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
+            
+            # Save to S3
+            success = self._save_watermark(watermark)
+            
+            if success:
+                logger.info(
+                    f"Direct watermark update for {table_name}",
+                    updated_fields=list(watermark_data.keys()),
+                    absolute_update=True
+                )
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Failed to update watermark directly for {table_name}: {e}")
+            raise WatermarkError(f"Failed to update watermark directly: {e}")

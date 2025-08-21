@@ -128,37 +128,124 @@ def process_batch_safe(batch_data):
 
 ### **🐛 Critical Bug Fixes Applied (August 2025)**
 
-**Fixed Watermark Timestamp Calculation:**
+#### **Fix #1: Watermark Double-Counting Bug** 
+**Problem:** Watermark row counts were inflated due to multiple additive updates within single sessions.
+
 ```python
-# ❌ BEFORE (Bug): Used MAX from ALL data in time range
-def get_watermark_timestamp_old(table_name, last_watermark):
-    query = f"""
-    SELECT MAX(update_at) 
-    FROM {table_name} 
-    WHERE update_at > '{last_watermark}' 
-    AND update_at <= NOW()
-    """
-    # Problem: Returns future timestamps not yet extracted
+# ❌ BEFORE: Multiple additive updates per session
+def update_watermark_buggy(table_name, session_rows):
+    current_watermark = get_watermark(table_name)
+    # Bug: Adding session_rows multiple times per session
+    new_total = current_watermark.rows + session_rows  # Added per chunk!
+    update_watermark(table_name, rows_extracted=new_total)
+
+# ✅ AFTER: Hybrid approach - chunk absolute + session additive
+def update_chunk_watermark_absolute(table_name, timestamp, id):
+    # ONLY update resume data (timestamp/ID) - NOT row counts
+    watermark_data = {
+        'last_mysql_data_timestamp': timestamp,
+        'last_processed_id': id,
+        # CRITICAL: Don't touch mysql_rows_extracted in chunk updates
+        'mysql_status': 'in_progress'
+    }
     
-# ✅ AFTER (Fixed): Uses MAX from ONLY extracted rows
-def get_watermark_timestamp_fixed(table_name, last_watermark, limit):
-    query = f"""
-    SELECT MAX(update_at) as max_update_at 
-    FROM (
-        SELECT update_at
-        FROM {table_name} 
-        WHERE update_at > '{last_watermark}' 
-        ORDER BY update_at, ID
-        LIMIT {limit}
-    ) as extracted_rows
-    """
-    # Solution: Watermark reflects actual last processed row
+def set_final_watermark_additive(table_name, session_rows):
+    # Add session total to existing watermark (once per session)
+    current = get_watermark(table_name)
+    new_total = (current.mysql_rows_extracted or 0) + session_rows
+    update_watermark(table_name, mysql_rows_extracted=new_total)
 ```
 
 **Impact of Fix:**
-- ✅ **Accurate Watermarks**: Now reflects actual data extracted
-- ✅ **Predictable Progression**: Watermark advances with actual work done
-- ✅ **No Data Gaps**: Prevents skipping unprocessed data
+- ✅ **Accurate Row Counts**: Eliminated inflated watermark totals
+- ✅ **Reliable Resume**: Chunk-level resume data updated correctly
+- ✅ **Session Accounting**: Proper accumulation across multiple backup sessions
+
+#### **Fix #2: SQL 'None' Parameter Bug**
+**Problem:** SQL queries failing with 'Unknown column None in where clause' due to None parameter handling.
+
+```python
+# ❌ BEFORE: None values passed directly to SQL
+def get_next_chunk_buggy(cursor, table_name, last_timestamp, last_id):
+    query = f"""
+    SELECT * FROM {table_name}
+    WHERE update_at > '{last_timestamp}' 
+       OR (update_at = '{last_timestamp}' AND ID > {last_id})
+    """
+    # Problem: If last_timestamp is None, generates invalid SQL
+
+# ✅ AFTER: Comprehensive None safety checks
+def get_next_chunk_fixed(cursor, table_name, last_timestamp, last_id):
+    # Handle None/null parameters with safe defaults
+    safe_last_id = last_id if last_id is not None else 0
+    safe_last_timestamp = last_timestamp if last_timestamp is not None else '1970-01-01 00:00:00'
+    
+    # Validate critical parameters
+    if last_timestamp is None:
+        raise ValueError(f"last_timestamp cannot be None for table {table_name}")
+    
+    query = f"""
+    SELECT * FROM {table_name}
+    WHERE update_at > '{safe_last_timestamp}' 
+       OR (update_at = '{safe_last_timestamp}' AND ID > {safe_last_id})
+    """
+```
+
+**Impact of Fix:**
+- ✅ **Eliminated SQL Errors**: No more 'None' parameter failures
+- ✅ **Robust Resume**: Safe handling of edge cases during resume
+- ✅ **Better Debugging**: Clear error messages for invalid states
+
+#### **Fix #3: Watermark Reset Recovery Interference**
+**Problem:** Regular `reset` command wasn't working due to automatic backup recovery system.
+
+```python
+# ❌ BEFORE: Reset deleted watermark but recovery restored it
+def reset_watermark_buggy(table_name):
+    delete_table_watermark(table_name)  # Deletes primary watermark
+    # Problem: Next get_watermark() call triggers automatic recovery
+    # from backup locations, restoring the deleted watermark!
+
+# ✅ AFTER: Force-reset bypasses recovery system
+def force_reset_watermark(table_name):
+    # Create fresh watermark and OVERWRITE (don't delete)
+    fresh_watermark = S3TableWatermark(
+        table_name=table_name,
+        last_mysql_data_timestamp='1970-01-01T00:00:00Z',  # Epoch start
+        mysql_rows_extracted=0,  # Reset count
+        mysql_status='pending',
+        metadata={'force_reset': True}
+    )
+    # Force save overwrites existing watermark (no recovery triggered)
+    save_watermark(fresh_watermark)
+```
+
+**Impact of Fix:**
+- ✅ **Reliable Reset**: Force-reset guaranteed to work
+- ✅ **Clean Slate**: Absolute fresh start when needed
+- ✅ **Recovery Bypass**: Avoids backup system interference
+
+#### **Fix #4: MySQL Connection Errors in Redshift-Only Mode**
+**Problem:** Redshift-only operations still attempted MySQL connections for schema discovery.
+
+```python
+# ❌ BEFORE: Always used MySQL for schema discovery
+def get_table_schema(table_name):
+    with mysql_connection() as conn:  # Failed in Redshift-only mode
+        return discover_schema_from_mysql(conn, table_name)
+
+# ✅ AFTER: S3-based schema discovery fallback
+def get_table_schema_from_s3(table_name, s3_files):
+    # Use existing S3 parquet files to discover schema
+    # No MySQL connection required
+    schema = create_basic_schema_from_s3(s3_files)
+    return schema, generate_redshift_ddl(schema)
+```
+
+**Impact of Fix:**
+- ✅ **Clean Redshift-Only**: No unnecessary MySQL connections
+- ✅ **Schema Discovery**: Alternative method for Redshift operations
+- ✅ **Error-Free Loading**: Redshift loading works without MySQL errors
 
 ### **2. Dual-Stage Tracking**
 
@@ -402,6 +489,86 @@ python -m src.cli.main sync -t table_name --redshift-only
 
 ## 🚨 **Troubleshooting Watermark Issues**
 
+### **Lessons Learned from Production Debugging (August 2025)**
+
+#### **🔍 Debugging Methodology That Works**
+
+**1. Always Check Watermark Row Counts vs Expected:**
+```bash
+# Get current watermark
+python -m src.cli.main watermark get -t table_name
+
+# If you backed up 10k rows twice, watermark should show 20k
+# If it shows 30k or 40k, you have a double-counting bug
+```
+
+**2. Validate Limit Parameter Enforcement:**
+```bash
+# Test with strict limits
+python flexible_progressive_backup.py table_name --chunk-size 10000 --max-chunks 2
+
+# Should process EXACTLY 20k rows, no more
+# If it processes 1.18M+ rows, limit enforcement is broken
+```
+
+**3. Test Watermark Reset Behavior:**
+```bash
+# Test regular reset
+python -m src.cli.main watermark reset -t table_name
+python -m src.cli.main watermark get -t table_name  # Should show epoch start
+
+# If reset doesn't work, automatic recovery is interfering
+# Use force-reset to bypass recovery system
+python -m src.cli.main watermark force-reset -t table_name
+```
+
+**4. Trace SQL None Errors:**
+```bash
+# Enable debug logging
+python -m src.cli.main sync -t table_name --debug
+
+# Look for 'Unknown column None in where clause'
+# Check watermark timestamp handling and None validation
+```
+
+#### **🏥 Recovery Patterns That Work**
+
+**Pattern 1: Double-Counting Recovery**
+```bash
+# Symptoms: Watermark shows inflated row counts (3x-5x actual)
+# Root Cause: Multiple additive updates per session
+
+# Recovery:
+1. Stop all backup processes
+2. Calculate actual processed rows from S3 files or DB query
+3. Force-reset watermark
+4. Set correct watermark with actual count
+5. Resume backup with fixed code
+```
+
+**Pattern 2: SQL Error Recovery**
+```bash
+# Symptoms: "Unknown column None in where clause"
+# Root Cause: None values in timestamp/ID parameters
+
+# Recovery:
+1. Check watermark for None/null values
+2. Force-reset to clean epoch start
+3. Set valid starting timestamp
+4. Resume with None-safe code
+```
+
+**Pattern 3: Reset Interference Recovery**
+```bash
+# Symptoms: Reset command appears to work but watermark unchanged
+# Root Cause: Automatic recovery restoring from backups
+
+# Recovery:
+1. Use force-reset instead of regular reset
+2. Verify with watermark get that it actually changed
+3. Proceed with fresh sync
+```
+
 ### **Common Watermark Problems**
 
 #### **1. Watermark Not Updating**
@@ -526,18 +693,29 @@ python -m src.cli.main s3clean list -t table_name | wc -l
 
 ## 📊 **Watermark Performance Optimization**
 
-### **Watermark Update Frequency**
+### **Watermark Update Frequency & Performance**
 
-**Per-Batch Updates (Current Approach):**
+**Hybrid Update Strategy (Current Implementation):**
 ```
-✅ Pros: Fine-grained recovery, minimal data loss
-❌ Cons: More S3 API calls for watermark updates
+✅ Chunk Updates: Only resume data (timestamp/ID) - frequent, lightweight
+✅ Session Updates: Row counts and final status - once per session
+✅ Best of Both: Fine-grained resume + accurate accounting
+❌ Complexity: More sophisticated logic required
 ```
 
-**Batch-Group Updates (Alternative):**
-```
-✅ Pros: Fewer S3 API calls, better performance
-❌ Cons: Larger recovery window if interrupted
+**Performance Optimizations Applied:**
+- **Reduced S3 API Calls**: Chunk updates don't modify row counts
+- **Atomic Session Totals**: Final row count updated once per session
+- **Resume Reliability**: Timestamp/ID updated after each successful chunk
+
+**Configuration Impact on Watermark Performance:**
+```bash
+# Before optimization:
+BACKUP_BATCH_SIZE=10000  # 65M rows = ~6,500 S3 uploads = ~6,500 watermark updates
+
+# After optimization:
+BACKUP_BATCH_SIZE=50000  # 65M rows = ~1,300 S3 uploads = ~1,300 watermark updates
+# Result: 80% fewer watermark updates for large tables
 ```
 
 ### **Watermark Storage Optimization**
@@ -645,6 +823,11 @@ python -m src.cli.main watermark get -t table
 5. **✅ Verify Data Integrity** - Compare source vs destination counts
 6. **✅ Trust the Resume Capability** - System designed for interruptions
 7. **✅ Use Appropriate Granularity** - Per-table watermarks are optimal
+8. **✅ Use force-reset for Problematic Watermarks** - When regular reset fails
+9. **✅ Test Limit Enforcement** - Verify row limits are respected
+10. **✅ Validate Row Count Accuracy** - Check for double-counting bugs
+11. **✅ Enable Debug Logging for Issues** - Get detailed watermark operations
+12. **✅ Understand Backup Recovery System** - Know when it helps vs interferes
 
 ### **Watermark Management DON'Ts ❌**
 
@@ -655,6 +838,11 @@ python -m src.cli.main watermark get -t table
 5. **❌ Don't Assume Watermarks are Perfect** - Validate with data checks
 6. **❌ Don't Mix Manual and Automatic Updates** - Choose one approach
 7. **❌ Don't Delete Watermark Files Directly** - Use reset commands
+8. **❌ Don't Ignore Row Count Discrepancies** - Usually indicates counting bugs
+9. **❌ Don't Use Regular Reset if Force-Reset Needed** - May not work due to recovery
+10. **❌ Don't Skip Limit Testing** - Always verify limits are enforced
+11. **❌ Don't Assume SQL Parameters are Safe** - Check for None values
+12. **❌ Don't Mix Chunk and Session Row Updates** - Use hybrid approach correctly
 
 ---
 
