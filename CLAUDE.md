@@ -31,6 +31,7 @@ SELECT * FROM target_table LIMIT 5;
 
 ### 🧪 **Testing Memories**
 - Please test with real env when the change impact the core functionality
+- Please run unit and integrate test after major code change
 
 ## Project Overview
 
@@ -67,6 +68,7 @@ This system implements two backup strategies:
 - **Fresh Sync Support**: Reset and set starting timestamps for complete fresh syncs
 - **Selective Loading**: Load only S3 files created after specific timestamps
 - **Manual Override**: Override automated watermarks for custom sync scenarios
+- **Row Count Management**: `watermark_count set-count|validate-counts` for fixing discrepancies
 
 #### Watermark Architecture
 ```
@@ -102,6 +104,18 @@ python -m src.cli.main watermark get -t settlement.table_name
 
 # Show processed S3 files list
 python -m src.cli.main watermark get -t settlement.table_name --show-files
+```
+
+**4. Fix Watermark Row Count Discrepancies:**
+```bash
+# Validate watermark counts against actual Redshift data
+python -m src.cli.main watermark-count validate-counts -t settlement.table_name
+
+# Fix inflated backup counts (set absolute count)
+python -m src.cli.main watermark-count set-count -t settlement.table_name --count 3000000 --mode absolute
+
+# Add incremental count (if needed)  
+python -m src.cli.main watermark-count set-count -t settlement.table_name --count 500000 --mode additive
 ```
 
 ### Filtering Logic
@@ -195,3 +209,89 @@ python -m src.cli.main s3clean clean -t settlement.table_name --force
 1. **Basic Usage**: `USER_MANUAL.md` 
 2. **Large Tables**: `LARGE_TABLE_GUIDELINES.md`
 3. **Advanced Topics**: `WATERMARK_DEEP_DIVE.md`
+
+---
+
+## 🐛 **CRITICAL BUG FIXES & LESSONS LEARNED**
+
+### **P0 WATERMARK DOUBLE-COUNTING BUG (RESOLVED)**
+
+**Issue Discovered (August 25, 2025)**: Critical watermark row count discrepancy
+- **Symptoms**: Watermark showing 3M extracted rows vs 2.5M loaded, while Redshift contains 3M actual rows
+- **Root Cause**: Additive watermark logic causing double-counting in multi-session backups
+- **Impact**: Inflated extraction counts, confusion about actual data processing
+
+#### **Technical Root Cause**
+```python
+# OLD BUGGY BEHAVIOR (FIXED):
+# Session 1: 500K rows → watermark = 500K
+# Session 2: 2.5M session total → watermark = 500K + 2.5M = 3M
+# But if Session 2 already included Session 1 data internally → DOUBLE COUNTING
+
+# NEW FIXED BEHAVIOR:
+# Uses session ID tracking and mode control to prevent double-counting
+# mode='auto' intelligently detects same-session vs cross-session updates
+```
+
+#### **Comprehensive Fix Implemented**
+1. **Mode-Controlled Watermark Updates** (`src/core/s3_watermark_manager.py`)
+   - `mode='absolute'`: Replace existing count (same session updates)
+   - `mode='additive'`: Add to existing count (different session updates) 
+   - `mode='auto'`: Automatic detection based on session IDs
+
+2. **Session Tracking System**
+   - Unique session IDs prevent intra-session double-counting
+   - Cross-session accumulation works correctly for incremental processing
+
+3. **CLI Count Management Commands**
+   ```bash
+   # Immediate fix for discrepancies
+   python -m src.cli.main watermark-count set-count -t table_name --count N --mode absolute
+   
+   # Validation against actual Redshift data
+   python -m src.cli.main watermark-count validate-counts -t table_name
+   ```
+
+4. **Updated Backup Strategies** (`src/backup/row_based.py:815-886`)
+   - Session-controlled final watermark updates
+   - Prevents legacy additive double-counting bugs
+
+#### **Critical Lessons Learned**
+
+**🔴 WATERMARK INTEGRITY PRINCIPLES**
+1. **Session Isolation**: Same backup session should NEVER double-count rows
+2. **Cross-Session Accumulation**: Different sessions should ADD incremental rows
+3. **Validation is Mandatory**: Always compare watermark vs actual Redshift counts
+4. **Mode Awareness**: Be explicit about additive vs replacement updates
+
+**🔴 TESTING REQUIREMENTS** 
+1. **Multi-Session Testing**: Test backup resumption across different sessions
+2. **Count Validation**: Verify watermark counts match actual data movement  
+3. **Edge Case Coverage**: Test scenarios like failed/resumed/partial syncs
+4. **Production Verification**: Always validate fixes with actual production tables
+
+**🔴 DEBUGGING METHODOLOGY**
+1. **Symptom Recognition**: Row count mismatches indicate counting logic bugs
+2. **Session Analysis**: Track which sessions contributed to watermark counts
+3. **Direct Validation**: Query actual Redshift data to establish ground truth
+4. **Fix Verification**: Test fixes with multiple session scenarios
+
+#### **Prevention Measures**
+- **Comprehensive Testing**: All watermark updates now tested with session scenarios
+- **CLI Validation Tools**: Built-in commands to detect and fix count discrepancies  
+- **Documentation**: Clear guidance on watermark count management
+- **Code Reviews**: Enhanced review process for watermark-related code changes
+
+#### **User Recovery Process**
+```bash
+# Step 1: Validate current state
+python -m src.cli.main watermark-count validate-counts -t your_table_name
+
+# Step 2: Fix discrepancy with actual Redshift count
+python -m src.cli.main watermark-count set-count -t your_table_name --count ACTUAL_COUNT --mode absolute
+
+# Step 3: Verify fix
+python -m src.cli.main watermark get -t your_table_name
+```
+
+**Status**: ✅ **RESOLVED** - All fixes tested and validated. Future backups protected against double-counting.

@@ -1147,6 +1147,175 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
 
 
 @cli.command()
+@click.argument('operation', type=click.Choice(['set-count', 'validate-counts']))
+@click.option('--table', '-t', required=True, help='Table name for count operations')
+@click.option('--count', type=int, help='Row count to set (required for set-count)')
+@click.option('--mode', type=click.Choice(['absolute', 'additive']), default='absolute', 
+              help='How to update the count: absolute (replace) or additive (add to existing)')
+@click.pass_context
+def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
+    """
+    Advanced watermark row count management (BUG FIX COMMANDS).
+    
+    Operations:
+        set-count - Set or add to watermark row count (fixes double-counting bug)
+        validate-counts - Cross-validate watermark vs actual Redshift counts
+    
+    Examples:
+        # Fix current row count mismatch (absolute mode - replaces existing)
+        s3-backup watermark-count set-count -t settlement.settlement_normal_delivery_detail --count 3000000 --mode absolute
+        
+        # Add incremental count (additive mode - adds to existing)  
+        s3-backup watermark-count set-count -t settlement.settlement_normal_delivery_detail --count 500000 --mode additive
+        
+        # Validate consistency across systems
+        s3-backup watermark-count validate-counts -t settlement.settlement_normal_delivery_detail
+    """
+    config = ctx.obj['config']
+    backup_logger = ctx.obj['backup_logger']
+    
+    try:
+        from src.core.s3_watermark_manager import S3WatermarkManager
+        from src.core.gemini_redshift_loader import GeminiRedshiftLoader
+        
+        watermark_manager = S3WatermarkManager(config)
+        
+        click.echo(f"🔢 Watermark Count {operation.upper()}")
+        click.echo(f"   Table: {table}")
+        click.echo()
+        
+        if operation == 'set-count':
+            if count is None:
+                click.echo("❌ Count value required for set-count operation", err=True)
+                click.echo("   Use --count <number>")
+                sys.exit(1)
+            
+            try:
+                if mode == 'absolute':
+                    # Set absolute count (replaces existing)
+                    success = watermark_manager._update_watermark_direct(
+                        table_name=table,
+                        watermark_data={'mysql_rows_extracted': count}
+                    )
+                    
+                    if success:
+                        click.echo(f"✅ Set absolute count to {count:,} rows")
+                        click.echo(f"   Mode: {mode} (replaced existing count)")
+                    else:
+                        click.echo("❌ Failed to update watermark count", err=True)
+                        sys.exit(1)
+                        
+                elif mode == 'additive':
+                    # Add to existing count
+                    current_watermark = watermark_manager.get_table_watermark(table)
+                    existing_count = current_watermark.mysql_rows_extracted if current_watermark else 0
+                    new_count = existing_count + count
+                    
+                    success = watermark_manager._update_watermark_direct(
+                        table_name=table,
+                        watermark_data={'mysql_rows_extracted': new_count}
+                    )
+                    
+                    if success:
+                        click.echo(f"✅ Added {count:,} to existing {existing_count:,} = {new_count:,} total")
+                        click.echo(f"   Mode: {mode} (added to existing count)")
+                    else:
+                        click.echo("❌ Failed to update watermark count", err=True)
+                        sys.exit(1)
+                
+                # Verify the change by showing updated watermark
+                click.echo()
+                click.echo("📊 Updated Watermark Status:")
+                updated_watermark = watermark_manager.get_table_watermark(table)
+                if updated_watermark:
+                    click.echo(f"   MySQL Rows Extracted: {updated_watermark.mysql_rows_extracted:,}")
+                    click.echo(f"   Redshift Rows Loaded: {updated_watermark.redshift_rows_loaded:,}")
+                    click.echo(f"   MySQL Status: {updated_watermark.mysql_status}")
+                    click.echo(f"   Redshift Status: {updated_watermark.redshift_status}")
+                    
+            except Exception as e:
+                click.echo(f"❌ Error updating row count: {e}", err=True)
+                sys.exit(1)
+        
+        elif operation == 'validate-counts':
+            try:
+                click.echo("🔍 Validating row counts across all systems...")
+                click.echo()
+                
+                # Get watermark counts
+                watermark = watermark_manager.get_table_watermark(table)
+                if not watermark:
+                    click.echo(f"❌ No watermark found for {table}", err=True)
+                    sys.exit(1)
+                
+                watermark_backup_count = watermark.mysql_rows_extracted
+                watermark_load_count = watermark.redshift_rows_loaded
+                
+                # Get actual Redshift count
+                try:
+                    redshift_loader = GeminiRedshiftLoader(config)
+                    with redshift_loader._redshift_connection() as conn:
+                        cursor = conn.cursor()
+                        redshift_table_name = redshift_loader._get_redshift_table_name(table)
+                        cursor.execute(f"SELECT COUNT(*) FROM {config.redshift.schema}.{redshift_table_name}")
+                        actual_redshift_count = cursor.fetchone()[0]
+                        cursor.close()
+                except Exception as e:
+                    click.echo(f"⚠️  Could not query Redshift: {e}")
+                    actual_redshift_count = "Unable to query"
+                
+                # Display comparison
+                click.echo("📊 Row Count Comparison:")
+                click.echo(f"   Watermark Backup Count:  {watermark_backup_count:,}")
+                click.echo(f"   Watermark Load Count:    {watermark_load_count:,}")
+                
+                if isinstance(actual_redshift_count, int):
+                    click.echo(f"   Actual Redshift Count:   {actual_redshift_count:,}")
+                else:
+                    click.echo(f"   Actual Redshift Count:   {actual_redshift_count}")
+                
+                click.echo()
+                
+                # Analyze consistency
+                issues = []
+                if isinstance(actual_redshift_count, int):
+                    if watermark_backup_count != watermark_load_count:
+                        issues.append(f"Backup ({watermark_backup_count:,}) ≠ Load ({watermark_load_count:,}) watermark counts")
+                    if watermark_load_count != actual_redshift_count:
+                        issues.append(f"Load watermark ({watermark_load_count:,}) ≠ Actual Redshift ({actual_redshift_count:,})")
+                    if watermark_backup_count > actual_redshift_count * 1.1:  # More than 10% higher
+                        issues.append(f"Backup count suspiciously high (possible double-counting bug)")
+                
+                if issues:
+                    click.echo("❌ Consistency Issues Found:")
+                    for issue in issues:
+                        click.echo(f"   • {issue}")
+                    click.echo()
+                    click.echo("💡 Recommended Actions:")
+                    click.echo("   1. If backup count is inflated, use:")
+                    if isinstance(actual_redshift_count, int):
+                        click.echo(f"      watermark-count set-count -t {table} --count {actual_redshift_count} --mode absolute")
+                    click.echo("   2. Check if recent syncs used additive mode incorrectly")
+                    click.echo("   3. Verify S3 files match expected processing")
+                else:
+                    click.echo("✅ All counts are consistent!")
+                    click.echo("   No row count discrepancies detected")
+                    
+            except Exception as e:
+                click.echo(f"❌ Validation failed: {e}", err=True)
+                sys.exit(1)
+        
+        else:
+            click.echo(f"❌ Unknown operation: {operation}", err=True)
+            sys.exit(1)
+    
+    except Exception as e:
+        backup_logger.error_occurred(e, f"cli_watermark_count_{operation}")
+        click.echo(f"❌ Watermark count operation failed: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
 @click.argument('operation', type=click.Choice(['list', 'clean', 'clean-all']))
 @click.option('--table', '-t', help='Table name to clean (required for clean operation)')
 @click.option('--older-than', help='Delete files older than X days/hours (e.g., "7d", "24h")')

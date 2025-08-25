@@ -122,6 +122,14 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         try:
             self.logger.table_started(table_name)
             
+            # CRITICAL FIX: Reset S3 stats for accurate per-table file counting
+            self.s3_manager.reset_stats()
+            self.logger.logger.info(
+                "Reset S3 upload stats for new table processing",
+                table_name=table_name,
+                fix_applied="s3_stats_reset_per_table"
+            )
+            
             # Create cursor with dictionary output
             cursor = db_conn.cursor(dictionary=True, buffered=False)
             
@@ -332,12 +340,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     )
             
             # Final watermark update with completion status (additive session total)
-            self._set_final_watermark_additive(
+            self._set_final_watermark_with_session_control(
                 table_name=table_name,
                 extraction_time=datetime.now(),
                 max_data_timestamp=datetime.fromisoformat(last_timestamp),
                 last_processed_id=last_id,
-                session_rows_processed=total_rows_processed,  # Add session total to existing watermark
+                session_rows_processed=total_rows_processed,  # Session total
                 status='success'
             )
             
@@ -371,10 +379,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             self.logger.error_occurred(e, "row_based_backup", table_name=table_name)
             # Update watermark with error status (additive session count)
             try:
-                self._set_final_watermark_additive(
+                self._set_final_watermark_with_session_control(
                     table_name=table_name,
                     extraction_time=datetime.now(),
-                    session_rows_processed=total_rows_processed,  # Add session partial progress
+                    session_rows_processed=total_rows_processed,  # Session partial progress
                     status='failed',
                     error_message=str(e)
                 )
@@ -812,7 +820,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             )
             return False
     
-    def _set_final_watermark_additive(
+    def _set_final_watermark_with_session_control(
         self, 
         table_name: str, 
         extraction_time: datetime,
@@ -823,10 +831,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         error_message: Optional[str] = None
     ):
         """
-        Set final watermark by adding session total to existing watermark total.
+        CRITICAL FIX: Set final watermark using session-controlled mode.
         
-        This method ensures proper accumulation across multiple backup sessions
-        while preventing double-counting within a single session.
+        Uses the new watermark mode system to handle session vs cross-session updates correctly.
+        This replaces the old additive logic that caused double-counting bugs.
         
         Args:
             table_name: Name of the table
@@ -838,72 +846,69 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             error_message: Optional error message for failed status
         """
         try:
-            # Get existing watermark to add to previous total
-            current_watermark = self.watermark_manager.get_table_watermark(table_name)
+            # CRITICAL FIX: Generate unique session ID
+            import uuid
+            session_id = f"row_based_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             
-            # Calculate new total: existing + session
-            if current_watermark and hasattr(current_watermark, 'mysql_rows_extracted'):
-                existing_total = current_watermark.mysql_rows_extracted or 0
-            else:
-                existing_total = 0
+            # CRITICAL FIX: Get actual S3 file count from S3Manager
+            s3_stats = self.s3_manager.get_upload_stats()
+            actual_s3_files = s3_stats.get('total_files', 0)
             
-            new_total = existing_total + session_rows_processed
-            
-            # Build absolute watermark update with new total
-            watermark_data = {
-                'last_mysql_extraction_time': extraction_time.isoformat(),
-                'mysql_status': status,
-                'backup_strategy': 'row_based',
-                'mysql_rows_extracted': new_total  # Set new absolute total
-            }
-            
-            # Set additional values
-            if max_data_timestamp:
-                watermark_data['last_mysql_data_timestamp'] = max_data_timestamp.isoformat()
-            if last_processed_id is not None:
-                watermark_data['last_processed_id'] = last_processed_id
-            if error_message:
-                watermark_data['last_error'] = error_message
-            
-            # Preserve existing S3 file list and other metadata
-            if current_watermark:
-                if hasattr(current_watermark, 'processed_s3_files') and current_watermark.processed_s3_files:
-                    watermark_data['processed_s3_files'] = current_watermark.processed_s3_files
-                if hasattr(current_watermark, 's3_file_count'):
-                    watermark_data['s3_file_count'] = current_watermark.s3_file_count
-            
-            # Use direct update to set the new total
-            success = self.watermark_manager._update_watermark_direct(
+            self.logger.logger.info(
+                "S3 file count tracking for watermark update",
                 table_name=table_name,
-                watermark_data=watermark_data
+                s3_files_created=actual_s3_files,
+                session_rows=session_rows_processed,
+                fix_applied="s3_count_tracking"
+            )
+            
+            # Use the NEW mode-controlled watermark update with REAL S3 count
+            success = self.watermark_manager.update_mysql_watermark(
+                table_name=table_name,
+                extraction_time=extraction_time,
+                max_data_timestamp=max_data_timestamp,
+                last_processed_id=last_processed_id,
+                rows_extracted=session_rows_processed,
+                status=status,
+                backup_strategy='row_based',
+                s3_file_count=actual_s3_files,  # ✅ FIXED: Real S3 count instead of 0
+                error_message=error_message,
+                mode='auto',  # Let the system decide absolute vs additive
+                session_id=session_id
             )
             
             self.logger.logger.info(
-                "Final watermark updated with additive session total",
+                "Final watermark updated with session control",
                 table_name=table_name,
-                existing_rows=existing_total,
                 session_rows=session_rows_processed,
-                new_total=new_total,
                 status=status,
-                additive_session_logic=True
+                session_id=session_id,
+                mode_system="auto_detection"
             )
             
             return success
             
         except Exception as e:
             self.logger.logger.error(
-                "Failed to set final additive watermark",
+                "Failed to set final watermark with session control",
                 table_name=table_name,
                 error=str(e),
                 session_rows=session_rows_processed
             )
-            # Fallback to regular update_watermarks if additive method fails
+            # Fallback to old method if new mode fails (with S3 count fix)
+            try:
+                s3_stats = self.s3_manager.get_upload_stats()
+                fallback_s3_files = s3_stats.get('total_files', 0)
+            except:
+                fallback_s3_files = 0  # Safe fallback if S3Manager fails
+                
             return self.update_watermarks(
                 table_name=table_name,
                 extraction_time=extraction_time,
                 max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_processed_id,
                 rows_extracted=session_rows_processed,
+                s3_file_count=fallback_s3_files,  # ✅ FIXED: Include S3 count in fallback
                 status=status,
                 error_message=error_message
             )
