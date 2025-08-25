@@ -535,13 +535,27 @@ class S3WatermarkManager:
             watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
             
             # Track processed S3 files to prevent re-loading
+            # MEMORY LEAK FIX: Implement sliding window to prevent unlimited growth
             if processed_files:
                 if not watermark.processed_s3_files:
                     watermark.processed_s3_files = []
+                
                 # Add new files to the list (avoid duplicates)
                 for file_path in processed_files:
                     if file_path not in watermark.processed_s3_files:
                         watermark.processed_s3_files.append(file_path)
+                
+                # MEMORY LEAK FIX: Implement file list rotation to prevent memory exhaustion
+                max_tracked_files = 5000  # Reasonable limit for production
+                if len(watermark.processed_s3_files) > max_tracked_files:
+                    # Keep most recent files, remove oldest
+                    files_to_remove = len(watermark.processed_s3_files) - max_tracked_files
+                    watermark.processed_s3_files = watermark.processed_s3_files[files_to_remove:]
+                    logger.info(f"Rotated processed files list: removed {files_to_remove} oldest entries, "
+                              f"kept {len(watermark.processed_s3_files)} recent files")
+                
+                # Additional cleanup: remove files older than 30 days based on naming pattern
+                self._cleanup_old_processed_files(watermark)
             
             if error_message:
                 watermark.last_error = error_message
@@ -561,6 +575,254 @@ class S3WatermarkManager:
         except Exception as e:
             logger.error(f"Failed to update Redshift watermark for {table_name}: {e}")
             raise WatermarkError(f"Failed to update Redshift watermark: {e}")
+    
+    def _cleanup_old_processed_files(self, watermark: S3TableWatermark):
+        """
+        Clean up processed files list by removing files older than 30 days based on naming patterns.
+        
+        Args:
+            watermark: The watermark object with processed_s3_files list to clean up
+        """
+        if not watermark.processed_s3_files:
+            return
+        
+        try:
+            from datetime import datetime, timedelta
+            import re
+            
+            # Define cutoff date (30 days ago)
+            cutoff_date = datetime.now() - timedelta(days=30)
+            
+            # Track files to remove
+            files_to_remove = []
+            
+            for file_path in watermark.processed_s3_files:
+                try:
+                    # Extract timestamp from S3 file path patterns
+                    # Common patterns: "YYYYMMDD_HHMMSS", "YYYY-MM-DD", "batch_YYYYMMDD"
+                    timestamp_patterns = [
+                        r'(\d{8})_(\d{6})',        # YYYYMMDD_HHMMSS
+                        r'(\d{4}-\d{2}-\d{2})',    # YYYY-MM-DD
+                        r'batch_(\d{8})',          # batch_YYYYMMDD
+                        r'(\d{4})(\d{2})(\d{2})',  # YYYYMMDD
+                    ]
+                    
+                    file_timestamp = None
+                    
+                    for pattern in timestamp_patterns:
+                        match = re.search(pattern, file_path)
+                        if match:
+                            if len(match.groups()) == 2:  # YYYYMMDD_HHMMSS
+                                date_str = match.group(1)
+                                time_str = match.group(2)
+                                file_timestamp = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+                            elif len(match.groups()) == 1:  # YYYY-MM-DD or batch_YYYYMMDD
+                                date_str = match.group(1).replace('-', '')
+                                if len(date_str) == 8:  # YYYYMMDD
+                                    file_timestamp = datetime.strptime(date_str, "%Y%m%d")
+                                elif len(date_str) == 10:  # YYYY-MM-DD
+                                    file_timestamp = datetime.strptime(date_str, "%Y-%m-%d")
+                            elif len(match.groups()) == 3:  # YYYYMMDD split
+                                year, month, day = match.groups()
+                                file_timestamp = datetime.strptime(f"{year}{month}{day}", "%Y%m%d")
+                            break
+                    
+                    # If we found a timestamp and it's older than cutoff, mark for removal
+                    if file_timestamp and file_timestamp < cutoff_date:
+                        files_to_remove.append(file_path)
+                        
+                except Exception as e:
+                    # If we can't parse the timestamp, keep the file to be safe
+                    logger.debug(f"Could not parse timestamp from {file_path}: {e}")
+                    continue
+            
+            # Remove old files
+            if files_to_remove:
+                for file_path in files_to_remove:
+                    watermark.processed_s3_files.remove(file_path)
+                
+                logger.info(f"Time-based cleanup removed {len(files_to_remove)} files older than 30 days "
+                          f"({len(watermark.processed_s3_files)} files remaining)")
+            else:
+                logger.debug("Time-based cleanup: no files older than 30 days found")
+                
+        except Exception as e:
+            logger.warning(f"Time-based processed files cleanup failed: {e}")
+    
+    def _acquire_watermark_lock(self, lock_key: str, operation_id: str) -> bool:
+        """
+        Acquire a distributed lock for watermark operations using S3.
+        
+        Args:
+            lock_key: S3 key for the lock file
+            operation_id: Unique operation identifier
+            
+        Returns:
+            True if lock acquired successfully, False otherwise
+        """
+        try:
+            # Create lock content with operation metadata
+            lock_data = {
+                'operation_id': operation_id,
+                'acquired_at': datetime.utcnow().isoformat() + 'Z',
+                'ttl_seconds': 300,  # 5 minutes TTL to prevent permanent locks
+                'process_info': {
+                    'pid': getattr(__import__('os'), 'getpid', lambda: 'unknown')(),
+                    'hostname': getattr(__import__('socket'), 'gethostname', lambda: 'unknown')()
+                }
+            }
+            
+            lock_json = json.dumps(lock_data)
+            
+            # Use S3 conditional put to implement atomic lock acquisition
+            # This prevents race conditions by ensuring only one operation can create the lock
+            try:
+                self.s3_client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=lock_key,
+                    Body=lock_json,
+                    ContentType='application/json',
+                    # Ensure lock doesn't exist (atomic check-and-set)
+                    IfNoneMatch='*'  # Only create if object doesn't exist
+                )
+                logger.debug(f"Acquired watermark lock: {lock_key} (operation: {operation_id})")
+                return True
+                
+            except self.s3_client.exceptions.PreconditionFailed:
+                # Lock already exists - check if it's expired
+                try:
+                    response = self.s3_client.get_object(Bucket=self.bucket_name, Key=lock_key)
+                    existing_lock = json.loads(response['Body'].read().decode('utf-8'))
+                    
+                    # Check if lock is expired (TTL-based cleanup)
+                    lock_time = datetime.fromisoformat(existing_lock['acquired_at'].replace('Z', '+00:00'))
+                    ttl_seconds = existing_lock.get('ttl_seconds', 300)
+                    
+                    if (datetime.utcnow().replace(tzinfo=__import__('datetime').timezone.utc) - lock_time).total_seconds() > ttl_seconds:
+                        # Lock is expired, try to clean it up and retry
+                        logger.info(f"Found expired lock, attempting cleanup: {lock_key}")
+                        self._release_watermark_lock(lock_key, existing_lock['operation_id'])
+                        
+                        # Retry lock acquisition after cleanup
+                        try:
+                            self.s3_client.put_object(
+                                Bucket=self.bucket_name,
+                                Key=lock_key,
+                                Body=lock_json,
+                                ContentType='application/json',
+                                IfNoneMatch='*'
+                            )
+                            logger.debug(f"Acquired watermark lock after cleanup: {lock_key}")
+                            return True
+                        except:
+                            logger.debug(f"Failed to acquire lock after cleanup, another process likely got it: {lock_key}")
+                            return False
+                    else:
+                        logger.debug(f"Active lock exists: {lock_key} (held by operation: {existing_lock.get('operation_id', 'unknown')})")
+                        return False
+                        
+                except Exception as e:
+                    logger.debug(f"Could not read existing lock {lock_key}: {e}")
+                    return False
+                    
+        except Exception as e:
+            logger.warning(f"Failed to acquire watermark lock {lock_key}: {e}")
+            return False
+    
+    def _release_watermark_lock(self, lock_key: str, operation_id: str):
+        """
+        Release a distributed lock for watermark operations.
+        
+        Args:
+            lock_key: S3 key for the lock file  
+            operation_id: Operation identifier that acquired the lock
+        """
+        try:
+            # Verify we own the lock before releasing it
+            try:
+                response = self.s3_client.get_object(Bucket=self.bucket_name, Key=lock_key)
+                existing_lock = json.loads(response['Body'].read().decode('utf-8'))
+                
+                if existing_lock.get('operation_id') != operation_id:
+                    logger.warning(f"Cannot release lock {lock_key}: owned by different operation {existing_lock.get('operation_id')}")
+                    return
+            except self.s3_client.exceptions.NoSuchKey:
+                logger.debug(f"Lock {lock_key} already released or expired")
+                return
+            except Exception as e:
+                logger.warning(f"Could not verify lock ownership for {lock_key}: {e}")
+                return
+            
+            # Delete the lock
+            self.s3_client.delete_object(Bucket=self.bucket_name, Key=lock_key)
+            logger.debug(f"Released watermark lock: {lock_key} (operation: {operation_id})")
+            
+        except Exception as e:
+            logger.warning(f"Failed to release watermark lock {lock_key}: {e}")
+    
+    def _verify_watermark_save_with_backoff(self, primary_key: str, expected_watermark: S3TableWatermark, operation_id: str) -> bool:
+        """
+        Verify watermark save with exponential backoff to handle S3 eventual consistency.
+        
+        Args:
+            primary_key: S3 key for the saved watermark
+            expected_watermark: Expected watermark data
+            operation_id: Operation ID that should match in saved data
+            
+        Returns:
+            True if verification successful, False otherwise
+        """
+        import time
+        
+        max_attempts = 5
+        base_delay = 0.1  # 100ms initial delay
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Try to read back the saved watermark
+                response = self.s3_client.get_object(Bucket=self.bucket_name, Key=primary_key)
+                saved_data = json.loads(response['Body'].read().decode('utf-8'))
+                
+                # Check operation ID to ensure we're reading our own save
+                saved_operation_id = saved_data.get('backup_metadata', {}).get('operation_id')
+                if saved_operation_id != operation_id:
+                    logger.warning(f"Verification found different operation ID: expected {operation_id}, got {saved_operation_id}")
+                    if attempt < max_attempts:
+                        time.sleep(base_delay * (2 ** (attempt - 1)))  # Exponential backoff
+                        continue
+                    return False
+                
+                # Verify critical watermark fields
+                if (saved_data.get('table_name') == expected_watermark.table_name and
+                    saved_data.get('last_mysql_extraction_time') == expected_watermark.last_mysql_extraction_time and
+                    saved_data.get('mysql_status') == expected_watermark.mysql_status and
+                    saved_data.get('redshift_status') == expected_watermark.redshift_status):
+                    
+                    logger.debug(f"Watermark verification successful on attempt {attempt}")
+                    return True
+                else:
+                    logger.warning(f"Watermark verification failed: data mismatch on attempt {attempt}")
+                    if attempt < max_attempts:
+                        time.sleep(base_delay * (2 ** (attempt - 1)))  # Exponential backoff
+                        continue
+                    return False
+                    
+            except self.s3_client.exceptions.NoSuchKey:
+                logger.debug(f"Watermark not yet available for verification, attempt {attempt}")
+                if attempt < max_attempts:
+                    time.sleep(base_delay * (2 ** (attempt - 1)))  # Exponential backoff
+                    continue
+                return False
+                
+            except Exception as e:
+                logger.warning(f"Watermark verification error on attempt {attempt}: {e}")
+                if attempt < max_attempts:
+                    time.sleep(base_delay * (2 ** (attempt - 1)))  # Exponential backoff
+                    continue
+                return False
+        
+        logger.error(f"Watermark verification failed after {max_attempts} attempts")
+        return False
     
     def list_all_tables(self) -> List[S3TableWatermark]:
         """Get all table watermarks (like SELECT * FROM watermarks)"""
@@ -947,37 +1209,61 @@ class S3WatermarkManager:
             raise WatermarkError(f"Force reset failed: {e}")
     
     def _save_watermark(self, watermark: S3TableWatermark) -> bool:
-        """Save watermark to S3 with multi-location backup"""
+        """
+        Save watermark to S3 with atomic operations and race condition protection.
+        
+        RACE CONDITION FIX: Implements proper synchronization and delayed verification
+        to prevent concurrent access issues and S3 eventual consistency problems.
+        """
         import time
+        import uuid
         
         try:
-            # Generate session ID for backup tracking
+            # Generate unique operation ID to prevent race conditions
+            operation_id = str(uuid.uuid4())
             session_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             
-            # Prepare watermark data with backup metadata
-            watermark_data = watermark.to_dict()
-            watermark_data['backup_metadata'] = {
-                'saved_at': datetime.utcnow().isoformat() + 'Z',
-                'session_id': session_id,
-                'backup_locations': ['primary', 'daily', 'session']
-            }
+            # RACE CONDITION FIX: Create atomic lock using S3 object with unique key
+            lock_key = f"{self.watermark_prefix}locks/{watermark.table_name.replace('.', '_')}.lock"
+            if not self._acquire_watermark_lock(lock_key, operation_id):
+                logger.warning(f"Could not acquire watermark lock for {watermark.table_name}, concurrent operation detected")
+                time.sleep(0.5)  # Short delay for other operation to complete
+                # Try one more time with exponential backoff
+                if not self._acquire_watermark_lock(lock_key, operation_id):
+                    logger.error(f"Failed to acquire watermark lock after retry for {watermark.table_name}")
+                    return False
             
-            watermark_json = json.dumps(watermark_data, indent=2)
-            
-            # Get all save locations
-            primary_key = self._get_table_watermark_key(watermark.table_name)
-            daily_key = self._get_daily_backup_key(watermark.table_name)
-            session_key = self._get_session_backup_key(watermark.table_name, session_id)
-            
-            # Save to primary location with retry
-            primary_success = self._save_with_retry(primary_key, watermark_json, watermark, location="primary")
-            
-            # Save to backup locations (don't fail if backups fail)
-            daily_success = self._save_to_backup_location(daily_key, watermark_json, watermark, location="daily")
-            session_success = self._save_to_backup_location(session_key, watermark_json, watermark, location="session")
-            
-            # Verify primary save integrity
-            verification_success = self._verify_watermark_save(primary_key, watermark)
+            try:
+                # Prepare watermark data with operation metadata
+                watermark_data = watermark.to_dict()
+                watermark_data['backup_metadata'] = {
+                    'saved_at': datetime.utcnow().isoformat() + 'Z',
+                    'session_id': session_id,
+                    'operation_id': operation_id,
+                    'backup_locations': ['primary', 'daily', 'session']
+                }
+                
+                watermark_json = json.dumps(watermark_data, indent=2)
+                
+                # Get all save locations
+                primary_key = self._get_table_watermark_key(watermark.table_name)
+                daily_key = self._get_daily_backup_key(watermark.table_name)
+                session_key = self._get_session_backup_key(watermark.table_name, session_id)
+                
+                # Save to primary location with retry
+                primary_success = self._save_with_retry(primary_key, watermark_json, watermark, location="primary")
+                
+                # Save to backup locations (don't fail if backups fail)
+                daily_success = self._save_to_backup_location(daily_key, watermark_json, watermark, location="daily")
+                session_success = self._save_to_backup_location(session_key, watermark_json, watermark, location="session")
+                
+                # RACE CONDITION FIX: Implement delayed verification with exponential backoff
+                # to handle S3 eventual consistency issues
+                verification_success = self._verify_watermark_save_with_backoff(primary_key, watermark, operation_id)
+                
+            finally:
+                # Always release lock to prevent deadlocks
+                self._release_watermark_lock(lock_key, operation_id)
             
             # Log backup results
             backup_results = {

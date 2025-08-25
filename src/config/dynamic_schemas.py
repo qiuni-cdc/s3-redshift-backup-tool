@@ -112,20 +112,25 @@ class DynamicSchemaManager:
         db_name, tbl_name = table_name.split('.', 1)
         
         # Enhanced INFORMATION_SCHEMA query with COLUMN_TYPE for decimal precision
-        discovery_query = f"""
+        # SECURITY FIX: Use parameterized query to prevent SQL injection
+        discovery_query = """
         SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE,
                NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = '{tbl_name}'
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
         ORDER BY ORDINAL_POSITION;
         """
+        
+        # Validate table name components against injection patterns
+        self._validate_table_name_security(db_name, tbl_name)
         
         try:
             # Use existing connection manager for secure access
             with self.connection_manager.ssh_tunnel() as local_port:
                 with self.connection_manager.database_connection(local_port) as conn:
                     cursor = conn.cursor(dictionary=True)
-                    cursor.execute(discovery_query)
+                    # SECURITY FIX: Use parameterized query with proper escaping
+                    cursor.execute(discovery_query, (db_name, tbl_name))
                     columns_info = cursor.fetchall()
                     cursor.close()
             
@@ -307,6 +312,49 @@ CREATE TABLE IF NOT EXISTS {redshift_table_name} (
         logger.debug(f"Generated Redshift DDL for {table_name}")
         return ddl
     
+    def _validate_table_name_security(self, db_name: str, tbl_name: str):
+        """
+        Validate table name components for security issues
+        
+        Args:
+            db_name: Database name component
+            tbl_name: Table name component
+            
+        Raises:
+            ValidationError: If table name contains suspicious patterns
+        """
+        import re
+        
+        # Check for basic SQL injection patterns
+        dangerous_patterns = [
+            r'[;\'"\\]',  # SQL terminators and quotes
+            r'--',        # SQL comments
+            r'/\*',       # SQL block comments
+            r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE)\b',  # SQL keywords
+            r'\b(UNION|SELECT|FROM|WHERE)\b',  # More SQL keywords
+            r'[\x00-\x1F\x7F]',  # Control characters
+        ]
+        
+        for component, name in [(db_name, "database"), (tbl_name, "table")]:
+            # Basic length check
+            if len(component) > 64:  # MySQL identifier limit
+                raise ValidationError(f"Invalid {name} name: too long (max 64 characters)")
+            
+            # Check for dangerous patterns
+            for pattern in dangerous_patterns:
+                if re.search(pattern, component, re.IGNORECASE):
+                    logger.error(f"Security validation failed: suspicious pattern in {name} name")
+                    raise ValidationError(f"Invalid {name} name: contains suspicious characters")
+        
+        # Additional validation: must be valid MySQL identifiers
+        identifier_pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
+        if not re.match(identifier_pattern, db_name):
+            raise ValidationError(f"Invalid database name format: {db_name}")
+        if not re.match(identifier_pattern, tbl_name):
+            raise ValidationError(f"Invalid table name format: {tbl_name}")
+        
+        logger.debug(f"Table name security validation passed: {db_name}.{tbl_name}")
+
     def clear_cache(self):
         """Clear the schema cache"""
         cache_size = len(self._schema_cache)
