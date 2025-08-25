@@ -2,8 +2,8 @@
 Sequential backup strategy implementation.
 
 This module implements the sequential backup strategy where tables are processed
-one by one in sequence. This is the most reliable strategy for consistent backups
-but may take longer for large numbers of tables.
+one by one in sequence using row-based chunking (timestamp + ID pagination).
+This is the most reliable strategy for consistent backups with exact row counts.
 """
 
 from typing import List, Dict, Any, Optional
@@ -11,29 +11,41 @@ import time
 from datetime import datetime
 
 from src.backup.base import BaseBackupStrategy
+from src.backup.row_based import RowBasedBackupStrategy
 from src.utils.exceptions import BackupError, DatabaseError, raise_backup_error
 from src.utils.logging import get_backup_logger
 
 
 class SequentialBackupStrategy(BaseBackupStrategy):
     """
-    Sequential backup strategy implementation.
+    Sequential backup strategy implementation using row-based chunking.
     
     Processes tables one by one in sequence, ensuring consistent state
-    and reliable error handling. Best for scenarios where data consistency
-    is more important than processing speed.
+    and reliable error handling. Uses timestamp + ID pagination for
+    exact row count control and perfect resume capability.
     """
     
     def __init__(self, config):
         super().__init__(config)
-        self.logger.set_context(strategy="sequential", gemini_mode=True)
+        self.logger.set_context(strategy="sequential", chunking_type="row_based")
     
-    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
+    def check_memory_usage(self, batch_number: int) -> bool:
+        """Delegate to memory manager"""
+        return self.memory_manager.check_memory_usage(batch_number)
+    
+    def force_gc_if_needed(self, batch_number: int):
+        """Delegate to memory manager"""
+        return self.memory_manager.force_gc_if_needed(batch_number)
+    
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None) -> bool:
         """
-        Execute sequential backup for all specified tables.
+        Execute sequential backup for all specified tables using row-based chunking.
         
         Args:
             tables: List of table names to backup
+            chunk_size: Optional row limit per chunk (overrides config)
+            max_total_rows: Optional maximum total rows to process  
+            limit: Deprecated - use chunk_size instead (for backward compatibility)
         
         Returns:
             True if all tables backed up successfully, False otherwise
@@ -64,8 +76,17 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                     )
                     
                     try:
-                        success = self._process_single_table(
-                            db_conn, table_name, current_timestamp, limit
+                        # Use row-based chunking strategy (timestamp + ID pagination)
+                        self.logger.logger.info(
+                            "Using row-based chunking strategy (timestamp + ID pagination)",
+                            table_name=table_name,
+                            target_rows_per_chunk=self.config.backup.target_rows_per_chunk
+                        )
+                        # Handle backward compatibility with old 'limit' parameter
+                        effective_chunk_size = chunk_size or limit
+                        
+                        success = self._process_single_table_row_based(
+                            db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows
                         )
                         
                         table_duration = time.time() - table_start_time
@@ -99,8 +120,8 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                             self.logger.logger.error("Database connection lost, stopping backup")
                             break
             
-            # Watermarks are now updated per table, no global update needed
-            watermark_updated = len(successful_tables) > 0  # True if any table succeeded
+            # Watermarks are updated per table by row-based strategy
+            watermark_updated = len(successful_tables) > 0
             
             # Calculate final results
             all_success = len(failed_tables) == 0
@@ -118,25 +139,15 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 watermark_updated=watermark_updated
             )
             
-            # Log summary with Gemini statistics
+            # Log summary with statistics
             summary = self.get_backup_summary()
             self.logger.logger.info(
                 "Sequential backup summary",
                 **summary,
                 successful_tables=len(successful_tables),
-                failed_tables=len(failed_tables)
+                failed_tables=len(failed_tables),
+                chunking_strategy="row_based"
             )
-            
-            # Log Gemini mode statistics
-            gemini_stats = summary.get('gemini_stats', {})
-            if gemini_stats.get('total_batches_processed', 0) > 0:
-                self.logger.logger.info(
-                    "Gemini mode statistics",
-                    gemini_success_rate=f"{gemini_stats.get('gemini_success_rate', 0)}%",
-                    schemas_discovered=gemini_stats.get('schemas_discovered', 0),
-                    total_batches=gemini_stats.get('total_batches_processed', 0),
-                    strategy="sequential"
-                )
             
             return all_success
             
@@ -150,203 +161,98 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         finally:
             self.cleanup_resources()
     
-    def _process_single_table(
+    def _process_single_table_row_based(
         self, 
         db_conn, 
         table_name: str, 
         current_timestamp: str,
-        limit: Optional[int] = None
+        chunk_size: Optional[int] = None,
+        max_total_rows: Optional[int] = None
     ) -> bool:
         """
-        Process a single table for backup.
+        Process a single table using row-based chunking (timestamp + ID pagination).
         
         Args:
             db_conn: Database connection
             table_name: Name of the table to process
             current_timestamp: Current backup timestamp
-        
+            chunk_size: Optional row limit per chunk
+            max_total_rows: Optional maximum total rows to process
+            
         Returns:
             True if table processed successfully
         """
-        cursor = None
+        # Delegate to the specialized row-based strategy
         try:
-            self.logger.table_started(table_name)
+            row_based_strategy = RowBasedBackupStrategy(self.config)
             
-            # Create cursor with dictionary output
-            cursor = db_conn.cursor(dictionary=True, buffered=False)
+            # P1 FIX: Transfer necessary components but create new memory manager instance
+            # to avoid shared state pollution between strategies
+            row_based_strategy.logger = self.logger
+            row_based_strategy.watermark_manager = self.watermark_manager
             
-            # Validate table structure
-            if not self.validate_table_exists(cursor, table_name):
-                self.logger.logger.error(
-                    "Table validation failed",
-                    table_name=table_name
-                )
-                return False
-            
-            # Get last watermark for this specific table
-            last_watermark = self.get_table_watermark_timestamp(table_name)
-            
-            # Log backup window
-            self.logger.logger.info(
-                "Processing backup window",
-                table_name=table_name,
-                start_time=last_watermark,
-                end_time=current_timestamp
+            # P1 FIX: Create isolated memory manager for row-based strategy
+            from src.backup.base import MemoryConfig, MemoryManager
+            memory_config = MemoryConfig.from_app_config(self.config)
+            row_based_strategy.memory_manager = MemoryManager(
+                memory_config=memory_config,
+                logger=self.logger.logger  # Share logger but isolate memory state
             )
             
-            # Get estimated row count for progress tracking
-            estimated_rows = self.get_table_row_count(
-                cursor, table_name, last_watermark, current_timestamp
+            row_based_strategy.s3_manager = self.s3_manager
+            row_based_strategy.process_batch = self.process_batch
+            row_based_strategy.validate_table_exists = self.validate_table_exists
+            row_based_strategy.update_watermarks = self.update_watermarks
+            row_based_strategy.database_session = self.database_session
+            
+            # Use the row-based strategy to process this single table
+            success = row_based_strategy._process_single_table_row_based(
+                db_conn, table_name, current_timestamp, chunk_size, max_total_rows
             )
             
-            if estimated_rows == 0:
-                self.logger.logger.info(
-                    "No new data to backup",
-                    table_name=table_name
-                )
-                return True
-            
-            self.logger.logger.info(
-                f"Estimated {estimated_rows} rows to process",
-                table_name=table_name,
-                estimated_rows=estimated_rows
-            )
-            
-            # Execute incremental query with optional limit
-            incremental_query = self.get_incremental_query(
-                table_name, last_watermark, current_timestamp, limit=limit
-            )
-            
-            cursor.execute(incremental_query)
-            
-            # Process data in batches
-            batch_id = 0
-            total_rows_processed = 0
-            
-            while True:
-                batch_start_time = time.time()
+            # CRITICAL FIX: Transfer metrics back from row-based strategy to sequential strategy
+            if success:
+                # Get the metrics from the row-based strategy that did the actual work
+                row_based_summary = row_based_strategy.get_backup_summary()
+                row_based_table_metrics = row_based_summary.get('per_table_metrics', {}).get(table_name, {})
                 
-                # Fetch batch
-                batch_data = cursor.fetchmany(self.config.backup.batch_size)
-                if not batch_data:
-                    break
-                
-                batch_id += 1
-                batch_size = len(batch_data)
-                total_rows_processed += batch_size
-                
-                # Process batch with retries
-                batch_success = self._process_batch_with_retries(
-                    batch_data, table_name, batch_id, current_timestamp
-                )
-                
-                if not batch_success:
-                    self.logger.logger.error(
-                        "Batch processing failed after retries",
+                # Transfer table-specific metrics to sequential strategy
+                if row_based_table_metrics:
+                    table_rows = row_based_table_metrics.get('rows', 0)
+                    table_batches = row_based_table_metrics.get('batches', 0)
+                    table_duration = row_based_table_metrics.get('duration', 0.0)
+                    table_bytes = row_based_table_metrics.get('bytes', 0)
+                    
+                    # Add to sequential strategy's metrics
+                    self.metrics.add_table_metrics(
+                        table_name, table_rows, table_batches, table_duration, table_bytes
+                    )
+                    
+                    self.logger.logger.info(
+                        "Metrics transferred from row-based to sequential strategy",
                         table_name=table_name,
-                        batch_id=batch_id
+                        transferred_rows=table_rows,
+                        transferred_batches=table_batches,
+                        transferred_bytes=table_bytes
                     )
-                    return False
-                
-                # Log progress
-                batch_duration = time.time() - batch_start_time
-                progress_pct = (total_rows_processed / max(estimated_rows, total_rows_processed)) * 100
-                
-                self.logger.logger.debug(
-                    "Batch completed",
-                    table_name=table_name,
-                    batch_id=batch_id,
-                    batch_size=batch_size,
-                    total_processed=total_rows_processed,
-                    progress_percent=round(progress_pct, 1),
-                    batch_duration=round(batch_duration, 2)
-                )
-            
-            # Record table metrics
-            table_duration = time.time() - (self.metrics.start_time or time.time())
-            self.metrics.add_table_metrics(
-                table_name, total_rows_processed, batch_id, table_duration
-            )
-            
-            # Get max data timestamp from ACTUALLY EXTRACTED data for watermark
-            max_data_timestamp = None
-            if total_rows_processed > 0:
-                # Get the exact same query as backup, but only get the MAX timestamp from extracted rows
-                # This ensures watermark matches the last row actually processed
-                cursor.execute(f"""
-                    SELECT MAX(`update_at`) as max_update_at 
-                    FROM (
-                        SELECT `update_at`
-                        FROM {table_name} 
-                        WHERE `update_at` > '{last_watermark}' 
-                        ORDER BY `update_at`, `ID`
-                        LIMIT {total_rows_processed}
-                    ) as extracted_rows
-                """)
-                result = cursor.fetchone()
-                if result and result.get('max_update_at'):
-                    max_data_timestamp = result['max_update_at']
-            
-            # Update S3 watermark for this table
-            try:
-                watermark_updated = self.update_watermarks(
-                    table_name=table_name,
-                    extraction_time=datetime.strptime(current_timestamp, '%Y-%m-%d %H:%M:%S'),
-                    max_data_timestamp=max_data_timestamp,
-                    rows_extracted=total_rows_processed,
-                    status='success',
-                    s3_file_count=batch_id
-                )
-                
-                if not watermark_updated:
-                    self.logger.logger.warning(
-                        "Failed to update watermark, but table processing succeeded",
-                        table_name=table_name
+                else:
+                    # Fallback: extract from row-based strategy metrics directly
+                    self.metrics.total_rows += row_based_strategy.metrics.total_rows
+                    self.metrics.total_batches += row_based_strategy.metrics.total_batches
+                    self.metrics.total_bytes += row_based_strategy.metrics.total_bytes
+                    
+                    self.logger.logger.info(
+                        "Metrics transferred (fallback method) from row-based to sequential strategy",
+                        table_name=table_name,
+                        transferred_rows=row_based_strategy.metrics.total_rows,
+                        transferred_batches=row_based_strategy.metrics.total_batches
                     )
-                
-            except Exception as e:
-                self.logger.logger.warning(
-                    "Watermark update failed but table processing succeeded",
-                    table_name=table_name,
-                    error=str(e)
-                )
             
-            self.logger.logger.info(
-                "Table processing completed",
-                table_name=table_name,
-                total_rows=total_rows_processed,
-                total_batches=batch_id,
-                estimated_rows=estimated_rows,
-                accuracy_percent=round((total_rows_processed / max(estimated_rows, 1)) * 100, 1)
-            )
-            
-            return True
+            return success
             
         except Exception as e:
-            # Update watermark with error status
-            try:
-                self.update_watermarks(
-                    table_name=table_name,
-                    extraction_time=datetime.strptime(current_timestamp, '%Y-%m-%d %H:%M:%S'),
-                    max_data_timestamp=None,
-                    rows_extracted=0,
-                    status='failed',
-                    s3_file_count=0,
-                    error_message=str(e)
-                )
-            except Exception as watermark_error:
-                self.logger.logger.warning(
-                    "Failed to update error watermark",
-                    table_name=table_name,
-                    watermark_error=str(watermark_error)
-                )
-            
-            self.logger.error_occurred(e, f"table_processing_{table_name}")
+            self.logger.error_occurred(e, f"row_based_processing_{table_name}")
             return False
-        
-        finally:
-            if cursor:
-                cursor.close()
     
     def _process_batch_with_retries(
         self, 
@@ -404,13 +310,15 @@ class SequentialBackupStrategy(BaseBackupStrategy):
     def get_strategy_info(self) -> Dict[str, Any]:
         """Get information about this backup strategy"""
         return {
-            "name": "Sequential Backup Strategy",
-            "description": "Processes tables one by one in sequence for maximum reliability",
+            "name": "Sequential Backup Strategy (Row-Based)",
+            "description": "Processes tables one by one using timestamp + ID pagination for exact row counts",
             "advantages": [
                 "Maximum data consistency",
                 "Predictable resource usage", 
                 "Simple error handling",
-                "Reliable for all table sizes"
+                "Exact row count control",
+                "Perfect resume capability",
+                "No dependency on data patterns"
             ],
             "disadvantages": [
                 "Slower for multiple tables",
@@ -420,12 +328,15 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 "Small to medium number of tables",
                 "When data consistency is critical",
                 "Limited system resources",
-                "Simple, reliable operations"
+                "Large tables requiring exact chunk sizes",
+                "Tables with mixed data density patterns"
             ],
             "configuration": {
                 "batch_size": self.config.backup.batch_size,
                 "retry_attempts": self.config.backup.retry_attempts,
-                "timeout_seconds": self.config.backup.timeout_seconds
+                "timeout_seconds": self.config.backup.timeout_seconds,
+                "target_rows_per_chunk": self.config.backup.target_rows_per_chunk,
+                "chunking_strategy": "row_based"
             }
         }
     
@@ -439,11 +350,9 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         Returns:
             Dictionary with time estimates
         """
-        # This is a rough estimate based on configuration
-        # In a real implementation, you might query table sizes
-        
+        # Row-based chunking provides more predictable estimates
         estimated_rows_per_table = 10000  # Default estimate
-        processing_rate = 5000  # rows per second (from our test results)
+        processing_rate = 5000  # rows per second (from test results)
         
         total_estimated_rows = len(tables) * estimated_rows_per_table
         estimated_seconds = total_estimated_rows / processing_rate
@@ -454,5 +363,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             "estimated_duration_seconds": estimated_seconds,
             "estimated_duration_minutes": round(estimated_seconds / 60, 1),
             "processing_rate_rows_per_second": processing_rate,
-            "strategy": "sequential"
+            "strategy": "sequential",
+            "chunking_strategy": "row_based",
+            "predictability": "high"  # Row-based chunking offers high predictability
         }

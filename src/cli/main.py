@@ -907,7 +907,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
     Examples:
         s3-backup watermark get -t settlement.settlement_claim_detail
         s3-backup watermark get -t settlement.settlement_claim_detail --show-files
-        s3-backup watermark set -t settlement.settlement_claim_detail --timestamp "2025-08-11 10:00:00"
+        s3-backup watermark set -t settlement.settlement_claim_detail --timestamp "2024-01-01 00:00:00"
         s3-backup watermark reset -t settlement.settlement_claim_detail
         s3-backup watermark list
     """

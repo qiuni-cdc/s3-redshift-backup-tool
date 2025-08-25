@@ -40,13 +40,24 @@ class DynamicSchemaManager:
         # Get config from connection manager for Redshift operations
         self.config = connection_manager.config if hasattr(connection_manager, 'config') else None
         
-        # Schema cache: table_name -> (PyArrow schema, Redshift DDL)
-        self._schema_cache: Dict[str, Tuple[pa.Schema, str]] = {}
+        # P1 FIX: Enhanced schema cache with TTL support
+        # Schema cache: table_name -> {'schemas': (PyArrow, DDL), 'cached_at': datetime, 'access_count': int}
+        self._schema_cache: Dict[str, Dict[str, Any]] = {}
+        
+        # Cache configuration
+        self._cache_ttl_hours = 24  # Default 24 hour TTL
+        self._max_cache_size = 100  # Maximum cached schemas
+        self._cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'evictions': 0,
+            'expired': 0
+        }
         
         # Performance keys configuration
         self._performance_keys_config = self._load_performance_keys_config()
         
-        logger.info("Dynamic Schema Manager initialized with Gemini approach")
+        logger.info("Dynamic Schema Manager initialized with Gemini approach and TTL cache")
     
     def _load_performance_keys_config(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -72,7 +83,7 @@ class DynamicSchemaManager:
     
     def get_schemas(self, table_name: str) -> Tuple[pa.Schema, str]:
         """
-        Get PyArrow schema and Redshift DDL for a table
+        Get PyArrow schema and Redshift DDL for a table with TTL cache support
         
         Args:
             table_name: Full table name (e.g., 'settlement.settlement_normal_delivery_detail')
@@ -83,14 +94,31 @@ class DynamicSchemaManager:
         Raises:
             ValidationError: If table not found or schema discovery fails
         """
-        # Check cache first
-        if table_name not in self._schema_cache:
-            logger.info(f"Schema not cached, discovering from MySQL: {table_name}")
-            self._discover_and_cache_schema(table_name)
-        else:
-            logger.debug(f"Using cached schema for {table_name}")
+        # P1 FIX: Check cache with TTL validation
+        if table_name in self._schema_cache:
+            cache_entry = self._schema_cache[table_name]
+            
+            # Check if cache entry is still valid (not expired)
+            if self._is_cache_entry_valid(cache_entry):
+                # Update access statistics
+                cache_entry['access_count'] += 1
+                cache_entry['last_accessed'] = datetime.now()
+                self._cache_stats['hits'] += 1
+                
+                logger.debug(f"Using cached schema for {table_name} (age: {self._get_cache_age_hours(cache_entry):.1f}h)")
+                return cache_entry['schemas']
+            else:
+                # Cache expired, remove it
+                logger.info(f"Cache expired for {table_name}, removing and re-discovering")
+                del self._schema_cache[table_name]
+                self._cache_stats['expired'] += 1
         
-        return self._schema_cache[table_name]
+        # Cache miss or expired - discover schema
+        logger.info(f"Schema not cached or expired, discovering from MySQL: {table_name}")
+        self._cache_stats['misses'] += 1
+        self._discover_and_cache_schema(table_name)
+        
+        return self._schema_cache[table_name]['schemas']
     
     def _discover_and_cache_schema(self, table_name: str):
         """
@@ -142,10 +170,21 @@ class DynamicSchemaManager:
             # Translate to PyArrow schema and Redshift DDL
             pyarrow_schema, redshift_ddl = self._translate_schema(table_name, columns_info)
             
-            # Cache the results
-            self._schema_cache[table_name] = (pyarrow_schema, redshift_ddl)
+            # P1 FIX: Cache with TTL metadata
+            cache_entry = {
+                'schemas': (pyarrow_schema, redshift_ddl),
+                'cached_at': datetime.now(),
+                'last_accessed': datetime.now(),
+                'access_count': 1,
+                'table_columns': len(columns_info)
+            }
             
-            logger.info(f"Schema cached successfully for {table_name}")
+            # Enforce cache size limit with LRU eviction
+            self._enforce_cache_size_limit()
+            
+            self._schema_cache[table_name] = cache_entry
+            
+            logger.info(f"Schema cached successfully for {table_name} with TTL support")
             
         except mysql.connector.Error as e:
             logger.error(f"MySQL error during schema discovery for {table_name}: {e}")
@@ -354,17 +393,150 @@ CREATE TABLE IF NOT EXISTS {redshift_table_name} (
             raise ValidationError(f"Invalid table name format: {tbl_name}")
         
         logger.debug(f"Table name security validation passed: {db_name}.{tbl_name}")
+    
+    def _is_cache_entry_valid(self, cache_entry: Dict[str, Any]) -> bool:
+        """
+        Check if a cache entry is still valid (not expired)
+        
+        Args:
+            cache_entry: Cache entry with cached_at timestamp
+            
+        Returns:
+            True if cache entry is valid, False if expired
+        """
+        if 'cached_at' not in cache_entry:
+            return False
+        
+        cached_at = cache_entry['cached_at']
+        age_hours = (datetime.now() - cached_at).total_seconds() / 3600
+        
+        return age_hours < self._cache_ttl_hours
+    
+    def _get_cache_age_hours(self, cache_entry: Dict[str, Any]) -> float:
+        """Get the age of a cache entry in hours"""
+        if 'cached_at' not in cache_entry:
+            return float('inf')
+        
+        cached_at = cache_entry['cached_at']
+        return (datetime.now() - cached_at).total_seconds() / 3600
+    
+    def _enforce_cache_size_limit(self):
+        """
+        Enforce maximum cache size by evicting least recently used entries
+        """
+        if len(self._schema_cache) < self._max_cache_size:
+            return
+        
+        # Find least recently used entries
+        entries_by_access = [
+            (table_name, entry['last_accessed'], entry['access_count'])
+            for table_name, entry in self._schema_cache.items()
+        ]
+        
+        # Sort by last access time (oldest first), then by access count (least used first)
+        entries_by_access.sort(key=lambda x: (x[1], x[2]))
+        
+        # Evict oldest entries until we're under the limit
+        entries_to_evict = len(self._schema_cache) - self._max_cache_size + 10  # Evict 10 extra for buffer
+        
+        for i in range(min(entries_to_evict, len(entries_by_access))):
+            table_name = entries_by_access[i][0]
+            if table_name in self._schema_cache:
+                del self._schema_cache[table_name]
+                self._cache_stats['evictions'] += 1
+                logger.debug(f"Evicted schema cache entry for {table_name} (LRU policy)")
+    
+    def _cleanup_expired_cache_entries(self):
+        """
+        Proactively clean up expired cache entries
+        """
+        expired_tables = []
+        
+        for table_name, cache_entry in self._schema_cache.items():
+            if not self._is_cache_entry_valid(cache_entry):
+                expired_tables.append(table_name)
+        
+        for table_name in expired_tables:
+            del self._schema_cache[table_name]
+            self._cache_stats['expired'] += 1
+            logger.debug(f"Removed expired schema cache entry for {table_name}")
+        
+        if expired_tables:
+            logger.info(f"Cleaned up {len(expired_tables)} expired schema cache entries")
 
     def clear_cache(self):
-        """Clear the schema cache"""
+        """Clear the schema cache and reset statistics"""
         cache_size = len(self._schema_cache)
         self._schema_cache.clear()
-        logger.info(f"Cleared schema cache ({cache_size} entries)")
+        
+        # Reset cache statistics
+        self._cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'evictions': 0,
+            'expired': 0
+        }
+        
+        logger.info(f"Cleared schema cache ({cache_size} entries) and reset statistics")
     
     def get_cache_info(self) -> Dict[str, Any]:
-        """Get information about cached schemas"""
+        """Get comprehensive information about cached schemas and performance"""
+        # Calculate cache statistics
+        total_requests = self._cache_stats['hits'] + self._cache_stats['misses']
+        hit_rate = (self._cache_stats['hits'] / total_requests * 100) if total_requests > 0 else 0
+        
+        # Get cache entry details
+        cache_details = {}
+        current_time = datetime.now()
+        
+        for table_name, cache_entry in self._schema_cache.items():
+            age_hours = self._get_cache_age_hours(cache_entry)
+            cache_details[table_name] = {
+                'age_hours': round(age_hours, 2),
+                'access_count': cache_entry.get('access_count', 0),
+                'table_columns': cache_entry.get('table_columns', 0),
+                'is_valid': self._is_cache_entry_valid(cache_entry),
+                'last_accessed': cache_entry.get('last_accessed', cache_entry.get('cached_at')).isoformat()
+            }
+        
         return {
             'cached_tables': list(self._schema_cache.keys()),
             'cache_size': len(self._schema_cache),
-            'performance_config_tables': list(self._performance_keys_config.keys())
+            'max_cache_size': self._max_cache_size,
+            'cache_ttl_hours': self._cache_ttl_hours,
+            'performance_config_tables': list(self._performance_keys_config.keys()),
+            'statistics': {
+                **self._cache_stats,
+                'hit_rate_percent': round(hit_rate, 2),
+                'total_requests': total_requests
+            },
+            'cache_details': cache_details
+        }
+    
+    def set_cache_ttl(self, ttl_hours: int):
+        """
+        Set cache TTL and cleanup expired entries
+        
+        Args:
+            ttl_hours: Time-to-live in hours for cache entries
+        """
+        old_ttl = self._cache_ttl_hours
+        self._cache_ttl_hours = max(1, ttl_hours)  # Minimum 1 hour
+        
+        # Cleanup entries that are now expired with new TTL
+        if self._cache_ttl_hours < old_ttl:
+            self._cleanup_expired_cache_entries()
+        
+        logger.info(f"Updated cache TTL from {old_ttl}h to {self._cache_ttl_hours}h")
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache performance statistics"""
+        total_requests = self._cache_stats['hits'] + self._cache_stats['misses']
+        hit_rate = (self._cache_stats['hits'] / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            **self._cache_stats,
+            'hit_rate_percent': round(hit_rate, 2),
+            'total_requests': total_requests,
+            'cache_efficiency': 'excellent' if hit_rate > 80 else 'good' if hit_rate > 60 else 'needs_improvement'
         }

@@ -313,8 +313,23 @@ class GeminiRedshiftLoader:
                 logger.info(f"DEBUG: watermark.last_mysql_data_timestamp = {watermark.last_mysql_data_timestamp}")
                 logger.info(f"DEBUG: cutoff_time = {cutoff_time}")
                 
-                # Show first few files that were rejected, especially new ones
-                recent_files = [f for f in parquet_files if '20250813' in f or '20250814' in f][:5]
+                # P2 FIX: Show first few files that were rejected, prioritizing recent ones
+                # Use dynamic date detection instead of hardcoded dates
+                from datetime import datetime, timedelta
+                
+                # Look for files from the last 7 days instead of hardcoded dates
+                recent_date_patterns = []
+                for days_back in range(7):
+                    date = datetime.now() - timedelta(days=days_back)
+                    recent_date_patterns.append(date.strftime('%Y%m%d'))
+                
+                recent_files = []
+                for f in parquet_files:
+                    if any(pattern in f for pattern in recent_date_patterns):
+                        recent_files.append(f)
+                        if len(recent_files) >= 5:
+                            break
+                
                 all_files = parquet_files[:3] if not recent_files else recent_files
                 
                 for i, obj_key in enumerate(all_files):
@@ -352,6 +367,7 @@ class GeminiRedshiftLoader:
     
     def _copy_parquet_file(self, conn, table_name: str, s3_uri: str) -> int:
         """Execute COPY command for a single parquet file"""
+        cursor = None
         try:
             cursor = conn.cursor()
             
@@ -377,6 +393,19 @@ class GeminiRedshiftLoader:
             return rows_loaded
             
         except Exception as e:
+            # Rollback the failed transaction to clean up the connection state
+            try:
+                conn.rollback()
+                logger.debug(f"Rolled back failed transaction for {s3_uri}")
+            except:
+                pass  # Ignore rollback errors
+            
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass  # Ignore cursor close errors
+                    
             logger.error(f"COPY command failed for {s3_uri}: {e}")
             raise
     
