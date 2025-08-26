@@ -70,7 +70,7 @@ class S3Manager:
         self, 
         table_name: str, 
         timestamp: str, 
-        batch_id: int,
+        batch_id,  # Accept both int and str
         partition_strategy: str = "datetime"
     ) -> str:
         """
@@ -79,8 +79,12 @@ class S3Manager:
         Args:
             table_name: Name of the table
             timestamp: Timestamp for the backup
-            batch_id: Batch identifier
+            batch_id: Batch identifier (int >= 0 or non-empty str)
             partition_strategy: Partitioning strategy ('datetime', 'table', 'hybrid')
+        
+        Raises:
+            ValueError: If batch_id is None, empty string, or negative integer
+            TypeError: If batch_id is not str or int
         
         Returns:
             S3 key with proper partitioning
@@ -98,6 +102,20 @@ class S3Manager:
             # Generate timestamp string for filename
             timestamp_str = dt.strftime('%Y%m%d_%H%M%S')
             
+            # Handle both string and integer batch_ids with validation
+            if batch_id is None:
+                raise ValueError("batch_id cannot be None")
+            elif isinstance(batch_id, str):
+                if not batch_id.strip():
+                    raise ValueError("batch_id string cannot be empty")
+                batch_str = batch_id
+            elif isinstance(batch_id, int):
+                if batch_id < 0:
+                    raise ValueError("batch_id must be non-negative")
+                batch_str = f"{batch_id:04d}"
+            else:
+                raise TypeError(f"batch_id must be str or int, got {type(batch_id)}")
+            
             if partition_strategy == "datetime":
                 # Partition by year/month/day/hour
                 key = (
@@ -106,7 +124,7 @@ class S3Manager:
                     f"month={dt.month:02d}/"
                     f"day={dt.day:02d}/"
                     f"hour={dt.hour:02d}/"
-                    f"{clean_table_name}_{timestamp_str}_batch_{batch_id:04d}.parquet"
+                    f"{clean_table_name}_{timestamp_str}_batch_{batch_str}.parquet"
                 )
             elif partition_strategy == "table":
                 # Partition by table first, then datetime
@@ -116,7 +134,7 @@ class S3Manager:
                     f"year={dt.year}/"
                     f"month={dt.month:02d}/"
                     f"day={dt.day:02d}/"
-                    f"{timestamp_str}_batch_{batch_id:04d}.parquet"
+                    f"{timestamp_str}_batch_{batch_str}.parquet"
                 )
             elif partition_strategy == "hybrid":
                 # Hybrid approach: year/month/table/day/hour
@@ -127,7 +145,7 @@ class S3Manager:
                     f"table={clean_table_name}/"
                     f"day={dt.day:02d}/"
                     f"hour={dt.hour:02d}/"
-                    f"{timestamp_str}_batch_{batch_id:04d}.parquet"
+                    f"{timestamp_str}_batch_{batch_str}.parquet"
                 )
             else:
                 raise ValidationError(f"Unknown partition strategy: {partition_strategy}")

@@ -34,12 +34,14 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         self._results_lock = threading.Lock()
         self._table_results = {}
     
-    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, limit: Optional[int] = None) -> bool:
         """
         Execute inter-table parallel backup for all specified tables.
         
         Args:
             tables: List of table names to backup
+            chunk_size: Optional row limit per chunk (overrides config)
+            limit: Deprecated - use chunk_size instead (for backward compatibility)
         
         Returns:
             True if all tables backed up successfully, False otherwise
@@ -47,6 +49,9 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         if not tables:
             self.logger.logger.warning("No tables specified for backup")
             return False
+        
+        # Handle backward compatibility with old 'limit' parameter
+        effective_chunk_size = chunk_size or limit
         
         if len(tables) == 1:
             self.logger.logger.info("Single table provided, consider using sequential strategy")
@@ -75,7 +80,8 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                         current_timestamp,
                         i + 1,
                         len(tables),
-                        limit
+                        effective_chunk_size,
+                        max_total_rows
                     ): table_name 
                     for i, table_name in enumerate(tables)
                 }
@@ -172,7 +178,8 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         current_timestamp: str,
         table_index: int,
         total_tables: int,
-        limit: Optional[int] = None
+        chunk_size: Optional[int] = None,
+        max_total_rows: Optional[int] = None
     ) -> bool:
         """
         Process a single table in a separate thread.
@@ -302,7 +309,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             
             # Execute incremental query with optional limit
             incremental_query = self.get_incremental_query(
-                table_name, last_watermark, current_timestamp, limit=limit
+                table_name, last_watermark, current_timestamp, limit=chunk_size
             )
             
             cursor.execute(incremental_query)

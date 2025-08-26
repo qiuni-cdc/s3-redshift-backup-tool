@@ -173,6 +173,16 @@ class BackupLogger:
             **kwargs
         ).info("Table processing completed")
     
+    def table_failed(self, table_name: str, error: Exception = None, **kwargs):
+        """Log table processing failure"""
+        self.with_context(
+            event="table_failed",
+            table_name=table_name,
+            error_type=type(error).__name__ if error else None,
+            error_message=str(error) if error else None,
+            **kwargs
+        ).error("Table processing failed")
+    
     def batch_processed(self, table_name: str, batch_id: int, batch_size: int,
                        s3_key: str = None, **kwargs):
         """Log batch processing"""

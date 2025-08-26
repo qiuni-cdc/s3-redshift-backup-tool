@@ -151,6 +151,25 @@ class BackupConfig(BaseSettings):
         description="Check memory usage every N batches"
     )
     
+    # Row-based chunking settings (exact row counts with timestamp+ID pagination)
+    target_rows_per_chunk: int = Field(5000000, description="Exact number of rows per chunk")
+    max_rows_per_chunk: int = Field(10000000, description="Maximum rows per chunk (safety limit)")
+    
+    @validator('target_rows_per_chunk')
+    def validate_target_rows(cls, v):
+        if v <= 0:
+            raise ValueError("target_rows_per_chunk must be positive")
+        return v
+    
+    @validator('max_rows_per_chunk')
+    def validate_max_rows(cls, v, values):
+        if v <= 0:
+            raise ValueError("max_rows_per_chunk must be positive")
+        target = values.get('target_rows_per_chunk', 0)
+        if target > 0 and v <= target:
+            raise ValueError("max_rows_per_chunk must be greater than target_rows_per_chunk")
+        return v
+    
     # Performance settings
     enable_compression: bool = Field(
         True,
@@ -180,6 +199,7 @@ class BackupConfig(BaseSettings):
         if v <= 0 or v > 20:
             raise ValueError("Max workers must be between 1 and 20")
         return v
+    
 
 
 class AppConfig(BaseSettings):
