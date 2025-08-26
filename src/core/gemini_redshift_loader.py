@@ -444,14 +444,20 @@ class GeminiRedshiftLoader:
             raise DatabaseError(f"Redshift connection failed: {e}")
     
     def _set_success_status(self, table_name: str, load_time: datetime, rows_loaded: int, processed_files: List[str] = None):
-        """Set successful load status in watermark with processed files tracking"""
+        """Set successful load status in watermark with session tracking (FIXES ACCUMULATION BUG)"""
         try:
+            # Generate consistent session ID for this loading operation to prevent double-counting
+            import uuid
+            session_id = f"redshift_load_{uuid.uuid4().hex[:8]}"
+            
             self.watermark_manager.update_redshift_watermark(
                 table_name=table_name,
                 load_time=load_time,
                 rows_loaded=rows_loaded,
                 status='success',
-                processed_files=processed_files or []
+                processed_files=processed_files or [],
+                mode='auto',  # Use auto mode for intelligent accumulation
+                session_id=session_id  # Track this loading session to prevent double-counting
             )
         except Exception as e:
             logger.warning(f"Failed to update success watermark for {table_name}: {e}")

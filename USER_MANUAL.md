@@ -345,6 +345,78 @@ python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-
 python -m src.cli.main sync -t settlement.table_name
 ```
 
+#### Watermark Count Management (watermark-count)
+```bash
+python -m src.cli.main watermark-count [OPERATION] [OPTIONS]
+```
+
+**CRITICAL BUG FIX COMMANDS** - Advanced watermark row count management to fix discrepancies and prevent double-counting bugs.
+
+**Operations:**
+- `set-count` - Set or add to watermark row count (fixes double-counting bug)
+- `validate-counts` - Cross-validate watermark vs actual Redshift counts
+
+**Options:**
+- `-t, --table` (required): Table name for count operations
+- `--count` (type: int): Row count to set (required for set-count)
+- `--mode` (choices: absolute, additive, default: absolute): How to update count
+
+**Examples:**
+
+**Fix Current Row Count Mismatch:**
+```bash
+# Fix discrepancy by setting absolute count (replaces existing)
+python -m src.cli.main watermark-count set-count \
+  -t settlement.settlement_normal_delivery_detail \
+  --count 8500000 \
+  --mode absolute
+
+# Add incremental count (adds to existing)  
+python -m src.cli.main watermark-count set-count \
+  -t settlement.settlement_normal_delivery_detail \
+  --count 500000 \
+  --mode additive
+```
+
+**Validate Consistency Across Systems:**
+```bash
+# Cross-validate watermark counts vs actual Redshift data
+python -m src.cli.main watermark-count validate-counts \
+  -t settlement.settlement_normal_delivery_detail
+```
+
+**Bug Fix Use Cases:**
+
+1. **Fix Watermark Showing Wrong Count:**
+```bash
+# If watermark shows 5M but Redshift actually contains 8.5M rows:
+python -m src.cli.main watermark-count set-count \
+  -t settlement.table_name \
+  --count 8500000 \
+  --mode absolute
+
+# Verify fix
+python -m src.cli.main watermark get -t settlement.table_name
+```
+
+2. **Validate Data Integrity:**
+```bash
+# Check for discrepancies between watermark and actual data
+python -m src.cli.main watermark-count validate-counts -t settlement.table_name
+
+# Expected output will show:
+# - Watermark Backup Count
+# - Watermark Load Count  
+# - Actual Redshift Count
+# - Any discrepancies found
+```
+
+**Technical Details:**
+- **Absolute Mode**: Replaces existing count completely (recommended for fixing bugs)
+- **Additive Mode**: Adds to existing count (for incremental updates)
+- **Fixed Bug**: CLI now updates BOTH MySQL and Redshift counts (previously only MySQL)
+- **Future-Proofed**: Prevents session-based double-counting with intelligent accumulation logic
+
 #### S3 Storage Management (s3clean)
 ```bash
 python -m src.cli.main s3clean [OPERATION] [OPTIONS]
@@ -867,7 +939,42 @@ python backup_dashboard.py | grep -A5 "Watermark"
 python check_claim_simple.py
 ```
 
-#### 5. Watermark and Sync Issues
+#### 5. Watermark Row Count Discrepancy (CRITICAL BUG FIX)
+
+**Symptoms:**
+- Watermark shows different row counts for backup vs loading stage
+- Example: "MySQL Extracted: 8,500,000" but "Redshift Loaded: 5,000,000" 
+- Actual Redshift contains correct data, but watermark tracking is wrong
+- CLI `watermark-count set-count` only fixes MySQL count, not Redshift count
+
+**Root Cause:**
+This was a critical bug where:
+1. CLI command only updated MySQL count, ignored Redshift count
+2. `update_redshift_watermark()` method had accumulation bug causing double-counting
+3. Multi-session loading would overwrite instead of accumulate row counts
+
+**COMPLETE FIX APPLIED:**
+```bash
+# This now properly updates BOTH MySQL AND Redshift counts
+python -m src.cli.main watermark-count set-count \
+  -t settlement.settlement_normal_delivery_detail \
+  --count 8500000 \
+  --mode absolute
+
+# Verify both counts are now correct
+python -m src.cli.main watermark get -t settlement.settlement_normal_delivery_detail
+
+# Cross-validate with actual Redshift data
+python -m src.cli.main watermark-count validate-counts \
+  -t settlement.settlement_normal_delivery_detail
+```
+
+**Prevention:**
+- Fixed accumulation logic prevents future double-counting bugs
+- Session-aware tracking: same session = replace count, different session = accumulate
+- Enhanced CLI validates both MySQL and Redshift counts simultaneously
+
+#### 6. Watermark and Sync Issues
 
 **Symptoms:**
 - "Found X files, filtered to 0 files for loading"

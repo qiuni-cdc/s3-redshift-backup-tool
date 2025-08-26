@@ -1192,33 +1192,43 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
             
             try:
                 if mode == 'absolute':
-                    # Set absolute count (replaces existing)
+                    # Set absolute count (replaces existing) - FIX: Update BOTH MySQL and Redshift counts
                     success = watermark_manager._update_watermark_direct(
                         table_name=table,
-                        watermark_data={'mysql_rows_extracted': count}
+                        watermark_data={
+                            'mysql_rows_extracted': count,
+                            'redshift_rows_loaded': count  # FIX: Also update Redshift count
+                        }
                     )
                     
                     if success:
                         click.echo(f"✅ Set absolute count to {count:,} rows")
-                        click.echo(f"   Mode: {mode} (replaced existing count)")
+                        click.echo(f"   Mode: {mode} (replaced existing MySQL and Redshift counts)")
                     else:
                         click.echo("❌ Failed to update watermark count", err=True)
                         sys.exit(1)
                         
                 elif mode == 'additive':
-                    # Add to existing count
+                    # Add to existing count - FIX: Update BOTH MySQL and Redshift counts
                     current_watermark = watermark_manager.get_table_watermark(table)
-                    existing_count = current_watermark.mysql_rows_extracted if current_watermark else 0
-                    new_count = existing_count + count
+                    existing_mysql_count = current_watermark.mysql_rows_extracted if current_watermark else 0
+                    existing_redshift_count = current_watermark.redshift_rows_loaded if current_watermark else 0
+                    new_mysql_count = existing_mysql_count + count
+                    new_redshift_count = existing_redshift_count + count
                     
                     success = watermark_manager._update_watermark_direct(
                         table_name=table,
-                        watermark_data={'mysql_rows_extracted': new_count}
+                        watermark_data={
+                            'mysql_rows_extracted': new_mysql_count,
+                            'redshift_rows_loaded': new_redshift_count  # FIX: Also update Redshift count
+                        }
                     )
                     
                     if success:
-                        click.echo(f"✅ Added {count:,} to existing {existing_count:,} = {new_count:,} total")
-                        click.echo(f"   Mode: {mode} (added to existing count)")
+                        click.echo(f"✅ Added {count:,} to existing counts:")
+                        click.echo(f"   MySQL: {existing_mysql_count:,} + {count:,} = {new_mysql_count:,}")
+                        click.echo(f"   Redshift: {existing_redshift_count:,} + {count:,} = {new_redshift_count:,}")
+                        click.echo(f"   Mode: {mode} (added to existing counts)")
                     else:
                         click.echo("❌ Failed to update watermark count", err=True)
                         sys.exit(1)

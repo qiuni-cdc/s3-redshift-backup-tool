@@ -37,7 +37,8 @@ class S3TableWatermark:
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
-    last_session_id: Optional[str] = None  # Session ID for mode detection
+    last_session_id: Optional[str] = None  # MySQL session ID for mode detection
+    last_redshift_session_id: Optional[str] = None  # Redshift session ID for accumulation logic
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -557,9 +558,11 @@ class S3WatermarkManager:
         rows_loaded: int = 0,
         status: str = 'success',
         processed_files: Optional[List[str]] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        mode: str = 'auto',  # NEW: Add mode parameter for accumulation control
+        session_id: Optional[str] = None  # NEW: Add session tracking
     ) -> bool:
-        """Update Redshift load watermark"""
+        """Update Redshift load watermark with accumulation support (FIXES DOUBLE-COUNTING BUG)"""
         try:
             # Get existing watermark
             watermark = self.get_table_watermark(table_name)
@@ -568,9 +571,43 @@ class S3WatermarkManager:
             
             # Update Redshift-related fields
             watermark.last_redshift_load_time = load_time.isoformat() + 'Z'
-            watermark.redshift_rows_loaded = rows_loaded
             watermark.redshift_status = status
             watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
+            
+            # CRITICAL FIX: Mode-controlled row count update (prevent double-counting bug)
+            if rows_loaded > 0:
+                effective_mode = mode
+                
+                # Auto mode detection based on session ID
+                if mode == 'auto':
+                    # Same session = absolute (replace), different session = additive (accumulate)
+                    last_redshift_session = getattr(watermark, 'last_redshift_session_id', None)
+                    if session_id and last_redshift_session == session_id:
+                        effective_mode = 'absolute'  # Same session - replace count
+                        logger.debug(f"Redshift auto mode: same session '{session_id}', using absolute")
+                    else:
+                        effective_mode = 'additive'  # Different session - add to total
+                        logger.debug(f"Redshift auto mode: different session (last='{last_redshift_session}', current='{session_id}'), using additive")
+                
+                # Apply the determined mode
+                if effective_mode == 'absolute':
+                    # Replace existing count (for same session updates)
+                    previous_count = watermark.redshift_rows_loaded or 0
+                    watermark.redshift_rows_loaded = rows_loaded
+                    logger.info(f"Redshift absolute watermark update: replaced {previous_count} with {rows_loaded}")
+                    
+                elif effective_mode == 'additive':
+                    # Add to existing count (for cross-session accumulation) 
+                    current_rows = watermark.redshift_rows_loaded or 0
+                    watermark.redshift_rows_loaded = current_rows + rows_loaded
+                    logger.info(f"Redshift additive watermark update: {current_rows} + {rows_loaded} = {watermark.redshift_rows_loaded}")
+                
+                else:
+                    raise ValueError(f"Invalid watermark mode: {effective_mode}")
+                
+                # Store session ID for future auto mode detection
+                if session_id:
+                    watermark.last_redshift_session_id = session_id
             
             # Track processed S3 files to prevent re-loading
             # MEMORY LEAK FIX: Implement sliding window to prevent unlimited growth
