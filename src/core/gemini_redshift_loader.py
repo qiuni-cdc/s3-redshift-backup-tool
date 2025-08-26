@@ -424,6 +424,7 @@ class GeminiRedshiftLoader:
                         password=self.config.redshift.password.get_secret_value()
                     )
                     logger.debug("Connected to Redshift via SSH tunnel")
+                    conn.autocommit = True
                     yield conn
                     conn.close()
             else:
@@ -436,6 +437,7 @@ class GeminiRedshiftLoader:
                     password=self.config.redshift.password.get_secret_value()
                 )
                 logger.debug("Connected to Redshift directly")
+                conn.autocommit = True
                 yield conn
                 conn.close()
                 
