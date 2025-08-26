@@ -1,4 +1,5 @@
-# Design Proposal: Next-Generation Data Pipeline Features (V2)
+
+# Design Proposal: Next-Generation Data Pipeline Features (V3)
 
 ## 1. Introduction: Why These Features Are Needed
 
@@ -145,66 +146,67 @@ JOIN reporting_schema.dim_customers d ON s.customer_id = d.customer_id AND d.end
 ## 4. Feature 3: Flexible Change Data Capture (CDC)
 
 ### Requirement
-The tool must move beyond a hardcoded `update_at` column and support more flexible and reliable methods for detecting changes in source tables.
+The tool must move beyond a hardcoded `update_at` column and support multiple, configurable methods for detecting changes in source tables.
 
 ### Recommended Solution
-The recommended solution is to implement a **per-table configurable CDC strategy**, with the **Hybrid Approach (Timestamp + ID)** as the new, robust default for incremental loads. For tables without reliable timestamps, **Full Table Sync** should be the recommended fallback.
+The solution is to implement a **per-table configurable CDC strategy** via a new `conf/tables.yml` file. This provides maximum flexibility and makes the behavior for each table explicit and clear.
 
-### Key Code Snippets
+### Supported CDC Strategies
 
-**1. Per-Table Configuration (`conf/tables.yml`)**
+Below are the strategies that will be supported, implemented within a dynamic query generation method in `src/backup/base.py`.
 
-This new configuration file allows users to explicitly define the CDC strategy and columns for each table.
-
-```yaml
-# conf/tables.yml
-tables:
-  - name: "settlement.settlement_claim_detail"
-    cdc_strategy: "hybrid" # Recommended default
-    cdc_timestamp_column: "update_at"
-    cdc_id_column: "ID"
-
-  - name: "marketing.leads"
-    cdc_strategy: "hybrid"
-    cdc_timestamp_column: "modified_time"
-    cdc_id_column: "lead_id"
-
-  - name: "warehouse.products" # A dimension table without a timestamp
-    cdc_strategy: "full_sync" # Safest fallback
-```
-
-**2. Dynamic Query Generation in `src/backup/base.py`**
-
-The core query generation logic will be refactored to read the table's configuration and build the appropriate SQL query.
-
-```python
-# src/backup/base.py
-
-def get_incremental_query(self, table_config: dict, watermark: S3TableWatermark) -> str:
-    """
-    Generates the appropriate SQL query based on the table's CDC strategy.
-    """
-    strategy = table_config.get("cdc_strategy")
-    table_name = table_config["name"]
-
+#### 1. `hybrid` (Recommended Default)
+*   **Description:** This is the most robust incremental strategy. It uses a combination of a timestamp column and a unique, sequential ID column to reliably capture both new and updated rows, preventing issues with same-second updates.
+*   **Required Columns:** An update timestamp column (e.g., `update_at`) and a unique sequential ID (e.g., `ID`).
+*   **Best For:** Any transactional table where reliably capturing all changes is critical. This should be the default choice.
+*   **Code Snippet:**
+    ```python
+    # src/backup/base.py -> get_incremental_query
     if strategy == "hybrid":
         ts_col = table_config["cdc_timestamp_column"]
         id_col = table_config["cdc_id_column"]
         last_ts = watermark.last_mysql_data_timestamp or '1970-01-01 00:00:00'
         last_id = watermark.last_processed_id or 0
 
-        # The hybrid query is robust against same-second updates
         return f"""
             SELECT * FROM {table_name}
             WHERE ({ts_col} > '{last_ts}') OR ({ts_col} = '{last_ts}' AND {id_col} > {last_id})
             ORDER BY {ts_col}, {id_col}
         """
-    
-    elif strategy == "full_sync":
-        # For dimension tables or tables without timestamps, do a full dump
-        return f"SELECT * FROM {table_name}"
+    ```
 
-    else: # Default to old behavior if no strategy is defined
+#### 2. `full_sync` (Safe Fallback)
+*   **Description:** This strategy does not perform incremental logic. Instead, it takes a complete copy of the source table during every run and uses it to completely overwrite the data at the destination.
+*   **Required Columns:** None.
+*   **Best For:** The recommended strategy for any table that lacks a reliable update timestamp, or for small-to-medium sized dimension tables where a full daily refresh is acceptable.
+*   **Code Snippet:**
+    ```python
+    # src/backup/base.py -> get_incremental_query
+    elif strategy == "full_sync":
+        return f"SELECT * FROM {table_name}"
+    ```
+
+#### 3. `id_only` (For Append-Only Tables)
+*   **Description:** This strategy only uses a sequential ID column to find new rows. **Warning:** It is only safe to use if you can guarantee that rows in the source table are never updated, only inserted, as it will not capture updates.
+*   **Required Columns:** A unique, sequential ID column.
+*   **Best For:** Immutable, append-only tables, such as event logs or logging tables.
+*   **Code Snippet:**
+    ```python
+    # src/backup/base.py -> get_incremental_query
+    elif strategy == "id_only":
+        id_col = table_config["cdc_id_column"]
+        last_id = watermark.last_processed_id or 0
+        return f"SELECT * FROM {table_name} WHERE {id_col} > {last_id} ORDER BY {id_col}"
+    ```
+
+#### 4. `timestamp_only` (Legacy/Simple)
+*   **Description:** This is the original, less reliable incremental strategy. It uses only a timestamp column to find new and updated rows.
+*   **Required Columns:** An update timestamp column.
+*   **Best For:** Simple use cases where the small risk of missing updates that occur within the same second is acceptable. The `hybrid` strategy is superior in almost all cases.
+*   **Code Snippet:**
+    ```python
+    # src/backup/base.py -> get_incremental_query
+    else: # Default to timestamp-only if no strategy is defined
         last_ts = watermark.last_mysql_data_timestamp or '1970-01-01 00:00:00'
         return f"SELECT * FROM {table_name} WHERE update_at > '{last_ts}' ORDER BY update_at"
-```
+    ```
