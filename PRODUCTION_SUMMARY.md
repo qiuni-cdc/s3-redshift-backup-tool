@@ -13,13 +13,28 @@
    - **Strategies**: Sequential, Inter-table Parallel, Intra-table Parallel
    - **Features**: Incremental backups, watermark management, error handling
 
-2. **S3 to Redshift Data Warehouse**
+2. **S3 Storage Management (s3clean)**
+   - **Status**: ✅ Production Ready
+   - **Operations**: List, Clean, Clean-all with enterprise safety features
+   - **Features**: Time-based filtering, pattern matching, dry-run preview, multi-layer protection
+
+3. **Watermark Management System**
+   - **Status**: ✅ Production Ready
+   - **Capabilities**: Manual and automated watermark control, fresh sync support
+   - **Features**: CLI commands (get/set/reset/list), selective loading, override controls
+
+4. **Complete Sync Pipeline**
+   - **Status**: ✅ Production Ready
+   - **Command**: `sync` with flexible options (backup-only, redshift-only, full pipeline)
+   - **Features**: Dynamic schema discovery, direct Parquet loading, comprehensive logging
+
+5. **S3 to Redshift Data Warehouse**
    - **Status**: ✅ Production Ready  
    - **Database**: `dw.public.settlement_normal_delivery_detail`
    - **Records**: 2,131,906 settlement delivery transactions
    - **Method**: Parquet → CSV → Redshift COPY (proven reliable)
 
-3. **Latest Status Views (Parcel Deduplication)**
+6. **Latest Status Views (Parcel Deduplication)**
    - **Status**: ✅ Production Ready
    - **Views**: 3 intelligent views for parcel status tracking
    - **Function**: Show only latest status per parcel (eliminates duplicates)
@@ -29,7 +44,7 @@
 ## 🎯 **PRODUCTION REDSHIFT DEPLOYMENT**
 
 ### **Database Structure**
-- **Host**: redshift-dw.qa.uniuni.com:5439
+- **Host**: your.redshift.cluster.com:5439
 - **Database**: `dw`
 - **Schema**: `public`
 - **Table**: `settlement_normal_delivery_detail`
@@ -131,6 +146,44 @@ ORDER BY parcel_count DESC;
 
 ## 🚀 **PRODUCTION USAGE**
 
+### **Core System Commands**
+
+#### **Complete Sync Operations**
+```bash
+# Full pipeline (MySQL → S3 → Redshift)
+python -m src.cli.main sync -t settlement.table_name
+
+# Backup only (MySQL → S3)
+python -m src.cli.main sync -t settlement.table_name --backup-only
+
+# Redshift loading only (S3 → Redshift) - preserves manual watermarks
+python -m src.cli.main sync -t settlement.table_name --redshift-only
+```
+
+#### **Watermark Management**
+```bash
+# View current watermark
+python -m src.cli.main watermark get -t settlement.table_name
+
+# Set manual starting timestamp for incremental sync
+python -m src.cli.main watermark set -t settlement.table_name --timestamp "2025-08-09 20:00:01"
+
+# Reset watermark completely (fresh start)
+python -m src.cli.main watermark reset -t settlement.table_name
+```
+
+#### **S3 Storage Management**
+```bash
+# Check current storage usage
+python -m src.cli.main s3clean list -t settlement.table_name
+
+# Clean old backup files (recommended)
+python -m src.cli.main s3clean clean -t settlement.table_name --older-than "7d"
+
+# Preview cleanup before execution
+python -m src.cli.main s3clean clean -t settlement.table_name --dry-run
+```
+
 ### **For Application Developers**
 
 #### **✅ DO - Use Latest Status Views**
@@ -153,7 +206,7 @@ WHERE ant_parcel_no = 'your_parcel_number';
 - **Dashboard Metrics**: `public.settlement_status_summary`
 
 ### **For Database Administration**
-- **Connection**: SSH tunnel via bastion host (35.82.216.244)
+- **Connection**: SSH tunnel via bastion host (your.redshift.bastion.host)
 - **Monitoring**: Built-in query performance optimization
 - **Maintenance**: Views automatically handle deduplication
 

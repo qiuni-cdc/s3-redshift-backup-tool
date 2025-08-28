@@ -99,6 +99,18 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
         ctx.obj['backup_logger'] = backup_logger
         ctx.obj['debug'] = debug
         
+        # Integrate v1.1.0 Multi-Schema CLI Features
+        try:
+            from src.cli.cli_integration import integrate_multi_schema_cli, add_version_detection_commands
+            integrate_multi_schema_cli(cli)
+            add_version_detection_commands(cli)
+        except ImportError as e:
+            if debug:
+                click.echo(f"⚠️  v1.1.0 multi-schema features not available: {e}")
+        except Exception as e:
+            if debug:
+                click.echo(f"⚠️  Error integrating v1.1.0 features: {e}")
+        
         # Only log CLI initialization in debug mode or when explicitly requested
         if debug:
             backup_logger.logger.info(

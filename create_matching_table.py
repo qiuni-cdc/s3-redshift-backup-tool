@@ -51,7 +51,7 @@ def main():
         print("✅ Using existing sample parquet file")
     else:
         print("❌ Sample parquet file not found. Please run:")
-        print("   aws s3 cp s3://redshift-dw-qa-uniuni-com/incremental/year=2025/month=08/day=07/hour=09/settlement_settlement_normal_delivery_detail_20250807_092022_batch_0001.parquet /tmp/sample.parquet")
+        print("   aws s3 cp s3://your-s3-bucket-name/incremental/year=2025/month=08/day=07/hour=09/settlement_settlement_normal_delivery_detail_20250807_092022_batch_0001.parquet /tmp/sample.parquet")
         return
     
     # Analyze parquet schema
@@ -93,10 +93,10 @@ def main():
     
     # Setup SSH tunnel
     tunnel = SSHTunnelForwarder(
-        ('35.82.216.244', 22),
+        ('your.redshift.bastion.host', 22),
         ssh_username='chenqi',
-        ssh_pkey='/home/qi_chen/test_env/chenqi.pem',
-        remote_bind_address=('redshift-dw.qa.uniuni.com', 5439),
+        ssh_pkey='/path/to/your/ssh/key.pem',
+        remote_bind_address=('your.redshift.cluster.com', 5439),
         local_bind_address=('localhost', 0)
     )
     
@@ -128,7 +128,7 @@ def main():
         print("\n📥 Testing COPY with single file...")
         copy_sql = f"""
         COPY {table_name}
-        FROM 's3://redshift-dw-qa-uniuni-com/incremental/year=2025/month=08/day=07/hour=09/settlement_settlement_normal_delivery_detail_20250807_092022_batch_0001.parquet'
+        FROM 's3://your-s3-bucket-name/incremental/year=2025/month=08/day=07/hour=09/settlement_settlement_normal_delivery_detail_20250807_092022_batch_0001.parquet'
         ACCESS_KEY_ID 'YOUR_AWS_ACCESS_KEY_ID'
         SECRET_ACCESS_KEY 'YOUR_AWS_SECRET_ACCESS_KEY'
         FORMAT AS PARQUET;

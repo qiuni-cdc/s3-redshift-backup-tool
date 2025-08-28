@@ -8,12 +8,10 @@ echo "🔍 Checking for exposed credentials in staged files..."
 PATTERNS=(
     "AKIA[0-9A-Z]{16}"                                    # AWS Access Key pattern
     "aws_secret_access_key.*[A-Za-z0-9+/]{40}"          # AWS Secret pattern  
-    "677aa5aa58143b4796a87ae825dcec1a"                   # Specific DB password
-    "44\.209\.128\.227"                                   # Old bastion IP
-    "35\.82\.216\.244"                                    # Current bastion IP
-    "zAjxTV4B9EmxSq2jM39\+XcLB5AhcjFH2PRqfz97G"         # AWS Secret Key
-    "AKIA3QYE2ANHIFTCRKN3"                               # AWS Access Key
-    "Ezae{m9iC0uas8ro"                                   # Redshift password pattern
+    "your_real_db_password_pattern"                     # Example: replace with actual patterns
+    "your\.bastion\.ip\.address"                         # Example: replace with actual IPs
+    "your_real_aws_secret_key_pattern"                  # Example: replace with actual patterns
+    "your_real_redshift_password_pattern"               # Example: replace with actual patterns
 )
 
 FOUND_ISSUES=0

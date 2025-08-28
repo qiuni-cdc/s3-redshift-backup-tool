@@ -10,33 +10,33 @@
 
 The system requires **two different SSH bastion servers**:
 
-1. **MySQL Operations**: Use `44.209.128.227`
-2. **Redshift Operations**: Use `35.82.216.244`
+1. **MySQL Operations**: Use `your.mysql.bastion.host`
+2. **Redshift Operations**: Use `your.redshift.bastion.host`
 
 ## 📋 **Updated Production Configuration**
 
 ### **Complete Working `.env` Configuration**
 ```bash
 # Database Configuration
-DB_HOST=us-east-1.ro.db.analysis.uniuni.ca.internal
+DB_HOST=your-database-host.example.com
 DB_PORT=3306
-DB_USER=chenqi
+DB_USER=your_db_user
 DB_PASSWORD=YOUR_DB_PASSWORD
 DB_DATABASE=settlement
 
 # SSH Configuration - MySQL Bastion (VERIFIED WORKING ✅)
-SSH_BASTION_HOST=44.209.128.227
-SSH_BASTION_USER=chenqi  
-SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
+SSH_BASTION_HOST=your.mysql.bastion.host
+SSH_BASTION_USER=your_ssh_user  
+SSH_BASTION_KEY_PATH=/path/to/your/ssh/key.pem
 
 # Redshift SSH Configuration - Separate Bastion (VERIFIED WORKING ✅)
-REDSHIFT_SSH_BASTION_HOST=35.82.216.244
-REDSHIFT_SSH_BASTION_USER=chenqi
-REDSHIFT_SSH_BASTION_KEY_PATH=/home/qi_chen/test_env/chenqi.pem
+REDSHIFT_SSH_BASTION_HOST=your.redshift.bastion.host
+REDSHIFT_SSH_BASTION_USER=your_ssh_user
+REDSHIFT_SSH_BASTION_KEY_PATH=/path/to/your/ssh/key.pem
 SSH_LOCAL_PORT=0
 
 # S3 Configuration - CORRECTED BUCKET NAME
-S3_BUCKET_NAME=redshift-dw-qa-uniuni-com  # CONFIRMED: No extra "i"
+S3_BUCKET_NAME=your-s3-bucket-name  # CONFIRMED: No extra "i"
 AWS_ACCESS_KEY_ID=YOUR_AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY=YOUR_AWS_SECRET_ACCESS_KEY
 S3_ACCESS_KEY=YOUR_AWS_ACCESS_KEY_ID
@@ -46,10 +46,10 @@ S3_INCREMENTAL_PATH=incremental/
 S3_HIGH_WATERMARK_KEY=watermark/last_run_timestamp.txt
 
 # Redshift Configuration - CORRECTED AND VERIFIED
-REDSHIFT_HOST=redshift-dw.qa.uniuni.com
+REDSHIFT_HOST=your.redshift.cluster.com
 REDSHIFT_PORT=5439
 REDSHIFT_DATABASE=dw  # CORRECTED: Was using 'dev', now uses 'dw'
-REDSHIFT_USER=chenqi
+REDSHIFT_USER=your_redshift_user
 REDSHIFT_PASSWORD=YOUR_REDSHIFT_PASSWORD
 REDSHIFT_SCHEMA=public  # CONFIRMED: Using public schema
 
@@ -76,8 +76,8 @@ DEBUG=false
 📊 Goal: Inject exactly 10,000 rows
 
 ✅ STEP 1: CLEARING REDSHIFT TABLE
-   🔧 SSH tunnel via 35.82.216.244 to redshift-dw.qa.uniuni.com:5439
-   ✅ SSH tunnel established: localhost:41973 → redshift-dw.qa.uniuni.com:5439
+   🔧 SSH tunnel via your.redshift.bastion.host to your.redshift.cluster.com:5439
+   ✅ SSH tunnel established: localhost:41973 → your.redshift.cluster.com:5439
    📊 Current rows in table: 0
    ✅ Table cleared: 0 → 0 rows
 
@@ -86,8 +86,8 @@ DEBUG=false
    🎯 Expected: ~10K rows from 2025-08-07 20:00:00 onwards
 
 ✅ STEP 3: BACKING UP 10K ROWS
-   🔧 SSH tunnel via 44.209.128.227 to MySQL
-   ✅ SSH tunnel established: localhost:43855 → us-east-1.ro.db...3306
+   🔧 SSH tunnel via your.mysql.bastion.host to MySQL
+   ✅ SSH tunnel established: localhost:43855 → your-database-host.example.com:3306
    ✅ Database connection established: settlement (8.0.28)
    ✅ Table validation successful: 51 columns
    📊 Found 5 rows to process (actual new data since watermark)
@@ -121,25 +121,25 @@ class AppConfig(BaseSettings):
 ## 📊 **Production Usage Patterns**
 
 ### **MySQL Operations (Data Backup)**
-- **SSH Server**: `44.209.128.227`
+- **SSH Server**: `your.mysql.bastion.host`
 - **Used By**: `SequentialBackupStrategy`, `InterTableBackupStrategy`, `IntraTableBackupStrategy`
 - **Connection Pattern**: 
   ```
-  Local → SSH 44.209.128.227 → us-east-1.ro.db.analysis.uniuni.ca.internal:3306
+  Local → SSH your.mysql.bastion.host → your-database-host.example.com:3306
   ```
 
 ### **Redshift Operations (Data Loading)**
-- **SSH Server**: `35.82.216.244`  
+- **SSH Server**: `your.redshift.bastion.host`  
 - **Used By**: Direct Redshift connections, table management, COPY operations
 - **Connection Pattern**:
   ```
-  Local → SSH 35.82.216.244 → redshift-dw.qa.uniuni.com:5439
+  Local → SSH your.redshift.bastion.host → your.redshift.cluster.com:5439
   ```
 
 ## ⚠️ **Previous Configuration Issues RESOLVED**
 
 ### **Issue 1: Single SSH Server**
-- **Problem**: Using `35.82.216.244` for both MySQL and Redshift
+- **Problem**: Using `your.redshift.bastion.host` for both MySQL and Redshift
 - **Solution**: Separate SSH servers configured
 - **Status**: ✅ **RESOLVED**
 
@@ -156,8 +156,8 @@ class AppConfig(BaseSettings):
 ## 🚀 **System Status: FULLY OPERATIONAL**
 
 ### **Confirmed Working Components**
-- ✅ **MySQL Backup Pipeline**: SSH `44.209.128.227` → Database → S3
-- ✅ **Redshift Loading Pipeline**: SSH `35.82.216.244` → Redshift → Data Loading
+- ✅ **MySQL Backup Pipeline**: SSH `your.mysql.bastion.host` → Database → S3
+- ✅ **Redshift Loading Pipeline**: SSH `your.redshift.bastion.host` → Redshift → Data Loading
 - ✅ **S3 Operations**: Bucket access, file upload/download, watermark management
 - ✅ **Complete Pipeline**: End-to-end MySQL → S3 → Redshift data flow
 - ✅ **Schema Management**: Dynamic discovery with 51 columns validated

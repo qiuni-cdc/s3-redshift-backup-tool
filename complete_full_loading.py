@@ -32,7 +32,7 @@ def get_all_csv_files():
         region_name='us-east-1'
     )
     
-    bucket = 'redshift-dw-qa-uniuni-com'
+    bucket = 'your-s3-bucket-name'
     
     print("🔍 Scanning ALL CSV files...")
     response = s3_client.list_objects_v2(
@@ -51,7 +51,7 @@ def get_all_csv_files():
 
 def load_all_csv_files(cursor, conn, csv_files):
     """Load ALL CSV files with progress tracking"""
-    bucket = 'redshift-dw-qa-uniuni-com'
+    bucket = 'your-s3-bucket-name'
     
     successful_loads = 0
     failed_loads = 0
@@ -194,10 +194,10 @@ def main():
     password = env_config.get('REDSHIFT_PASSWORD')
     
     tunnel = SSHTunnelForwarder(
-        ('35.82.216.244', 22),
+        ('your.redshift.bastion.host', 22),
         ssh_username='chenqi',
-        ssh_pkey='/home/qi_chen/test_env/chenqi.pem',
-        remote_bind_address=('redshift-dw.qa.uniuni.com', 5439),
+        ssh_pkey='/path/to/your/ssh/key.pem',
+        remote_bind_address=('your.redshift.cluster.com', 5439),
         local_bind_address=('localhost', 0)
     )
     

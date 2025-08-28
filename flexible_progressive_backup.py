@@ -124,7 +124,7 @@ class ProgressiveBackupManager:
         """Get current watermark status for the table"""
         try:
             cmd = [
-                'python', '-m', 'src.cli.main', 'watermark', 'get',
+                'python3', '-m', 'src.cli.main', 'watermark', 'get',
                 '-t', self.table_name
             ]
             
@@ -222,7 +222,7 @@ class ProgressiveBackupManager:
             self.log(f"Setting initial watermark to: {self.start_timestamp}")
             
             cmd = [
-                'python', '-m', 'src.cli.main', 'watermark', 'set',
+                'python3', '-m', 'src.cli.main', 'watermark', 'set',
                 '-t', self.table_name,
                 '--timestamp', self.start_timestamp
             ]
@@ -235,6 +235,157 @@ class ProgressiveBackupManager:
                 self.log(f"Failed to set initial watermark: {result.stderr}", "error")
                 raise RuntimeError("Failed to setup initial watermark")
     
+    def run_time_based_sync_chunk(self, mode: str = None) -> tuple[bool, bool, str]:
+        """Run a single sync chunk using time-based windows
+        
+        Returns:
+            (success, has_more_data, next_watermark) - success indicates if chunk completed,
+            has_more_data indicates if there's more data to process,
+            next_watermark is the new watermark timestamp
+        """
+        actual_mode = mode or self.mode
+        chunk_start_time = datetime.now()
+        
+        # Get current watermark
+        watermark = self.get_current_watermark()
+        if not watermark:
+            self.log("No watermark found, cannot determine time window", "error")
+            return False, False, None
+        
+        current_watermark = watermark.get('last_mysql_data_timestamp', '2020-01-01 00:00:00')
+        
+        # Calculate next time window (7 days by default)
+        window_days = 7  # Could be configurable
+        start_dt = datetime.strptime(current_watermark, '%Y-%m-%d %H:%M:%S')
+        end_dt = start_dt + timedelta(days=window_days)
+        
+        # Don't go beyond current time
+        max_dt = datetime.now()
+        if end_dt > max_dt:
+            end_dt = max_dt
+            has_more_data = False
+        else:
+            has_more_data = True
+            
+        window_start = current_watermark
+        window_end = end_dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Check if we've reached the end
+        if window_start >= window_end:
+            self.log("Reached end of available time range", "info")
+            return True, False, window_start
+        
+        self.log(f"🕒 Time-based chunk {self.chunks_processed + 1}:")
+        self.log(f"   Window: {window_start} → {window_end}")
+        self.log(f"   Duration: {(end_dt - start_dt).days} days")
+        
+        # Use regular sync command - the backend will handle time-based chunking
+        cmd = [
+            'python3', '-m', 'src.cli.main', 'sync',
+            '-t', self.table_name,
+            '--limit', str(self.chunk_size)  # Keep as safety limit
+        ]
+        
+        # Add mode-specific flags
+        if actual_mode == 'backup-only':
+            cmd.append('--backup-only')
+        elif actual_mode == 'redshift-only':
+            cmd.append('--redshift-only')
+        
+        self.log(f"🔄 Running time-based chunk {self.chunks_processed + 1}:")
+        self.log(f"   Command: {' '.join(cmd)}")
+        self.log(f"   Expected time window: {window_days} days")
+        self.log(f"   Timeout: {self.timeout_seconds}s")
+        
+        try:
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=self.timeout_seconds
+            )
+            
+            chunk_duration = datetime.now() - chunk_start_time
+            
+            if result.returncode == 0:
+                self.chunks_processed += 1
+                
+                # Check if sync indicates no more data
+                if "No new data to backup" in result.stdout or \
+                   "0 rows processed" in result.stdout or \
+                   "No more data available" in result.stdout:
+                    has_more_data = False
+                    self.log("📋 Sync indicates no more data available", "info")
+                
+                # Try to extract row count from output
+                rows_in_chunk = 0
+                s3_files_created = 0
+                if "rows" in result.stdout:
+                    try:
+                        import re
+                        # Extract row count - updated to match new CLI format
+                        matches = re.findall(r'(\d+(?:,\d+)*)\s+rows', result.stdout)
+                        if matches:
+                            # Remove commas and convert to int
+                            rows_in_chunk = int(matches[-1].replace(',', ''))
+                            self.total_rows_processed += rows_in_chunk
+                        
+                        # Extract S3 file information - updated for new CLI format
+                        s3_matches = re.findall(r'Created S3 file|Uploaded.*\.parquet|📁 Uploaded:|total_files.*?(\d+)', result.stdout)
+                        # Check for backup completion indicators
+                        backup_completed = re.search(r'✅.*Backup completed.*(\d+(?:,\d+)*)\s+rows', result.stdout)
+                        if backup_completed and rows_in_chunk > 0:
+                            s3_files_created = 1  # If rows were processed and backup completed, assume 1 S3 file
+                        else:
+                            s3_files_created = len(s3_matches)
+                        
+                    except Exception as parse_error:
+                        self.log(f"Warning: Could not parse sync output: {parse_error}", "warning")
+                
+                # Enhanced success logging
+                rate_per_min = (rows_in_chunk / chunk_duration.total_seconds() * 60) if chunk_duration.total_seconds() > 0 else 0
+                
+                self.log(f"✅ Time-based chunk {self.chunks_processed} completed:", "success")
+                self.log(f"   📊 Rows processed: {rows_in_chunk:,}")
+                self.log(f"   📁 S3 files created: {s3_files_created}")
+                self.log(f"   ⏱️  Duration: {chunk_duration}")
+                self.log(f"   🚀 Rate: {rate_per_min:,.0f} rows/minute")
+                self.log(f"   📈 Total processed: {self.total_rows_processed:,}")
+                self.log(f"   🔄 More data available: {'Yes' if has_more_data else 'No'}")
+                self.log(f"   🕒 Next watermark: {window_end}")
+                
+                # Log detailed output in debug mode or verbose mode
+                if self.log_level == 'debug' or self.verbose_output:
+                    self.log("🔍 Full sync output:", "debug")
+                    for line in result.stdout.split('\n'):
+                        if line.strip():
+                            self.log(f"     {line.strip()}", "debug")
+                
+                return True, has_more_data, window_end
+            else:
+                self.log(f"❌ Time-based chunk {self.chunks_processed + 1} failed:", "error")
+                self.log(f"   ⏱️  Duration: {chunk_duration}")
+                self.log(f"   🔍 Error output: {result.stderr}", "error")
+                
+                # Log stdout for additional context
+                if result.stdout:
+                    self.log(f"   📋 Additional output: {result.stdout}", "warning")
+                
+                return False, True, current_watermark  # Failed, but assume more data exists
+                
+        except subprocess.TimeoutExpired:
+            chunk_duration = datetime.now() - chunk_start_time
+            self.log(f"⏰ Time-based chunk {self.chunks_processed + 1} timed out:", "error")
+            self.log(f"   ⏱️  Duration: {chunk_duration}")
+            self.log(f"   🚨 Timeout after: {self.timeout_seconds}s")
+            return False, True, current_watermark
+        except Exception as e:
+            chunk_duration = datetime.now() - chunk_start_time
+            self.log(f"💥 Unexpected error in time-based chunk {self.chunks_processed + 1}:", "error")
+            self.log(f"   ⏱️  Duration: {chunk_duration}")
+            self.log(f"   🔍 Error: {e}", "error")
+            return False, True, current_watermark
+    
     def run_sync_chunk(self, mode: str = None) -> tuple[bool, bool]:
         """Run a single sync chunk with specified mode
         
@@ -246,7 +397,7 @@ class ProgressiveBackupManager:
         chunk_start_time = datetime.now()
         
         cmd = [
-            'python', '-m', 'src.cli.main', 'sync',
+            'python3', '-m', 'src.cli.main', 'sync',
             '-t', self.table_name,
             '--limit', str(self.chunk_size)
         ]
@@ -287,22 +438,28 @@ class ProgressiveBackupManager:
                 # Try to extract row count from output
                 rows_in_chunk = 0
                 s3_files_created = 0
-                if "rows processed" in result.stdout:
+                if "rows" in result.stdout:
                     try:
                         import re
-                        # Extract row count
-                        matches = re.findall(r'(\d+)\s+rows processed', result.stdout)
+                        # Extract row count - updated to match new CLI format
+                        matches = re.findall(r'(\d+(?:,\d+)*)\s+rows', result.stdout)
                         if matches:
-                            rows_in_chunk = int(matches[-1])
+                            # Remove commas and convert to int
+                            rows_in_chunk = int(matches[-1].replace(',', ''))
                             self.total_rows_processed += rows_in_chunk
                             
                             # If we got fewer rows than chunk size, likely no more data
                             if rows_in_chunk < self.chunk_size:
                                 has_more_data = False
                         
-                        # Extract S3 file information
-                        s3_matches = re.findall(r'Created S3 file|Uploaded.*\.parquet', result.stdout)
-                        s3_files_created = len(s3_matches)
+                        # Extract S3 file information - updated for new CLI format
+                        s3_matches = re.findall(r'Created S3 file|Uploaded.*\.parquet|📁 Uploaded:|total_files.*?(\d+)', result.stdout)
+                        # Check for backup completion indicators
+                        backup_completed = re.search(r'✅.*Backup completed.*(\d+(?:,\d+)*)\s+rows', result.stdout)
+                        if backup_completed and rows_in_chunk > 0:
+                            s3_files_created = 1  # If rows were processed and backup completed, assume 1 S3 file
+                        else:
+                            s3_files_created = len(s3_matches)
                         
                     except Exception as parse_error:
                         self.log(f"Warning: Could not parse sync output: {parse_error}", "warning")
@@ -693,9 +850,9 @@ def main():
         print(f"   Max Chunks: {args.max_chunks or 'Unlimited'}")
         print("   Commands:")
         if args.mode in ['full', 'backup-only']:
-            print(f"     python -m src.cli.main sync -t {args.table_name} --limit {args.chunk_size} --backup-only")
+            print(f"     python3 -m src.cli.main sync -t {args.table_name} --limit {args.chunk_size} --backup-only")
         if args.mode in ['full', 'redshift-only']:
-            print(f"     python -m src.cli.main sync -t {args.table_name} --redshift-only")
+            print(f"     python3 -m src.cli.main sync -t {args.table_name} --redshift-only")
         return
     
     try:

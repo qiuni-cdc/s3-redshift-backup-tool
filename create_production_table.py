@@ -113,10 +113,10 @@ def test_database_and_schema_combinations():
     ]
     
     tunnel = SSHTunnelForwarder(
-        ('35.82.216.244', 22),
+        ('your.redshift.bastion.host', 22),
         ssh_username='chenqi',
-        ssh_pkey='/home/qi_chen/test_env/chenqi.pem',
-        remote_bind_address=('redshift-dw.qa.uniuni.com', 5439),
+        ssh_pkey='/path/to/your/ssh/key.pem',
+        remote_bind_address=('your.redshift.cluster.com', 5439),
         local_bind_address=('localhost', 0)
     )
     
@@ -186,10 +186,10 @@ def create_production_table(database, schema):
     password = env_config.get('REDSHIFT_PASSWORD')
     
     tunnel = SSHTunnelForwarder(
-        ('35.82.216.244', 22),
+        ('your.redshift.bastion.host', 22),
         ssh_username='chenqi',
-        ssh_pkey='/home/qi_chen/test_env/chenqi.pem',
-        remote_bind_address=('redshift-dw.qa.uniuni.com', 5439),
+        ssh_pkey='/path/to/your/ssh/key.pem',
+        remote_bind_address=('your.redshift.cluster.com', 5439),
         local_bind_address=('localhost', 0)
     )
     
