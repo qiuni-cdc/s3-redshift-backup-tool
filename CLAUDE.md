@@ -560,3 +560,43 @@ class MetricsCollector:
 **🌟 Strategic Vision**: Transform battle-tested v1.0.0 backup system into comprehensive enterprise data integration platform while preserving the reliability and performance that made it production-ready.
 
 **Next Steps:** Stakeholder review, proof-of-concept development, and detailed sprint planning for Phase 1 implementation.
+
+---
+
+## 🧠 **CRITICAL ARCHITECTURAL CONSISTENCY PRINCIPLES (v1.2 Lessons Learned)**
+
+### 🚨 **Anti-Patterns to NEVER Repeat**
+- **Duplicated Logic Syndrome**: Same operation implemented in multiple places
+- **Schema Fragmentation**: Different precision/format handling across components
+- **Implicit Contracts**: Assuming method behavior without validation
+- **Metadata Contamination**: Allowing S3 paths, file references in schemas
+- **Integration Test Gaps**: Testing components in isolation only
+
+### ✅ **Required Patterns for All Architecture Work**
+- **Single Source of Truth**: Shared concepts must have exactly one canonical implementation
+- **Consistency Over Complexity**: Most bugs stem from inconsistent implementation, not design flaws
+- **Integration Testing First**: Test component interactions, not just individual components
+- **Metadata Contamination Prevention**: Always sanitize outputs for downstream compatibility
+- **Central Authority Pattern**: Use centralized utilities for shared operations (table naming, schema cleaning)
+
+### 🔍 **Mandatory Checks Before Architectural Changes**
+1. Identify all shared concepts (table naming, schema handling, etc.)
+2. Ensure single canonical implementation for each shared concept
+3. Validate component interface contracts explicitly
+4. Test cross-component interactions with real data
+5. Check for metadata contamination risks
+
+### 🚨 **Red Flags That Require Immediate Attention**
+- Multiple implementations of same logical operation
+- Different components handling same data with different logic
+- Schema/naming inconsistencies between pipeline stages
+- Metadata that could contaminate downstream systems
+- New table name cleaning logic (should use central authority)
+- Schema handling without cross-component validation
+- Parquet generation without metadata sanitization
+
+### 📋 **AI Assistant Memory Integration**
+- **Read First**: Always read `LESSONS_LEARNED_V1_2_ARCHITECTURE.md` before architectural work
+- **Apply Principles**: Use consistency-first thinking, not just feature-first thinking
+- **Validate Integration**: Test cross-component interactions with real data
+- **Document Patterns**: Update lessons learned when new patterns emerge

@@ -2,5 +2,9 @@
     "settlement.settlement_normal_delivery_detail": {
       "distkey": "ant_parcel_no",
       "sortkey": ["billing_num", "create_at"]
+    },
+    "settlement.settle_orders": {
+      "distkey": "tracking_number",
+      "sortkey": ["tracking_number", "created_at"]
     }
-  }
+}

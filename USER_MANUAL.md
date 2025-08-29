@@ -1,7 +1,10 @@
 # 📖 S3 to Redshift Backup System - User Manual
 
+## Version 1.2.0 - Enhanced Multi-Schema Pipeline Edition
+
 ## Table of Contents
 - [🎯 System Overview](#-system-overview)
+- [🆕 What's New in v1.2.0](#-whats-new-in-v120)
 - [🚀 Quick Start Guide](#-quick-start-guide)
 - [⚙️ System Configuration](#️-system-configuration)
 - [🔧 Command Reference](#-command-reference)
@@ -11,6 +14,66 @@
 - [🛠️ Troubleshooting](#️-troubleshooting)
 - [📈 Advanced Usage](#-advanced-usage)
 - [🔒 Security & Best Practices](#-security--best-practices)
+
+---
+
+## 🆕 What's New in v1.2.0
+
+### Major Enhancements
+
+#### 🏢 Multi-Schema Architecture Support
+- **Pipeline-based Table Processing**: Tables can now be scoped with schema names (`schema.table`)
+- **Cross-Database Support**: Handle tables from different databases/schemas in a single system
+- **Smart Schema Discovery**: Automatic detection of table schemas for proper routing
+- **Backward Compatible**: Unscoped table names still work with default schema
+
+#### 📊 Enhanced Watermark Reporting
+- **Session vs Cumulative Counts**: Clear distinction between single-session and all-time totals
+- **Row Count Integrity**: Fixed double-counting bugs in multi-session scenarios
+- **Comprehensive Status**: New watermark display shows both session and cumulative metrics
+- **Cross-Validation**: Built-in validation against actual Redshift data
+
+#### ⚡ Redshift Optimization Configuration
+- **COPY Command Options**: New configuration for optimized data loading
+- **Compression Support**: Automatic GZIP compression for improved performance
+- **Parallel Loading**: Configure MAXERROR and parallel processing options
+- **Format Flexibility**: Support for both Parquet and CSV loading strategies
+
+#### 🛡️ Schema Compatibility Improvements
+- **Unified Schema System**: All components now use FlexibleSchemaManager
+- **Dynamic Schema Discovery**: No more hardcoded schemas - adapts to your database
+- **Type Mapping Consistency**: Proper handling of DECIMAL precision across pipeline
+- **Production-Tested**: Resolved critical schema mismatch issues in production
+
+#### 🔧 CLI Command Enhancements
+- **Better Error Messages**: Clear, actionable error reporting
+- **Progress Indicators**: Real-time progress for long-running operations
+- **Validation Commands**: New commands for data integrity checking
+- **Debug Mode**: Enhanced debugging output for troubleshooting
+
+### Quick Migration Guide
+
+If you're upgrading from v1.0.0 or v1.1.0:
+
+1. **Table Names**: You can now use scoped names:
+   ```bash
+   # Old way (still works)
+   python -m src.cli.main sync -t settlement_claim_detail
+   
+   # New way (recommended for clarity)
+   python -m src.cli.main sync -t settlement.settlement_claim_detail
+   ```
+
+2. **Watermark Interpretation**: Watermark now shows both session and cumulative data:
+   ```
+   Session Stats:     100,000 rows (this backup session)
+   Cumulative Total:  5,000,000 rows (all-time total)
+   ```
+
+3. **Configuration**: Check your `.env` for new Redshift optimization settings:
+   ```bash
+   REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 1000
+   ```
 
 ---
 
@@ -82,6 +145,31 @@ The S3 to Redshift Backup System is a production-grade data pipeline that:
 - Access to settlement database via SSH bastion
 - AWS S3 bucket with read/write permissions
 - SSH private key for bastion host access
+
+### Understanding Table Names (v1.2.0+)
+
+The system now supports **scoped table names** for better multi-schema support:
+
+```bash
+# Fully scoped format (recommended)
+schema.table_name
+
+# Examples:
+settlement.settlement_claim_detail
+settlement.partner_info
+us_dw.user_info
+```
+
+**Benefits of Scoped Names:**
+- ✅ Clear identification of data source
+- ✅ Support for multiple databases/schemas
+- ✅ Prevents ambiguity in multi-pipeline setups
+- ✅ Better organization of S3 storage paths
+
+**Backward Compatibility:**
+- Unscoped table names (e.g., `settlement_claim_detail`) still work
+- System uses default schema from configuration
+- Existing scripts don't need immediate updates
 
 ### 1. Environment Setup
 
@@ -174,9 +262,36 @@ BACKUP_NUM_CHUNKS=4
 BACKUP_RETRY_ATTEMPTS=3
 BACKUP_TIMEOUT_SECONDS=300
 
+# Redshift Optimization Settings (v1.2.0+)
+REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 1000
+REDSHIFT_MAX_PARALLEL_LOADS=4
+REDSHIFT_LOAD_TIMEOUT=3600
+
 # Logging Configuration
 LOG_LEVEL=INFO
 DEBUG=false
+```
+
+### Redshift Configuration Details (v1.2.0+)
+
+The system now supports advanced Redshift COPY optimization:
+
+**REDSHIFT_COPY_OPTIONS**: Additional parameters for COPY command
+- `GZIP`: Enable compression for faster data transfer
+- `MAXERROR N`: Continue loading despite N errors (default: 1000)
+- `TRUNCATECOLUMNS`: Truncate strings that exceed column width
+- `ACCEPTINVCHARS`: Replace invalid UTF-8 characters
+
+**Example configurations:**
+```bash
+# High performance, tolerant of errors
+REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 1000 TRUNCATECOLUMNS
+
+# Strict data integrity
+REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 0
+
+# Handle encoding issues
+REDSHIFT_COPY_OPTIONS=GZIP ACCEPTINVCHARS MAXERROR 100
 ```
 
 ### Configuration Validation
@@ -299,7 +414,7 @@ python -m src.cli.main watermark [OPERATION] [OPTIONS]
 ```
 
 **Operations:**
-- `get`: Get current table watermark
+- `get`: Get current table watermark with detailed statistics
 - `set`: Set new watermark timestamp for table  
 - `reset`: Delete watermark completely (fresh start)
 - `list`: List all table watermarks
@@ -310,7 +425,7 @@ python -m src.cli.main watermark [OPERATION] [OPTIONS]
 
 **Examples:**
 ```bash
-# View current watermark
+# View current watermark with detailed statistics
 python -m src.cli.main watermark get -t settlement.settlement_claim_detail
 
 # Set manual starting timestamp for incremental sync
@@ -324,6 +439,34 @@ python -m src.cli.main watermark reset -t settlement.settlement_claim_detail
 # List all table watermarks
 python -m src.cli.main watermark list
 ```
+
+**Understanding Watermark Output (v1.2.0+):**
+
+The watermark display now shows both **session** and **cumulative** statistics:
+
+```
+📊 Watermark Status for settlement.settlement_claim_detail:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Last Data Timestamp:     2025-08-25 10:30:00  
+Last Extraction Time:    2025-08-25 10:35:00  
+MySQL Status:            success               
+Redshift Status:         success               
+
+📈 Row Count Statistics:
+Session Stats:
+  MySQL Extracted:       100,000 rows (this session)
+  Redshift Loaded:       100,000 rows (this session)
+
+Cumulative Total:
+  Total Extracted:       5,000,000 rows (all-time)
+  Total Loaded:          5,000,000 rows (all-time)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**Key Concepts:**
+- **Session Stats**: Rows processed in the most recent backup/sync operation
+- **Cumulative Total**: Total rows processed across all historical operations
+- **Why Both Matter**: Session stats help verify individual runs, cumulative shows overall progress
 
 **Watermark Use Cases:**
 
@@ -672,6 +815,16 @@ s3://your-s3-bucket-name/
     └── last_run_timestamp.txt (current watermark)
 ```
 
+**v1.2.0 Schema-Scoped Paths:**
+With scoped table names, S3 paths now clearly indicate the source schema:
+```
+s3://your-bucket/incremental/
+├── settlement.settlement_claim_detail/      # Settlement schema
+├── settlement.partner_info/                 # Settlement schema
+├── us_dw.user_info/                        # US DW schema
+└── analytics.daily_summary/                 # Analytics schema
+```
+
 ### Redshift Data Warehouse Integration
 
 #### Production Redshift Setup
@@ -939,21 +1092,21 @@ python backup_dashboard.py | grep -A5 "Watermark"
 python check_claim_simple.py
 ```
 
-#### 5. Watermark Row Count Discrepancy (CRITICAL BUG FIX)
+#### 5. Watermark Row Count Discrepancy (FIXED in v1.2.0)
 
 **Symptoms:**
 - Watermark shows different row counts for backup vs loading stage
 - Example: "MySQL Extracted: 8,500,000" but "Redshift Loaded: 5,000,000" 
 - Actual Redshift contains correct data, but watermark tracking is wrong
-- CLI `watermark-count set-count` only fixes MySQL count, not Redshift count
+- Session counts don't match cumulative totals
 
-**Root Cause:**
+**Root Cause (Historical):**
 This was a critical bug where:
 1. CLI command only updated MySQL count, ignored Redshift count
 2. `update_redshift_watermark()` method had accumulation bug causing double-counting
 3. Multi-session loading would overwrite instead of accumulate row counts
 
-**COMPLETE FIX APPLIED:**
+**v1.2.0 COMPLETE FIX:**
 ```bash
 # This now properly updates BOTH MySQL AND Redshift counts
 python -m src.cli.main watermark-count set-count \
@@ -961,7 +1114,7 @@ python -m src.cli.main watermark-count set-count \
   --count 8500000 \
   --mode absolute
 
-# Verify both counts are now correct
+# Verify both counts are now correct (shows session + cumulative)
 python -m src.cli.main watermark get -t settlement.settlement_normal_delivery_detail
 
 # Cross-validate with actual Redshift data
@@ -969,10 +1122,22 @@ python -m src.cli.main watermark-count validate-counts \
   -t settlement.settlement_normal_delivery_detail
 ```
 
-**Prevention:**
-- Fixed accumulation logic prevents future double-counting bugs
-- Session-aware tracking: same session = replace count, different session = accumulate
-- Enhanced CLI validates both MySQL and Redshift counts simultaneously
+**v1.2.0 Improvements:**
+- **Session-aware tracking**: Distinguishes between single-session and cumulative counts
+- **Smart accumulation**: Same session = replace, different session = accumulate
+- **Clear reporting**: Watermark display shows both session and total statistics
+- **Validation tools**: Built-in commands to verify data integrity
+
+**Understanding the New Display:**
+```
+Session Stats:        # Rows from most recent operation
+  MySQL Extracted: 100,000 rows
+  Redshift Loaded: 100,000 rows
+
+Cumulative Total:     # All-time totals
+  Total Extracted: 5,000,000 rows  
+  Total Loaded:    5,000,000 rows
+```
 
 #### 6. Watermark and Sync Issues
 
@@ -1029,7 +1194,44 @@ Look for these log messages to understand what's happening:
 - ✅ `"backup_strategy = 'manual_cli'"` in debug output
 - ❌ `"backup_strategy = 'sequential'"` (means backup process ran and overwrote manual watermark)
 
-#### 6. S3 Clean Issues
+#### 7. Schema Compatibility Issues (RESOLVED in v1.2.0)
+
+**Symptoms (Historical):**
+- "Redshift Spectrum error about incompatible Parquet schema"
+- DECIMAL precision mismatches (e.g., DECIMAL(10,4) vs DECIMAL(15,4))
+- "Column type mismatch" errors during Redshift loading
+- Schema discovery returns different results across components
+
+**v1.2.0 Complete Resolution:**
+The system now uses a **unified schema architecture** that eliminated these issues:
+
+```bash
+# Schema discovery now consistent across all components
+python -m src.cli.main sync -t settlement.settlement_claim_detail --dry-run
+
+# Should show consistent schema information throughout the pipeline
+```
+
+**Key v1.2.0 Schema Improvements:**
+- **FlexibleSchemaManager**: Single source of truth for all schema operations
+- **Dynamic Discovery**: No more hardcoded schemas that become outdated  
+- **Type Consistency**: Proper DECIMAL precision handling across pipeline stages
+- **API Standardization**: All components use identical schema discovery methods
+
+**Migration Notes:**
+- Existing hardcoded schemas in `config/schemas.py` are now deprecated
+- System automatically detects schema from your actual database
+- No user action required - improvements are automatic
+
+**Verification:**
+```bash
+# Verify schema consistency (should show unified output)
+python -m src.cli.main sync -t your_table --dry-run | grep -A5 "Schema"
+
+# Should see consistent precision and type mapping across all stages
+```
+
+#### 8. S3 Clean Issues
 
 **Symptoms:**
 - "S3 clean operation failed"
@@ -1073,14 +1275,17 @@ python -m src.cli.main s3clean clean -t settlement.table_name --older-than "7d"
 - **"Invalid time format"**: Use formats like "7d", "24h", "30m"
 - **Large file counts**: Command processes up to 1000 files per operation
 
-#### 7. Performance Issues
+#### 9. Performance Issues
 
 **Symptoms:**
 - Slow backup performance
 - Memory usage issues
 - Timeouts
+- Slow Redshift loading
 
-**Solutions:**
+**v1.2.0 Performance Solutions:**
+
+**Backup Performance:**
 ```bash
 # Adjust batch size (in .env)
 BACKUP_BATCH_SIZE=5000  # Smaller batches
@@ -1093,6 +1298,34 @@ python -m src.cli.main backup -t large_table -s sequential
 
 # Monitor with debug logging
 python -m src.cli.main backup -t table_name -s sequential --debug
+```
+
+**Redshift Loading Performance (NEW in v1.2.0):**
+```bash
+# Enable compression and parallel loading (in .env)
+REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 1000
+REDSHIFT_MAX_PARALLEL_LOADS=4
+
+# For high-performance scenarios
+REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 1000 TRUNCATECOLUMNS
+REDSHIFT_LOAD_TIMEOUT=7200  # 2 hours for large loads
+
+# Test performance improvement
+python -m src.cli.main sync -t large_table --redshift-only
+```
+
+**Performance Monitoring:**
+```bash
+# Monitor row processing rates
+python -m src.cli.main sync -t table_name --limit 10000 --debug
+
+# Check session vs cumulative performance
+python -m src.cli.main watermark get -t table_name
+
+# Look for these performance indicators:
+# - Session processing rate (rows/second)
+# - Compression effectiveness in logs  
+# - Redshift COPY command completion time
 ```
 
 ### Log Analysis for Debugging
@@ -1469,19 +1702,42 @@ EOF
 
 ## 🎯 Summary
 
-This user manual provides comprehensive guidance for operating your S3 to Redshift backup system. The system is production-ready and has successfully migrated from your Google Colab prototype to a robust, enterprise-grade solution.
+This user manual provides comprehensive guidance for operating your S3 to Redshift backup system v1.2.0. The system has evolved from a simple backup tool to an enterprise-grade multi-schema data pipeline platform.
 
-### Key Takeaways
-1. **Start with dry runs** for safety
-2. **Monitor regularly** using provided dashboards  
-3. **Choose appropriate strategies** based on data size
-4. **Follow security best practices** for production use
-5. **Test thoroughly** before production deployment
+### v1.2.0 Key Improvements
+1. **Multi-Schema Support**: Use scoped table names (`schema.table`) for better organization
+2. **Enhanced Watermarks**: Clear session vs cumulative statistics prevent confusion
+3. **Redshift Optimization**: GZIP compression and configurable COPY options for performance
+4. **Schema Unification**: Resolved critical compatibility issues with dynamic schema discovery
+5. **Better Debugging**: Improved error messages and validation commands
+
+### Best Practices for v1.2.0
+1. **Use scoped table names** for clarity (`settlement.table_name`)
+2. **Understand watermark reports** - distinguish session from cumulative stats
+3. **Configure Redshift optimization** for your data loading requirements
+4. **Monitor performance** with enhanced debugging and validation tools
+5. **Leverage new validation commands** for data integrity verification
+
+### Migration from Earlier Versions
+- **Table names**: Start using scoped format (`schema.table`) for new implementations
+- **Watermark interpretation**: Review new session vs cumulative reporting format
+- **Configuration**: Add new Redshift optimization settings to your `.env`
+- **Commands**: Existing commands work unchanged, new features available when needed
 
 ### Getting Help
-- Check logs for detailed error information
-- Use `--debug` flag for troubleshooting
+- Check logs for detailed error information with better v1.2.0 diagnostics
+- Use `--debug` flag for enhanced troubleshooting output
 - Run health checks with `python -m src.cli.main status`
-- Refer to this manual for specific scenarios
+- Use new validation commands: `watermark-count validate-counts`
+- Refer to this manual for specific scenarios and new features
 
-**Your backup system is ready for production use!** 🚀
+**Your v1.2.0 enterprise backup platform is ready for multi-schema production use!** 🚀
+
+### What's Next?
+The v1.2.0 foundation sets the stage for future enterprise features:
+- Multi-database pipeline support
+- Advanced CDC strategies
+- SCD dimensional processing
+- Enterprise orchestration
+
+Stay tuned for upcoming enhancements while enjoying the stability and performance of v1.2.0!

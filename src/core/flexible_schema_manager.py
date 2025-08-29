@@ -7,6 +7,8 @@ from typing import Dict, Optional, Tuple, List
 import pyarrow as pa
 from datetime import datetime
 import json
+import os
+from pathlib import Path
 
 from src.core.connections import ConnectionManager
 from src.utils.logging import get_logger
@@ -33,6 +35,9 @@ class FlexibleSchemaManager:
         self._schema_cache_timestamp: Dict[str, float] = {}
         self._mysql_to_pyarrow_map = self._build_type_mapping()
         self._mysql_to_redshift_map = self._build_redshift_mapping()
+        
+        # Load custom Redshift optimization configuration
+        self._redshift_optimizations = self._load_redshift_optimizations()
     
     def get_table_schema(self, table_name: str, force_refresh: bool = False) -> Tuple[pa.Schema, str]:
         """
@@ -83,15 +88,40 @@ class FlexibleSchemaManager:
             logger.error(f"Failed to discover schema for {table_name}: {e}")
             raise
     
+    def _extract_mysql_table_name(self, table_name: str) -> str:
+        """
+        Extract actual MySQL table name from potentially scoped table name.
+        
+        Handles v1.2.0 multi-schema scoped names:
+        - 'settlement.settle_orders' → 'settlement.settle_orders' (unscoped)
+        - 'US_DW_RO_SSH:settlement.settle_orders' → 'settlement.settle_orders' (connection scoped)
+        
+        Args:
+            table_name: Table name (may include scope prefix)
+            
+        Returns:
+            MySQL table name without scope prefix
+        """
+        if ':' in table_name:
+            # Scoped table name - extract actual table name after colon
+            _, actual_table = table_name.split(':', 1)
+            return actual_table
+        else:
+            # Unscoped table name - return as-is
+            return table_name
+
     def _get_mysql_table_info(self, cursor, table_name: str) -> List[Dict]:
         """Get detailed table information from MySQL INFORMATION_SCHEMA"""
         
+        # FIXED: Extract actual MySQL table name from potentially scoped name for v1.2.0
+        mysql_table_name = self._extract_mysql_table_name(table_name)
+        
         # Handle schema.table format
-        if '.' in table_name:
-            schema_name, table_only = table_name.split('.', 1)
+        if '.' in mysql_table_name:
+            schema_name, table_only = mysql_table_name.split('.', 1)
         else:
             schema_name = 'settlement'  # Default schema
-            table_only = table_name
+            table_only = mysql_table_name
         
         # Get comprehensive column information
         cursor.execute(f"""
@@ -156,9 +186,12 @@ class FlexibleSchemaManager:
         # Handle specific cases first
         if data_type in ['decimal', 'numeric']:
             if precision and scale is not None:
-                return pa.decimal128(int(precision), int(scale))
+                # FIXED: Cap precision for Redshift Spectrum compatibility (from PARQUET_SCHEMA_COMPATIBILITY_FIXES.md)
+                redshift_precision = min(int(precision), 18)  # Max 18 for Redshift compatibility
+                redshift_scale = min(int(scale), redshift_precision)  # Scale can't exceed precision
+                return pa.decimal128(redshift_precision, redshift_scale)
             else:
-                return pa.decimal128(10, 2)  # Safe default
+                return pa.decimal128(15, 4)  # Use standardized financial precision (was 10,2)
         
         elif data_type in ['varchar', 'char']:
             return pa.string()
@@ -259,23 +292,91 @@ class FlexibleSchemaManager:
         ddl_lines.append(",\n".join(column_ddls))
         ddl_lines.append(")")
         
-        # Add Redshift optimizations
+        # Add Redshift optimizations with custom configuration support
         optimization_clauses = []
         
-        # Add DISTKEY for even distribution (use first suitable column)
-        if primary_key_candidates:
-            optimization_clauses.append(f"DISTKEY({primary_key_candidates[0]})")
-        elif 'parcel' in clean_table_name.lower():
-            # Look for parcel-related columns
-            for col in schema_info:
-                if 'parcel' in col['COLUMN_NAME'].lower():
-                    optimization_clauses.append(f"DISTKEY({col['COLUMN_NAME']})")
-                    break
+        # Extract actual MySQL table name for optimization lookup
+        mysql_table_name = self._extract_mysql_table_name(table_name)
         
-        # Add SORTKEY for query performance
-        if sort_key_candidates:
-            sort_keys = ', '.join(sort_key_candidates[:2])  # Max 2 sort keys
-            optimization_clauses.append(f"SORTKEY({sort_keys})")
+        # Check for custom optimizations in redshift_keys.json
+        custom_config = self._redshift_optimizations.get(mysql_table_name)
+        
+        if custom_config:
+            logger.info(f"Using custom Redshift optimizations for {mysql_table_name}")
+            
+            # Apply custom DISTKEY
+            if 'distkey' in custom_config:
+                distkey_column = custom_config['distkey']
+                # Verify the column exists in the table schema
+                column_exists = any(col['COLUMN_NAME'] == distkey_column for col in schema_info)
+                if column_exists:
+                    optimization_clauses.append(f"DISTKEY({distkey_column})")
+                    logger.info(f"Applied custom DISTKEY: {distkey_column}")
+                else:
+                    logger.warning(f"Custom DISTKEY column '{distkey_column}' not found in table schema, using default")
+            
+            # Apply custom SORTKEY
+            if 'sortkey' in custom_config and custom_config['sortkey']:
+                sortkey_columns = custom_config['sortkey']
+                if isinstance(sortkey_columns, str):
+                    sortkey_columns = [sortkey_columns]
+                
+                # Verify all sortkey columns exist
+                valid_sortkeys = []
+                for sortkey_col in sortkey_columns[:2]:  # Max 2 sort keys
+                    if any(col['COLUMN_NAME'] == sortkey_col for col in schema_info):
+                        valid_sortkeys.append(sortkey_col)
+                    else:
+                        logger.warning(f"Custom SORTKEY column '{sortkey_col}' not found in table schema")
+                
+                if valid_sortkeys:
+                    sort_keys = ', '.join(valid_sortkeys)
+                    optimization_clauses.append(f"SORTKEY({sort_keys})")
+                    logger.info(f"Applied custom SORTKEY: {sort_keys}")
+        
+        else:
+            # Use default optimization logic if no custom configuration
+            logger.debug(f"No custom optimizations found for {mysql_table_name}, using defaults")
+            
+            # Add DISTKEY for even distribution - prioritize tracking_number for settle_orders
+            dist_key_set = False
+            
+            # For settle_orders table, prefer tracking_number as DISTKEY
+            if 'settle_orders' in clean_table_name.lower():
+                for col in schema_info:
+                    if col['COLUMN_NAME'].lower() == 'tracking_number':
+                        optimization_clauses.append(f"DISTKEY({col['COLUMN_NAME']})")
+                        dist_key_set = True
+                        break
+            
+            # Fallback to primary key or parcel columns if tracking_number not found
+            if not dist_key_set:
+                if primary_key_candidates:
+                    optimization_clauses.append(f"DISTKEY({primary_key_candidates[0]})")
+                elif 'parcel' in clean_table_name.lower():
+                    # Look for parcel-related columns
+                    for col in schema_info:
+                        if 'parcel' in col['COLUMN_NAME'].lower():
+                            optimization_clauses.append(f"DISTKEY({col['COLUMN_NAME']})")
+                            break
+            
+            # Add SORTKEY for query performance - enhanced for settle_orders
+            if 'settle_orders' in clean_table_name.lower():
+                # For settle_orders, prioritize tracking_number and timestamps
+                settle_sort_keys = []
+                for col in schema_info:
+                    col_name_lower = col['COLUMN_NAME'].lower()
+                    if col_name_lower == 'tracking_number':
+                        settle_sort_keys.insert(0, col['COLUMN_NAME'])  # First priority
+                    elif col_name_lower in ['create_at', 'update_at', 'created_at', 'updated_at']:
+                        settle_sort_keys.append(col['COLUMN_NAME'])
+                
+                if settle_sort_keys:
+                    sort_keys = ', '.join(settle_sort_keys[:2])  # Max 2 sort keys
+                    optimization_clauses.append(f"SORTKEY({sort_keys})")
+            elif sort_key_candidates:
+                sort_keys = ', '.join(sort_key_candidates[:2])  # Max 2 sort keys
+                optimization_clauses.append(f"SORTKEY({sort_keys})")
         
         if optimization_clauses:
             ddl_lines.append("\n" + "\n".join(optimization_clauses))
@@ -283,6 +384,25 @@ class FlexibleSchemaManager:
         ddl_lines.append(";")
         
         return "\n".join(ddl_lines)
+    
+    def _load_redshift_optimizations(self) -> Dict[str, Dict]:
+        """Load custom Redshift optimization settings from redshift_keys.json"""
+        try:
+            # Look for redshift_keys.json in project root
+            project_root = Path(__file__).parent.parent.parent
+            redshift_keys_file = project_root / "redshift_keys.json"
+            
+            if redshift_keys_file.exists():
+                with open(redshift_keys_file, 'r') as f:
+                    optimizations = json.load(f)
+                logger.info(f"Loaded custom Redshift optimizations for {len(optimizations)} tables")
+                return optimizations
+            else:
+                logger.debug("No redshift_keys.json file found, using default optimizations")
+                return {}
+        except Exception as e:
+            logger.warning(f"Failed to load redshift_keys.json: {e}, using default optimizations")
+            return {}
     
     def _map_mysql_to_redshift(self, data_type: str, column_type: str,
                                max_length: Optional[int], precision: Optional[int],
@@ -310,8 +430,11 @@ class FlexibleSchemaManager:
         
         elif data_type in ['decimal', 'numeric']:
             if precision and scale is not None:
-                return f"DECIMAL({precision},{scale})"
-            return "DECIMAL(10,2)"
+                # FIXED: Cap precision for Redshift compatibility (from PARQUET_SCHEMA_COMPATIBILITY_FIXES.md)
+                redshift_precision = min(int(precision), 18)  # Max 18 for Redshift compatibility
+                redshift_scale = min(int(scale), redshift_precision)  # Scale can't exceed precision
+                return f"DECIMAL({redshift_precision},{redshift_scale})"
+            return "DECIMAL(15,4)"  # Use standardized financial precision (was 10,2)
         
         elif data_type in ['float', 'real', 'double']:
             return "FLOAT"

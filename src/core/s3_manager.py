@@ -66,6 +66,34 @@ class S3Manager:
         if self.s3_client is None:
             raise S3Error("S3 client not initialized")
     
+    def _clean_table_name_with_scope(self, table_name: str) -> str:
+        """
+        Clean table name for S3 path generation with v1.2.0 multi-schema support.
+        
+        Handles both scoped and unscoped table names:
+        - 'settlement.settle_orders' → 'settlement_settle_orders'
+        - 'US_DW_RO_SSH:settlement.settle_orders' → 'us_dw_ro_ssh_settlement_settle_orders'
+        - 'us_dw_pipeline:settlement.settle_orders' → 'us_dw_pipeline_settlement_settle_orders'
+        
+        Args:
+            table_name: Table name (may include scope prefix)
+            
+        Returns:
+            Cleaned table name suitable for S3 path
+        """
+        # Handle scoped table names (v1.2.0 multi-schema)
+        if ':' in table_name:
+            scope, actual_table = table_name.split(':', 1)
+            # Clean scope: lowercase, replace special chars with underscores
+            clean_scope = scope.lower().replace('-', '_').replace('.', '_')
+            # Clean table: replace dots with underscores
+            clean_table = actual_table.replace('.', '_').replace('-', '_')
+            # Combine: scope_table_name
+            return f"{clean_scope}_{clean_table}"
+        else:
+            # Unscoped table (v1.0.0 compatibility)
+            return table_name.replace('.', '_').replace('-', '_')
+    
     def generate_s3_key(
         self, 
         table_name: str, 
@@ -96,8 +124,8 @@ class S3Manager:
             else:
                 dt = timestamp
             
-            # Clean table name for use in path
-            clean_table_name = table_name.replace('.', '_').replace('-', '_')
+            # Clean table name for use in path with v1.2.0 multi-schema support
+            clean_table_name = self._clean_table_name_with_scope(table_name)
             
             # Generate timestamp string for filename
             timestamp_str = dt.strftime('%Y%m%d_%H%M%S')
@@ -199,32 +227,109 @@ class S3Manager:
             # Create parquet buffer
             buffer = io.BytesIO()
             
-            # Set up parquet writer options optimized for Redshift compatibility
+            # Set up parquet writer options optimized for Redshift Spectrum compatibility
             writer_options = {
                 'compression': compression,
-                'use_dictionary': False,  # Disable dictionary for Redshift compatibility
-                'write_statistics': False,  # Disable statistics that might cause metadata issues
-                'data_page_size': 1024 * 1024,  # 1MB pages
-                'use_deprecated_int96_timestamps': False,
-                'store_schema': False,  # Don't store schema metadata that might reference S3
-                'write_batch_size': 1000  # Smaller batch size for better compatibility
+                'use_dictionary': False,  # Critical: Disable dictionary for Redshift compatibility
+                'write_statistics': False,  # Critical: Disable statistics that might cause metadata issues
+                'store_schema': False,  # Critical: Don't store schema metadata that might reference S3
+                'data_page_size': 1024 * 1024,  # 1MB pages for optimal Spectrum reading
+                'write_batch_size': 1000,  # Smaller batches for better compatibility
+                'use_deprecated_int96_timestamps': False,  # Use standard timestamp format
+                # Note: Some advanced options removed for broader compatibility
+                # 'coerce_timestamps': 'us',  # May not be supported by all PyArrow versions
+                # 'allow_truncated_timestamps': True,  # May not be supported by all PyArrow versions
+                # 'version': '2.6',  # Use default version for better compatibility
             }
             
-            # Create a clean table without problematic metadata
-            # Remove any existing metadata that might reference S3 paths
-            clean_table = table.replace_schema_metadata(None)
+            # CRITICAL FIX: Create completely clean schema without metadata contamination
+            # This prevents 'incompatible Parquet schema for column s3:' errors
+            clean_fields = []
+            for field in table.schema:
+                field_name = field.name
+                field_type = field.type
+                
+                # CRITICAL: Sanitize column names that might contain problematic characters
+                sanitized_name = field_name.replace(':', '_').replace('/', '_').replace('\\', '_')
+                if sanitized_name.startswith('s3_'):
+                    sanitized_name = sanitized_name[3:]  # Remove s3_ prefix
+                
+                # Validate column names for Redshift compatibility
+                if ':' in sanitized_name or '/' in sanitized_name or sanitized_name.startswith('s3'):
+                    logger.warning(f"Sanitizing problematic column name: '{field_name}' -> '{sanitized_name}'")
+                    raise ValueError(f"Invalid column name for Redshift Spectrum after sanitization: '{sanitized_name}'")
+                
+                # ENHANCED: Additional decimal type validation for Spectrum compatibility
+                if pa.types.is_decimal(field_type):
+                    precision = field_type.precision
+                    scale = field_type.scale
+                    if precision > 38:  # Redshift max precision is 38
+                        logger.warning(f"Reducing decimal precision for {sanitized_name}: {precision} -> 38")
+                        field_type = pa.decimal128(38, min(scale, 38))
+                    elif precision > 18 and scale > 18:  # Spectrum compatibility
+                        logger.warning(f"Adjusting decimal for Spectrum compatibility: {sanitized_name} ({precision},{scale}) -> ({min(precision, 18)},{min(scale, 18)})")
+                        field_type = pa.decimal128(min(precision, 18), min(scale, 18))
+                
+                # Create completely new field without any metadata
+                clean_field = pa.field(
+                    name=sanitized_name,
+                    type=field_type,
+                    nullable=field.nullable
+                    # IMPORTANT: No metadata parameter - ensures no S3 references
+                )
+                
+                clean_fields.append(clean_field)
             
-            # Write parquet to buffer with Redshift-compatible parameters
+            # Create completely clean schema and table with no metadata
+            clean_schema = pa.schema(clean_fields, metadata=None)  # Explicitly no metadata
+            
+            # If we had to sanitize column names, we need to rename the table columns
+            if any(field.name != clean_field.name for field, clean_field in zip(table.schema, clean_fields)):
+                logger.info("Renaming table columns to match sanitized schema")
+                # Rename columns in the table to match sanitized names
+                column_mapping = {field.name: clean_field.name for field, clean_field in zip(table.schema, clean_fields)}
+                table = table.rename_columns([column_mapping.get(name, name) for name in table.column_names])
+            
+            clean_table = table.cast(clean_schema)
+            
+            # FIXED: Additional schema validation and cleaning for Redshift Spectrum compatibility
             try:
+                # Validate decimal field compatibility
+                for field in clean_schema:
+                    if pa.types.is_decimal(field.type):
+                        precision = field.type.precision
+                        scale = field.type.scale
+                        if precision > 18 or scale > precision:
+                            logger.warning(f"Decimal field {field.name} has precision/scale ({precision},{scale}) that may cause Spectrum issues")
+                
+                # ENHANCED: Pre-validate parquet compatibility before writing
+                self._validate_parquet_spectrum_compatibility(clean_table, s3_key)
+                
+                # Write parquet to buffer with Redshift-compatible parameters
                 pq.write_table(clean_table, buffer, **writer_options)
-            except TypeError as e:
+                
+                # CRITICAL: Validate the written parquet file immediately
+                self._validate_written_parquet(buffer, s3_key)
+                
+            except (TypeError, ValueError) as e:
+                logger.warning(f"Parquet writer options incompatible, using minimal fallback: {e}")
                 # Fallback to minimal options if there are still compatibility issues
                 minimal_options = {
                     'compression': compression,
                     'use_dictionary': False,
-                    'write_statistics': False
+                    'write_statistics': False,
+                    'store_schema': False
                 }
                 pq.write_table(clean_table, buffer, **minimal_options)
+            
+            except Exception as e:
+                logger.error(f"Failed to write Parquet table: {e}")
+                # Log schema details for debugging
+                schema = clean_table.schema
+                logger.error(f"Table schema: {schema}")
+                for i, field in enumerate(schema):
+                    logger.error(f"Field {i}: {field.name} - {field.type} (nullable: {field.nullable})")
+                raise
             
             # Get buffer size for statistics
             buffer_size = buffer.tell()
@@ -655,11 +760,19 @@ class S3Manager:
                         if pd.isna(value) or value is None:
                             return None
                         try:
-                            # Convert to Decimal with proper scale
-                            decimal_val = decimal.Decimal(str(float(value)))
+                            # FIXED: Direct string conversion without float precision loss
+                            if isinstance(value, (int, float)):
+                                decimal_val = decimal.Decimal(str(value))
+                            elif isinstance(value, str):
+                                decimal_val = decimal.Decimal(value)
+                            else:
+                                decimal_val = decimal.Decimal(str(value))
+                            
+                            # Apply proper quantization
                             quantizer = decimal.Decimal('0.' + '0' * scale)
                             return decimal_val.quantize(quantizer)
-                        except (ValueError, decimal.InvalidOperation):
+                        except (ValueError, decimal.InvalidOperation) as e:
+                            logger.warning(f"Failed to convert value {value} to decimal({precision},{scale}): {e}")
                             return None
                     
                     aligned_df[col_name] = aligned_df[col_name].apply(convert_to_decimal)

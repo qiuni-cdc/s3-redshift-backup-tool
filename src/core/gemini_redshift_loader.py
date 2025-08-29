@@ -13,7 +13,7 @@ import psycopg2
 from contextlib import contextmanager
 
 from src.config.settings import AppConfig
-from src.config.dynamic_schemas import DynamicSchemaManager
+from src.core.flexible_schema_manager import FlexibleSchemaManager
 from src.core.connections import ConnectionManager
 from src.core.s3_watermark_manager import S3WatermarkManager
 from src.utils.exceptions import BackupError, DatabaseError
@@ -36,7 +36,7 @@ class GeminiRedshiftLoader:
     def __init__(self, config: AppConfig):
         self.config = config
         self.connection_manager = ConnectionManager(config)
-        self.schema_manager = DynamicSchemaManager(self.connection_manager)
+        self.schema_manager = FlexibleSchemaManager(self.connection_manager)
         self.watermark_manager = S3WatermarkManager(config)
         self.logger = logger
         
@@ -79,9 +79,9 @@ class GeminiRedshiftLoader:
                 status='pending'
             )
             
-            # Step 1: Get dynamic schema
+            # Step 1: Get dynamic schema using unified schema manager
             logger.debug(f"Discovering schema for {table_name}")
-            pyarrow_schema, redshift_ddl = self.schema_manager.get_schemas(table_name)
+            pyarrow_schema, redshift_ddl = self.schema_manager.get_table_schema(table_name)
             
             # Step 2: Create or update Redshift table
             redshift_table_name = self._get_redshift_table_name(table_name)
@@ -137,17 +137,27 @@ class GeminiRedshiftLoader:
             return False
     
     def _get_redshift_table_name(self, mysql_table_name: str) -> str:
-        """Convert MySQL table name to Redshift table name"""
-        # Remove database prefix if present (e.g. "settlement.table_name" -> "table_name")
-        if '.' in mysql_table_name:
-            table_name = mysql_table_name.split('.')[-1]
+        """Convert MySQL table name to Redshift table name with v1.2.0 scoped support"""
+        # FIXED: Extract actual table name without scope prefix for Redshift
+        # Redshift tables don't include the scope prefix, just the table name
+        
+        # Handle scoped table names (v1.2.0 multi-schema)
+        if ':' in mysql_table_name:
+            # Extract table name after the scope prefix
+            # Example: 'US_DW_RO_SSH:settlement.settle_orders' → 'settlement.settle_orders'
+            _, actual_table = mysql_table_name.split(':', 1)
+            table_name = actual_table
         else:
+            # Unscoped table (v1.0.0 compatibility)
             table_name = mysql_table_name
         
-        # Redshift table names: remove special characters, use underscores
-        redshift_name = table_name.replace('-', '_').replace(' ', '_')
-        
-        return redshift_name
+        # For Redshift, we only need the table name part (after schema)
+        # Example: 'settlement.settle_orders' → 'settle_orders'
+        if '.' in table_name:
+            _, table_only = table_name.rsplit('.', 1)
+            return table_only
+        else:
+            return table_name
     
     def _ensure_redshift_table(self, table_name: str, ddl: str) -> bool:
         """Create or verify Redshift table exists with correct schema"""
@@ -239,9 +249,9 @@ class GeminiRedshiftLoader:
             # Get S3 client
             s3_client = self.connection_manager.get_s3_client()
             
-            # Build S3 prefix for this table's data
-            # Need to search the partitioned structure that backup system uses
-            clean_table_name = table_name.replace('.', '_').replace('-', '_')
+            # Build S3 prefix for this table's data using same logic as S3Manager
+            # FIXED: Use consistent scoped table name cleaning for v1.2.0 multi-schema
+            clean_table_name = self._clean_table_name_with_scope(table_name)
             prefix = f"{self.config.s3.incremental_path.strip('/')}/"
             
             logger.debug(f"Searching for {clean_table_name} files with prefix: {prefix}")
@@ -509,3 +519,31 @@ class GeminiRedshiftLoader:
         except Exception as e:
             logger.error(f"Row count verification failed: {e}")
             return False
+    
+    def _clean_table_name_with_scope(self, table_name: str) -> str:
+        """
+        Clean table name for S3 path generation with v1.2.0 multi-schema support.
+        
+        Handles both scoped and unscoped table names:
+        - 'settlement.settle_orders' → 'settlement_settle_orders'
+        - 'US_DW_RO_SSH:settlement.settle_orders' → 'us_dw_ro_ssh_settlement_settle_orders'
+        - 'us_dw_pipeline:settlement.settle_orders' → 'us_dw_pipeline_settlement_settle_orders'
+        
+        Args:
+            table_name: Table name (may include scope prefix)
+            
+        Returns:
+            Cleaned table name suitable for S3 path matching
+        """
+        # Handle scoped table names (v1.2.0 multi-schema)
+        if ':' in table_name:
+            scope, actual_table = table_name.split(':', 1)
+            # Clean scope: lowercase, replace special chars with underscores
+            clean_scope = scope.lower().replace('-', '_').replace('.', '_')
+            # Clean table: replace dots with underscores
+            clean_table = actual_table.replace('.', '_').replace('-', '_')
+            # Combine: scope_table_name
+            return f"{clean_scope}_{clean_table}"
+        else:
+            # Unscoped table (v1.0.0 compatibility)
+            return table_name.replace('.', '_').replace('-', '_')

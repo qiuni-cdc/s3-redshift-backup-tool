@@ -10,7 +10,7 @@ import sys
 import json
 import warnings
 import fnmatch
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import time
 
@@ -26,6 +26,165 @@ from src.backup.inter_table import InterTableBackupStrategy
 from src.utils.logging import setup_logging, configure_logging_from_config
 from src.utils.exceptions import BackupSystemError, ConfigurationError
 from src.core.connections import ConnectionManager
+
+
+def _auto_detect_pipeline_for_table(table_name: str) -> Tuple[Optional[str], List[str], bool]:
+    """
+    Auto-detect the appropriate pipeline for a given table with conflict detection.
+    
+    This provides smart validation to prevent accidental usage of wrong pipelines
+    when multiple pipelines could handle the same table.
+    
+    Detection Strategy:
+    1. Check explicit table configurations (highest priority)
+    2. Find all potential pipeline matches  
+    3. Return single match if unambiguous, None if multiple matches found
+    
+    Args:
+        table_name: Table name to find pipeline for (e.g., 'settlement.settle_orders')
+        
+    Returns:
+        Tuple of (pipeline_name, all_matches, is_ambiguous)
+        - pipeline_name: Single unambiguous match, or None if ambiguous/none found
+        - all_matches: List of all potential pipeline matches
+        - is_ambiguous: True if multiple pipelines could handle this table
+    """
+    try:
+        config_dir = Path("config/pipelines")
+        if not config_dir.exists():
+            return None, [], False
+            
+        # Extract schema from table name for pattern matching
+        schema_name = table_name.split('.')[0] if '.' in table_name else None
+        
+        explicit_matches = []  # Pipelines that explicitly define this table
+        pattern_matches = []   # Pipelines that match by schema pattern
+        
+        # Check each pipeline configuration
+        import yaml
+        for pipeline_file in config_dir.glob("*.yml"):
+            pipeline_name = pipeline_file.stem
+            
+            try:
+                with open(pipeline_file, 'r') as f:
+                    pipeline_config = yaml.safe_load(f)
+                
+                # Check if this pipeline explicitly lists this table
+                tables = pipeline_config.get('tables', {})
+                if table_name in tables:
+                    explicit_matches.append(pipeline_name)
+                    continue  # Explicit match takes priority
+                
+                # Check schema-based patterns
+                if schema_name and schema_name != 'default':
+                    # settlement.* could match multiple settlement pipelines
+                    if schema_name.lower() in pipeline_name.lower():
+                        pattern_matches.append(pipeline_name)
+                        
+            except Exception:
+                continue  # Skip invalid pipeline files
+        
+        # Combine matches with explicit taking priority
+        all_matches = explicit_matches + pattern_matches
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        all_matches = [x for x in all_matches if not (x in seen or seen.add(x))]
+        
+        # Add default as fallback if no other matches
+        if not all_matches:
+            default_pipeline = config_dir / "default.yml"
+            if default_pipeline.exists():
+                all_matches = ["default"]
+        
+        # Determine if ambiguous
+        is_ambiguous = len(all_matches) > 1
+        
+        if is_ambiguous:
+            # Multiple matches - return None to force user specification
+            return None, all_matches, True
+        elif all_matches:
+            # Single unambiguous match
+            return all_matches[0], all_matches, False
+        else:
+            # No matches found
+            return None, [], False
+        
+    except Exception as e:
+        # Graceful fallback
+        return None, [], False
+
+
+def _get_canonical_connection_for_pipeline(pipeline_name: str) -> Optional[str]:
+    """
+    Get canonical connection name for a pipeline to enable unified watermark scoping.
+    
+    Args:
+        pipeline_name: Name of the pipeline to lookup
+        
+    Returns:
+        Canonical connection name, or None if pipeline not found/no mapping
+    """
+    try:
+        # Check if multi-schema components are available
+        config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
+        if not config_path.exists():
+            return None
+            
+        # Load pipeline configuration to get source connection
+        import yaml
+        with open(config_path, 'r') as f:
+            pipeline_config = yaml.safe_load(f)
+            
+        pipeline_info = pipeline_config.get('pipeline', {})
+        source_connection = pipeline_info.get('source')
+        
+        if source_connection:
+            # Return the canonical connection name for unified scoping
+            return source_connection
+        else:
+            return None
+            
+    except Exception as e:
+        # Fallback gracefully - if we can't resolve, let pipeline scoping work as before
+        return None
+
+
+def setup_v1_1_0_commands():
+    """Setup v1.1.0 multi-schema commands if configuration is available"""
+    try:
+        # Check if v1.1.0 configuration exists
+        config_path = Path("config")
+        if config_path.exists() and (config_path / "connections.yml").exists():
+            # Import and add v1.1.0 commands
+            from src.cli.multi_schema_commands import add_multi_schema_commands
+            add_multi_schema_commands(cli)
+            return True
+    except ImportError:
+        # v1.1.0 components not available
+        pass
+    except Exception:
+        # Configuration issues - fallback to v1.0.0 mode
+        pass
+    
+    return False
+
+
+def setup_v1_2_0_commands():
+    """Setup v1.2.0 CDC Intelligence Engine commands"""
+    try:
+        # Check if v1.2.0 CDC components are available
+        from src.cli.v1_2_0_commands import register_v1_2_commands
+        register_v1_2_commands(cli)
+        return True
+    except ImportError:
+        # v1.2.0 components not available
+        pass
+    except Exception:
+        # Configuration issues - v1.2.0 not available
+        pass
+    
+    return False
 
 
 # Strategy mapping
@@ -293,9 +452,11 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
               help='Rows per chunk (chunk size)')
 @click.option('--max-chunks', type=int,
               help='Maximum number of chunks to process (total rows = limit × max-chunks)')
+@click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
+@click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
 def sync(ctx, tables: List[str], strategy: str, max_workers: int, 
-         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int):
+         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int, pipeline: str, connection: str):
     """
     Complete MySQL → S3 → Redshift synchronization with flexible schema discovery.
     
@@ -308,13 +469,16 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
     Perfect for production data synchronization with any table structure.
     
     Examples:
-        # Full sync (MySQL → S3 → Redshift)
+        # Full sync (MySQL → S3 → Redshift) with auto-detection
         s3-backup sync -t settlement.settlement_claim_detail
         
         # Multiple tables with parallel strategy  
         s3-backup sync -t settlement.settlement_claim_detail \\
                        -t settlement.settlement_normal_delivery_detail \\
                        -s inter-table
+        
+        # Explicit pipeline specification (v1.2.0 multi-schema)
+        s3-backup sync -t settlement.settle_orders -p us_dw_pipeline
         
         # Backup only (MySQL → S3)
         s3-backup sync -t settlement.table_name --backup-only
@@ -347,10 +511,55 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
         click.echo(f"❌ Unknown strategy: {strategy}", err=True)
         sys.exit(1)
     
-    # Validate table names
+    # Validate table names and handle v1.2.0 multi-schema support
+    processed_tables = []
     for table in tables:
         if '.' not in table:
             click.echo(f"⚠️  Table '{table}' should include schema (e.g., schema.table_name)")
+        
+        # Handle pipeline auto-detection for each table (v1.2.0 multi-schema)
+        effective_table_name = table
+        
+        # Auto-detect pipeline with conflict validation if no explicit pipeline/connection specified
+        if not pipeline and not connection:
+            detected_pipeline, all_matches, is_ambiguous = _auto_detect_pipeline_for_table(table)
+            
+            if is_ambiguous:
+                click.echo(f"⚠️  Multiple pipelines could handle table '{table}':", err=True)
+                for match in all_matches:
+                    click.echo(f"   • {match}", err=True)
+                click.echo(f"❌ Please specify --pipeline flag to disambiguate:", err=True)
+                click.echo(f"   Example: sync -t {table} -p {all_matches[0]}", err=True)
+                sys.exit(1)
+            elif detected_pipeline:
+                click.echo(f"🔍 Auto-detected pipeline: {detected_pipeline} for table {table}")
+                # Map pipeline to canonical connection for scoped table name
+                canonical_connection = _get_canonical_connection_for_pipeline(detected_pipeline)
+                if canonical_connection:
+                    effective_table_name = f"{canonical_connection}:{table}"
+                else:
+                    effective_table_name = f"{detected_pipeline}:{table}"
+        
+        elif pipeline or connection:
+            # Handle explicit pipeline/connection specification
+            if pipeline and connection:
+                click.echo("❌ Cannot specify both --pipeline and --connection", err=True)
+                sys.exit(1)
+            
+            if pipeline:
+                # Map pipeline to canonical connection for scoped table name
+                canonical_connection = _get_canonical_connection_for_pipeline(pipeline)
+                if canonical_connection:
+                    effective_table_name = f"{canonical_connection}:{table}"
+                else:
+                    effective_table_name = f"{pipeline}:{table}"
+            elif connection:
+                effective_table_name = f"{connection}:{table}"
+        
+        processed_tables.append(effective_table_name)
+    
+    # Use processed table names with proper scoping
+    tables = processed_tables
     
     # Show operation information
     if backup_only:
@@ -904,8 +1113,10 @@ def config(ctx, output: str):
 @click.option('--table', '-t', help='Table name for table-specific watermark')
 @click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
 @click.option('--show-files', is_flag=True, help='Show processed S3 files list (for get operation)')
+@click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
+@click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool):
+def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool, pipeline: str, connection: str):
     """
     Manage table-specific watermark timestamps for incremental backups.
     
@@ -932,9 +1143,60 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
         
         watermark_manager = S3WatermarkManager(config)
         
+        # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
+        effective_table_name = table
+        canonical_scope = None
+        scope_info = "Default scope"
+        
+        # Auto-detect pipeline with conflict validation (smart approach)
+        effective_pipeline = pipeline
+        if table and not pipeline and not connection:
+            detected_pipeline, all_matches, is_ambiguous = _auto_detect_pipeline_for_table(table)
+            
+            if is_ambiguous:
+                click.echo(f"⚠️  Multiple pipelines could handle table '{table}':", err=True)
+                for match in all_matches:
+                    click.echo(f"   • {match}", err=True)
+                click.echo(f"❌ Please specify --pipeline flag to disambiguate:", err=True)
+                click.echo(f"   Example: watermark {operation} -t {table} -p {all_matches[0]}", err=True)
+                sys.exit(1)
+            elif detected_pipeline:
+                effective_pipeline = detected_pipeline
+                click.echo(f"🔍 Auto-detected pipeline: {effective_pipeline} for table {table}")
+            else:
+                click.echo(f"⚠️  No pipeline found for table '{table}', using default scope")
+        
+        if effective_pipeline or connection:
+            # Build scoped table name for multi-schema support
+            if effective_pipeline and connection:
+                click.echo("❌ Cannot specify both --pipeline and --connection", err=True)
+                sys.exit(1)
+            
+            if effective_pipeline:
+                # FIXED: Map pipeline to its source connection for canonical scoping
+                canonical_connection = _get_canonical_connection_for_pipeline(effective_pipeline)
+                if canonical_connection:
+                    effective_table_name = f"{canonical_connection}:{table}"
+                    canonical_scope = canonical_connection
+                    scope_info = f"Pipeline: {effective_pipeline} → Connection: {canonical_connection}"
+                else:
+                    # Fallback to pipeline scoping if no connection mapping found
+                    effective_table_name = f"{effective_pipeline}:{table}"
+                    canonical_scope = effective_pipeline
+                    scope_info = f"Pipeline: {effective_pipeline}"
+                    
+            elif connection:
+                # Connection-scoped table: connection:table_name  
+                effective_table_name = f"{connection}:{table}"
+                canonical_scope = connection
+                scope_info = f"Connection: {connection}"
+        
         click.echo(f"🔖 Watermark {operation.upper()}")
         if table:
             click.echo(f"   Table: {table}")
+            click.echo(f"   Scope: {scope_info}")
+            if effective_table_name != table:
+                click.echo(f"   Full identifier: {effective_table_name}")
         click.echo()
         
         if operation == 'get':
@@ -944,11 +1206,11 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
                 sys.exit(1)
                 
             # Get table-specific watermark
-            watermark = watermark_manager.get_table_watermark(table)
+            watermark = watermark_manager.get_table_watermark(effective_table_name)
             
             # Try to get start timestamp, but handle exceptions gracefully
             try:
-                start_timestamp = watermark_manager.get_incremental_start_timestamp(table)
+                start_timestamp = watermark_manager.get_incremental_start_timestamp(effective_table_name)
             except ValueError as e:
                 start_timestamp = f"Error: {str(e)}"
             
@@ -1042,7 +1304,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
                 
                 # Set manual watermark (data timestamp only, no extraction time)
                 success = watermark_manager.set_manual_watermark(
-                    table_name=table,
+                    table_name=effective_table_name,
                     data_timestamp=target_timestamp
                 )
                 
@@ -1076,7 +1338,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
                 return
             
             try:
-                success = watermark_manager.delete_table_watermark(table, create_backup=True)
+                success = watermark_manager.delete_table_watermark(effective_table_name, create_backup=True)
                 
                 if success:
                     click.echo(f"✅ Watermark reset for {table}")
@@ -1105,7 +1367,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
                 return
             
             try:
-                success = watermark_manager.force_reset_watermark(table)
+                success = watermark_manager.force_reset_watermark(effective_table_name)
                 
                 if success:
                     click.echo(f"✅ Force reset completed for {table}")
@@ -1164,8 +1426,10 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool)
 @click.option('--count', type=int, help='Row count to set (required for set-count)')
 @click.option('--mode', type=click.Choice(['absolute', 'additive']), default='absolute', 
               help='How to update the count: absolute (replace) or additive (add to existing)')
+@click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
+@click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
+def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipeline: str, connection: str):
     """
     Advanced watermark row count management (BUG FIX COMMANDS).
     
@@ -1192,8 +1456,59 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
         
         watermark_manager = S3WatermarkManager(config)
         
+        # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach) 
+        effective_table_name = table
+        canonical_scope = None
+        scope_info = "Default scope"
+        
+        # Auto-detect pipeline with conflict validation (smart approach)
+        effective_pipeline = pipeline
+        if table and not pipeline and not connection:
+            detected_pipeline, all_matches, is_ambiguous = _auto_detect_pipeline_for_table(table)
+            
+            if is_ambiguous:
+                click.echo(f"⚠️  Multiple pipelines could handle table '{table}':", err=True)
+                for match in all_matches:
+                    click.echo(f"   • {match}", err=True)
+                click.echo(f"❌ Please specify --pipeline flag to disambiguate:", err=True)
+                click.echo(f"   Example: watermark-count {operation} -t {table} -p {all_matches[0]}", err=True)
+                sys.exit(1)
+            elif detected_pipeline:
+                effective_pipeline = detected_pipeline
+                click.echo(f"🔍 Auto-detected pipeline: {effective_pipeline} for table {table}")
+            else:
+                click.echo(f"⚠️  No pipeline found for table '{table}', using default scope")
+        
+        if effective_pipeline or connection:
+            # Build scoped table name for multi-schema support
+            if effective_pipeline and connection:
+                click.echo("❌ Cannot specify both --pipeline and --connection", err=True)
+                sys.exit(1)
+            
+            if effective_pipeline:
+                # FIXED: Map pipeline to its source connection for canonical scoping
+                canonical_connection = _get_canonical_connection_for_pipeline(effective_pipeline)
+                if canonical_connection:
+                    effective_table_name = f"{canonical_connection}:{table}"
+                    canonical_scope = canonical_connection
+                    scope_info = f"Pipeline: {effective_pipeline} → Connection: {canonical_connection}"
+                else:
+                    # Fallback to pipeline scoping if no connection mapping found
+                    effective_table_name = f"{effective_pipeline}:{table}"
+                    canonical_scope = effective_pipeline
+                    scope_info = f"Pipeline: {effective_pipeline}"
+                    
+            elif connection:
+                # Connection-scoped table: connection:table_name  
+                effective_table_name = f"{connection}:{table}"
+                canonical_scope = connection
+                scope_info = f"Connection: {connection}"
+        
         click.echo(f"🔢 Watermark Count {operation.upper()}")
         click.echo(f"   Table: {table}")
+        click.echo(f"   Scope: {scope_info}")
+        if effective_table_name != table:
+            click.echo(f"   Full identifier: {effective_table_name}")
         click.echo()
         
         if operation == 'set-count':
@@ -1206,7 +1521,7 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
                 if mode == 'absolute':
                     # Set absolute count (replaces existing) - FIX: Update BOTH MySQL and Redshift counts
                     success = watermark_manager._update_watermark_direct(
-                        table_name=table,
+                        table_name=effective_table_name,
                         watermark_data={
                             'mysql_rows_extracted': count,
                             'redshift_rows_loaded': count  # FIX: Also update Redshift count
@@ -1222,14 +1537,14 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
                         
                 elif mode == 'additive':
                     # Add to existing count - FIX: Update BOTH MySQL and Redshift counts
-                    current_watermark = watermark_manager.get_table_watermark(table)
+                    current_watermark = watermark_manager.get_table_watermark(effective_table_name)
                     existing_mysql_count = current_watermark.mysql_rows_extracted if current_watermark else 0
                     existing_redshift_count = current_watermark.redshift_rows_loaded if current_watermark else 0
                     new_mysql_count = existing_mysql_count + count
                     new_redshift_count = existing_redshift_count + count
                     
                     success = watermark_manager._update_watermark_direct(
-                        table_name=table,
+                        table_name=effective_table_name,
                         watermark_data={
                             'mysql_rows_extracted': new_mysql_count,
                             'redshift_rows_loaded': new_redshift_count  # FIX: Also update Redshift count
@@ -1248,7 +1563,7 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
                 # Verify the change by showing updated watermark
                 click.echo()
                 click.echo("📊 Updated Watermark Status:")
-                updated_watermark = watermark_manager.get_table_watermark(table)
+                updated_watermark = watermark_manager.get_table_watermark(effective_table_name)
                 if updated_watermark:
                     click.echo(f"   MySQL Rows Extracted: {updated_watermark.mysql_rows_extracted:,}")
                     click.echo(f"   Redshift Rows Loaded: {updated_watermark.redshift_rows_loaded:,}")
@@ -1346,8 +1661,10 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str):
 @click.option('--force', is_flag=True, help='Skip confirmation prompts')
 @click.option('--show-timestamps', is_flag=True, help='Show detailed timestamps for files (default: show simplified format)')
 @click.option('--simple-delete', is_flag=True, help='Use simple deletion (ignore versioning, faster)')
+@click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
+@click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_run: bool, force: bool, show_timestamps: bool, simple_delete: bool):
+def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_run: bool, force: bool, show_timestamps: bool, simple_delete: bool, pipeline: str, connection: str):
     """
     Manage S3 backup files with safe cleanup operations.
     
@@ -1357,8 +1674,14 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
         clean-all - Clean S3 files for all tables (use with caution)
     
     Examples:
-        # List files for specific table
+        # List files for specific table (default scope)
         s3-backup s3clean list -t settlement.settlement_return_detail
+        
+        # List files for connection-scoped table (v1.2.0 multi-schema)
+        s3-backup s3clean list -t settlement.settle_orders -c US_DW_RO_SSH
+        
+        # List files for pipeline-scoped table (v1.2.0 multi-schema)
+        s3-backup s3clean list -t settlement.settle_orders -p us_dw_pipeline
         
         # List files with detailed timestamps
         s3-backup s3clean list -t settlement.settlement_return_detail --show-timestamps
@@ -1368,6 +1691,9 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
         
         # Clean files older than 7 days
         s3-backup s3clean clean -t settlement.settlement_return_detail --older-than "7d"
+        
+        # Clean connection-scoped files (v1.2.0)
+        s3-backup s3clean clean -t settlement.settle_orders -c US_DW_RO_SSH
         
         # Dry run to see what would be deleted
         s3-backup s3clean clean -t settlement.settlement_return_detail --dry-run
@@ -1394,9 +1720,58 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
             region_name=config.s3.region
         )
         
+        # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
+        effective_table_name = table
+        canonical_scope = None
+        scope_info = "Default scope"
+        
+        # Auto-detect pipeline with conflict validation (smart approach)
+        effective_pipeline = pipeline
+        if table and not pipeline and not connection:
+            detected_pipeline, all_matches, is_ambiguous = _auto_detect_pipeline_for_table(table)
+            
+            if is_ambiguous:
+                click.echo(f"⚠️  Multiple pipelines could handle table '{table}':", err=True)
+                for match in all_matches:
+                    click.echo(f"   • {match}", err=True)
+                click.echo(f"❌ Please specify --pipeline flag to disambiguate:", err=True)
+                click.echo(f"   Example: s3clean {operation} -t {table} -p {all_matches[0]}", err=True)
+                sys.exit(1)
+            elif detected_pipeline:
+                effective_pipeline = detected_pipeline
+                click.echo(f"🔍 Auto-detected pipeline: {effective_pipeline} for table {table}")
+            else:
+                click.echo(f"⚠️  No pipeline found for table '{table}', using default scope")
+        
+        if table and (effective_pipeline or connection):
+            if effective_pipeline and connection:
+                click.echo("❌ Cannot specify both --pipeline and --connection", err=True)
+                sys.exit(1)
+            
+            if effective_pipeline:
+                # FIXED: Map pipeline to its source connection for canonical scoping
+                canonical_connection = _get_canonical_connection_for_pipeline(effective_pipeline)
+                if canonical_connection:
+                    effective_table_name = f"{canonical_connection}:{table}"
+                    canonical_scope = canonical_connection
+                    scope_info = f"Pipeline: {effective_pipeline} → Connection: {canonical_connection}"
+                else:
+                    # Fallback to pipeline scoping if no connection mapping found
+                    effective_table_name = f"{effective_pipeline}:{table}"
+                    canonical_scope = effective_pipeline
+                    scope_info = f"Pipeline: {effective_pipeline}"
+                    
+            elif connection:
+                effective_table_name = f"{connection}:{table}"
+                canonical_scope = connection
+                scope_info = f"Connection: {connection}"
+        
         click.echo(f"🗂️  S3 Clean Operation: {operation.upper()}")
         if table:
             click.echo(f"   Table: {table}")
+            click.echo(f"   Scope: {scope_info}")
+            if effective_table_name != table:
+                click.echo(f"   Full identifier: {effective_table_name}")
         if older_than:
             click.echo(f"   Older than: {older_than}")
         if pattern:
@@ -1415,7 +1790,7 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                 sys.exit(1)
         
         if operation == 'list':
-            _s3_list_files(s3_client, config, table, older_than, pattern, cutoff_time, show_timestamps)
+            _s3_list_files(s3_client, config, effective_table_name, older_than, pattern, cutoff_time, show_timestamps)
             
         elif operation == 'clean':
             if not table:
@@ -1423,7 +1798,7 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
             
-            _s3_clean_table(s3_client, config, table, older_than, pattern, cutoff_time, dry_run, force, simple_delete)
+            _s3_clean_table(s3_client, config, effective_table_name, older_than, pattern, cutoff_time, dry_run, force, simple_delete)
             
         elif operation == 'clean-all':
             if not force and not dry_run:
@@ -1485,9 +1860,21 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
                 size = obj['Size']
                 modified = obj['LastModified']
                 
-                # Table filtering
+                # Table filtering with v1.2.0 scoped table name support
                 if table:
-                    clean_table_name = table.replace('.', '_').replace('-', '_')
+                    # Use the same table name cleaning logic as S3Manager
+                    if ':' in table:
+                        scope, actual_table = table.split(':', 1)
+                        # Clean scope: lowercase, replace special chars with underscores
+                        clean_scope = scope.lower().replace('-', '_').replace('.', '_')
+                        # Clean table: replace dots with underscores
+                        clean_table = actual_table.replace('.', '_').replace('-', '_')
+                        # Combine: scope_table_name
+                        clean_table_name = f"{clean_scope}_{clean_table}"
+                    else:
+                        # Unscoped table (v1.0.0 compatibility)
+                        clean_table_name = table.replace('.', '_').replace('-', '_')
+                    
                     if clean_table_name not in key:
                         continue
                 
@@ -1834,4 +2221,17 @@ def _s3_clean_all_tables(s3_client, config, older_than: str, pattern: str, cutof
 
 
 if __name__ == '__main__':
+    # Setup v1.1.0 commands if available
+    v1_1_0_enabled = setup_v1_1_0_commands()
+    if v1_1_0_enabled:
+        # Add version indicator for v1.1.0 mode
+        import os
+        os.environ['CLI_VERSION'] = 'v1.1.0'
+    
+    # Setup v1.2.0 CDC Intelligence Engine commands
+    v1_2_0_enabled = setup_v1_2_0_commands()
+    if v1_2_0_enabled:
+        import os
+        os.environ['CLI_CDC_ENGINE'] = 'v1.2.0'
+    
     cli()
