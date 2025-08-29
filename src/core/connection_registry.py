@@ -6,6 +6,9 @@ Provides the foundation for multi-schema data integration while maintaining back
 """
 
 import os
+import time
+import socket
+import logging
 from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -498,6 +501,7 @@ class ConnectionRegistry:
     
     def _create_mysql_pool(self, name: str, config: ConnectionConfig):
         """Create MySQL connection pool with optimized settings and SSH tunnel support"""
+        
         pool_config = config.connection_pool
         
         # Set up SSH tunnel if configured for MySQL
@@ -511,6 +515,10 @@ class ConnectionRegistry:
                 target_host = 'localhost'
                 target_port = ssh_tunnel.local_bind_port
                 logger.info(f"SSH tunnel established for MySQL {name} on local port {target_port}")
+                
+                # Wait a moment for tunnel to stabilize before creating pool
+                time.sleep(0.5)
+                
             except Exception as ssh_error:
                 logger.error(f"SSH tunnel creation failed for MySQL {name}: {ssh_error}")
                 raise ConnectionError(f"MySQL SSH tunnel setup failed for {name}: {ssh_error}")
@@ -532,29 +540,67 @@ class ConnectionRegistry:
             'raise_on_warnings': True,
         }
         
-        try:
-            self.mysql_pools[name] = mysql.connector.pooling.MySQLConnectionPool(**pool_settings)
-            if ssh_tunnel:
-                logger.info(
-                    f"Created MySQL connection pool for {name}: "
-                    f"{pool_settings['pool_size']} connections via SSH tunnel localhost:{target_port} -> {config.host}:{config.port}/{config.database}"
-                )
-            else:
-                logger.info(
-                    f"Created MySQL connection pool for {name}: "
-                    f"{pool_settings['pool_size']} connections to {config.host}:{config.port}/{config.database}"
-                )
-        except mysql.connector.Error as e:
-            # If SSH tunnel was created, clean it up on pool creation failure
-            if ssh_tunnel and name in self.ssh_tunnels:
+        # Retry pool creation with exponential backoff
+        max_attempts = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_attempts):
+            try:
+                logger.debug(f"Creating MySQL connection pool for {name} (attempt {attempt + 1})")
+                self.mysql_pools[name] = mysql.connector.pooling.MySQLConnectionPool(**pool_settings)
+                
+                # Test pool with a simple connection
+                test_conn = self.mysql_pools[name].get_connection()
                 try:
-                    ssh_tunnel.stop()
-                    del self.ssh_tunnels[name]
-                except Exception as cleanup_error:
-                    logger.warning(f"Error cleaning up SSH tunnel after pool creation failure: {cleanup_error}")
-            
-            logger.error(f"Failed to create MySQL pool for {name}: {e}")
-            raise ConnectionError(f"MySQL pool creation failed for {name}: {e}")
+                    cursor = test_conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                    cursor.close()
+                    logger.debug(f"MySQL pool test connection successful for {name}")
+                finally:
+                    test_conn.close()
+                
+                if ssh_tunnel:
+                    logger.info(
+                        f"Created MySQL connection pool for {name}: "
+                        f"{pool_settings['pool_size']} connections via SSH tunnel localhost:{target_port} -> {config.host}:{config.port}/{config.database}"
+                    )
+                else:
+                    logger.info(
+                        f"Created MySQL connection pool for {name}: "
+                        f"{pool_settings['pool_size']} connections to {config.host}:{config.port}/{config.database}"
+                    )
+                return  # Success, exit retry loop
+                
+            except mysql.connector.Error as e:
+                logger.warning(f"MySQL pool creation attempt {attempt + 1} failed for {name}: {e}")
+                
+                if attempt < max_attempts - 1:
+                    logger.debug(f"Retrying MySQL pool creation for {name} in {retry_delay}s")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    # Final attempt failed, clean up SSH tunnel if created
+                    if ssh_tunnel and name in self.ssh_tunnels:
+                        try:
+                            ssh_tunnel.stop()
+                            del self.ssh_tunnels[name]
+                        except Exception as cleanup_error:
+                            logger.warning(f"Error cleaning up SSH tunnel after pool creation failure: {cleanup_error}")
+                    
+                    logger.error(f"Failed to create MySQL pool for {name} after {max_attempts} attempts: {e}")
+                    raise ConnectionError(f"MySQL pool creation failed for {name}: {e}")
+            except Exception as e:
+                # Non-MySQL errors (e.g., configuration issues)
+                if ssh_tunnel and name in self.ssh_tunnels:
+                    try:
+                        ssh_tunnel.stop()
+                        del self.ssh_tunnels[name]
+                    except Exception as cleanup_error:
+                        logger.warning(f"Error cleaning up SSH tunnel after pool creation failure: {cleanup_error}")
+                
+                logger.error(f"Failed to create MySQL pool for {name}: {e}")
+                raise ConnectionError(f"MySQL pool creation failed for {name}: {e}")
     
     @contextmanager
     def get_redshift_connection(self, connection_name: str = "default"):
@@ -589,11 +635,15 @@ class ConnectionRegistry:
                     ssh_tunnel = self._create_ssh_tunnel(connection_name, config)
                     local_port = ssh_tunnel.local_bind_port
                     logger.debug(f"SSH tunnel established for {connection_name} on local port {local_port}")
+                    
+                    # Wait a moment for tunnel to stabilize before connecting
+                    time.sleep(0.5)
+                    
                 except Exception as ssh_error:
                     logger.error(f"SSH tunnel creation failed for {connection_name}: {ssh_error}")
                     raise ConnectionError(f"SSH tunnel setup failed for {connection_name}: {ssh_error}")
             
-            # Create Redshift connection
+            # Create Redshift connection with retry logic
             connection_params = {
                 'host': 'localhost' if ssh_tunnel else config.host,
                 'port': local_port,
@@ -608,22 +658,42 @@ class ConnectionRegistry:
             # Remove None values from connection params
             connection_params = {k: v for k, v in connection_params.items() if v is not None}
             
-            try:
-                connection = psycopg2.connect(**connection_params)
-                connection.set_session(autocommit=True)
-                
-                # Test connection
-                with connection.cursor() as cursor:
-                    cursor.execute("SELECT 1")
-                    cursor.fetchone()
-                
-                logger.debug(f"Established Redshift connection for {connection_name}")
-                
-                yield connection
-                
-            except psycopg2.Error as db_error:
-                logger.error(f"PostgreSQL connection failed for {connection_name}: {db_error}")
-                raise ConnectionError(f"Redshift database connection failed for {connection_name}: {db_error}")
+            max_attempts = 3
+            retry_delay = 1.0
+            
+            for attempt in range(max_attempts):
+                try:
+                    logger.debug(f"Connecting to Redshift {connection_name} (attempt {attempt + 1})")
+                    connection = psycopg2.connect(**connection_params)
+                    connection.set_session(autocommit=True)
+                    
+                    # Test connection
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                    
+                    logger.debug(f"Established Redshift connection for {connection_name}")
+                    
+                    yield connection
+                    return  # Success, exit retry loop
+                    
+                except psycopg2.Error as db_error:
+                    logger.warning(f"Redshift connection attempt {attempt + 1} failed for {connection_name}: {db_error}")
+                    
+                    if connection:
+                        try:
+                            connection.close()
+                            connection = None
+                        except:
+                            pass
+                    
+                    if attempt < max_attempts - 1:
+                        logger.debug(f"Retrying Redshift connection for {connection_name} in {retry_delay}s")
+                        time.sleep(retry_delay)
+                        retry_delay *= 1.5  # Exponential backoff
+                    else:
+                        logger.error(f"Redshift database connection failed for {connection_name} after {max_attempts} attempts: {db_error}")
+                        raise ConnectionError(f"Redshift database connection failed for {connection_name}: {db_error}")
             
         except Exception as e:
             logger.error(f"Redshift connection failed for {connection_name}: {e}")
@@ -648,59 +718,115 @@ class ConnectionRegistry:
                     logger.warning(f"Error closing SSH tunnel: {e}")
     
     def _create_ssh_tunnel(self, name: str, config: ConnectionConfig) -> SSHTunnelForwarder:
-        """Create SSH tunnel for Redshift connection with enhanced error handling"""
+        """Create SSH tunnel with enhanced error handling and proper timing"""
+        
         ssh_config = config.ssh_tunnel
+        
+        # Check if tunnel already exists and is active
+        if name in self.ssh_tunnels:
+            existing_tunnel = self.ssh_tunnels[name]
+            if existing_tunnel.is_active:
+                logger.debug(f"Reusing existing SSH tunnel for {name} on port {existing_tunnel.local_bind_port}")
+                return existing_tunnel
+            else:
+                # Clean up inactive tunnel
+                try:
+                    existing_tunnel.stop()
+                    del self.ssh_tunnels[name]
+                    logger.debug(f"Cleaned up inactive SSH tunnel for {name}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Error cleaning up inactive tunnel: {cleanup_error}")
         
         # Determine authentication method
         auth_params = {}
         if ssh_config.get('private_key_path'):
-            auth_params['ssh_private_key'] = ssh_config['private_key_path']
+            private_key_path = ssh_config['private_key_path']
+            # Validate key file exists
+            if not Path(private_key_path).exists():
+                raise ConnectionError(f"SSH private key not found: {private_key_path}")
+            auth_params['ssh_private_key'] = private_key_path
         elif ssh_config.get('password'):
             auth_params['ssh_password'] = ssh_config['password']
         else:
             # Try to use SSH agent or default key locations
             logger.debug(f"No explicit SSH authentication provided for {name}, using default methods")
         
+        # Create a compatible logger for SSHTunnelForwarder
+        # The SSHTunnelForwarder expects a standard Python logger, not structlog
+        ssh_logger = logging.getLogger(f'sshtunnel_{name}')
+        ssh_logger.setLevel(logging.WARNING)  # Reduce verbose SSH output
+        
         tunnel_params = {
             'ssh_address_or_host': (ssh_config['host'], ssh_config.get('port', 22)),
             'ssh_username': ssh_config['username'],
             'remote_bind_address': (config.host, config.port),
             'local_bind_address': ('127.0.0.1', 0),  # Auto-assign local port
-            'logger': logger,
+            'logger': ssh_logger,
             'set_keepalive': 30.0,  # Keep connection alive
+            'compression': True,  # Enable SSH compression
             **auth_params
         }
         
+        tunnel = None
         try:
             tunnel = SSHTunnelForwarder(**tunnel_params)
             tunnel.daemon_forward_servers = True  # Don't block on exit
+            tunnel.skip_tunnel_checkup = False  # Enable tunnel health checks
+            
+            logger.debug(f"Starting SSH tunnel for {name} to {ssh_config['host']}...")
             
             # Start tunnel with timeout
             try:
                 tunnel.start()
             except Exception as start_error:
                 logger.error(f"Failed to start SSH tunnel for {name}: {start_error}")
-                try:
-                    tunnel.stop()
-                except:
-                    pass  # Ignore cleanup errors
+                if tunnel:
+                    try:
+                        tunnel.stop()
+                    except:
+                        pass  # Ignore cleanup errors
                 raise ConnectionError(f"SSH tunnel start failed for {name}: {start_error}")
             
-            # Verify tunnel is active and get the local bind port
-            if not tunnel.is_active:
-                logger.error(f"SSH tunnel for {name} failed to become active")
+            # Wait for tunnel to become fully active with retries
+            max_wait_attempts = 10
+            wait_interval = 0.5
+            
+            for attempt in range(max_wait_attempts):
+                if tunnel.is_active:
+                    # Additional verification: try to connect to local port
+                    try:
+                        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        test_socket.settimeout(2)
+                        result = test_socket.connect_ex(('127.0.0.1', tunnel.local_bind_port))
+                        test_socket.close()
+                        
+                        if result == 0:
+                            logger.debug(f"SSH tunnel for {name} verified active on port {tunnel.local_bind_port}")
+                            break
+                        else:
+                            logger.debug(f"SSH tunnel port check failed for {name}, attempt {attempt + 1}")
+                    except Exception as port_check_error:
+                        logger.debug(f"Port verification failed for {name}: {port_check_error}")
+                
+                if attempt < max_wait_attempts - 1:
+                    time.sleep(wait_interval)
+                    wait_interval = min(wait_interval * 1.2, 2.0)  # Exponential backoff
+            else:
+                # Tunnel failed to become properly active
+                logger.error(f"SSH tunnel for {name} failed to become fully active after {max_wait_attempts} attempts")
                 try:
                     tunnel.stop()
                 except:
                     pass
-                raise ConnectionError(f"SSH tunnel for {name} failed to become active")
+                raise ConnectionError(f"SSH tunnel for {name} failed to become fully active")
             
-            # Store tunnel reference for cleanup
+            # Store tunnel reference for reuse and cleanup
             self.ssh_tunnels[name] = tunnel
             
             logger.info(
                 f"SSH tunnel established for {name}: "
-                f"localhost:{tunnel.local_bind_port} -> {config.host}:{config.port}"
+                f"localhost:{tunnel.local_bind_port} -> {config.host}:{config.port} "
+                f"(via {ssh_config['host']})"
             )
             
             return tunnel
@@ -710,6 +836,11 @@ class ConnectionRegistry:
             raise
         except Exception as e:
             logger.error(f"Failed to create SSH tunnel for {name}: {e}")
+            if tunnel:
+                try:
+                    tunnel.stop()
+                except:
+                    pass
             raise ConnectionError(f"SSH tunnel creation failed for {name}: {e}")
     
     def get_connection_info(self, connection_name: str) -> Dict[str, Any]:
