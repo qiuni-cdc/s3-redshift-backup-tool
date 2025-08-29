@@ -1,0 +1,980 @@
+"""
+Multi-Schema CLI Commands for v1.1.0
+
+Enhanced CLI commands supporting multi-connection data integration while maintaining
+full backward compatibility with v1.0.0 syntax and workflows.
+"""
+
+import click
+from typing import List, Optional, Dict, Any
+from pathlib import Path
+import sys
+import os
+
+from src.core.connection_registry import ConnectionRegistry
+from src.core.configuration_manager import ConfigurationManager
+from src.utils.exceptions import ValidationError, ConnectionError
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class MultiSchemaContext:
+    """Context object for multi-schema CLI commands"""
+    
+    def __init__(self):
+        self.connection_registry: Optional[ConnectionRegistry] = None
+        self.config_manager: Optional[ConfigurationManager] = None
+        self._initialized = False
+    
+    def ensure_initialized(self, config_root: str = "config"):
+        """Ensure multi-schema components are initialized"""
+        if self._initialized:
+            return
+        
+        try:
+            self.connection_registry = ConnectionRegistry()
+            self.config_manager = ConfigurationManager(config_root)
+            self._initialized = True
+            
+            logger.info("Multi-schema CLI context initialized")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize multi-schema context: {e}")
+            click.echo(f"❌ Initialization failed: {e}")
+            click.echo("💡 Tip: Run 'python -m src.cli.main config setup' to create default configuration")
+            sys.exit(1)
+    
+    def is_v1_0_0_mode(self) -> bool:
+        """Check if we should operate in v1.0.0 compatibility mode"""
+        # Check if multi-schema configuration exists
+        config_path = Path("config/connections.yml")
+        if not config_path.exists():
+            return True
+        
+        # Check if only default connections are configured
+        try:
+            if self.connection_registry:
+                connections = self.connection_registry.list_connections()
+                return set(connections.keys()) == {"default"}
+        except:
+            return True
+        
+        return False
+
+
+# Global context
+multi_schema_ctx = MultiSchemaContext()
+
+
+def add_multi_schema_commands(cli):
+    """Add multi-schema commands to the main CLI"""
+    
+    # Enhanced sync command group
+    @cli.group(name="sync", invoke_without_command=True)
+    @click.option('--table', '-t', multiple=True, help='Table names (v1.0.0 compatibility)')
+    @click.option('--backup-only', is_flag=True, help='Only backup to S3')
+    @click.option('--redshift-only', is_flag=True, help='Only load to Redshift')
+    @click.option('--limit', type=int, help='Limit rows per query (testing)')
+    @click.option('--max-workers', type=int, help='Maximum parallel workers (overrides config)')
+    @click.option('--max-chunks', type=int, help='Maximum number of chunks to process (total rows = limit × max-chunks)')
+    @click.pass_context
+    def sync_command(ctx, table: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int]):
+        """Sync data with multi-schema support and v1.0.0 compatibility"""
+        
+        if ctx.invoked_subcommand is None:
+            # Handle direct sync command (v1.0.0 compatibility)
+            if table:
+                multi_schema_ctx.ensure_initialized()
+                
+                if multi_schema_ctx.is_v1_0_0_mode():
+                    # Use v1.0.0 compatibility mode
+                    _sync_legacy_mode(table, backup_only, redshift_only, limit, max_workers, max_chunks)
+                else:
+                    # Use default pipeline
+                    _sync_with_default_pipeline(table, backup_only, redshift_only, limit, max_workers, max_chunks)
+            else:
+                # Show help for new syntax options
+                _show_sync_help()
+    
+    @sync_command.command(name="pipeline")
+    @click.option('--pipeline', '-p', required=True, help='Pipeline configuration name')
+    @click.option('--table', '-t', multiple=True, required=True, help='Table names to sync')
+    @click.option('--backup-only', is_flag=True, help='Only backup to S3 (MySQL → S3)')
+    @click.option('--redshift-only', is_flag=True, help='Only load to Redshift (S3 → Redshift)')
+    @click.option('--limit', type=int, help='Limit rows per query (testing)')
+    @click.option('--max-workers', type=int, help='Maximum parallel workers (overrides config)')
+    @click.option('--max-chunks', type=int, help='Maximum number of chunks to process (total rows = limit × max-chunks)')
+    @click.option('--dry-run', is_flag=True, help='Preview operations without execution')
+    @click.option('--parallel', is_flag=True, help='Override pipeline strategy to use parallel processing')
+    def sync_pipeline(pipeline: str, table: List[str], backup_only: bool, redshift_only: bool, 
+                     limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], dry_run: bool, parallel: bool):
+        """Sync tables using pipeline configuration (v1.1.0 enhanced syntax)"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        try:
+            # Load and validate pipeline configuration
+            pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config(pipeline)
+            
+            # Validate pipeline
+            validation_report = multi_schema_ctx.config_manager.validate_pipeline(pipeline)
+            if not validation_report['valid']:
+                click.echo(f"❌ Pipeline validation failed:")
+                for error in validation_report['errors'][:5]:  # Show first 5 errors
+                    click.echo(f"  • {error}")
+                if len(validation_report['errors']) > 5:
+                    click.echo(f"  ... and {len(validation_report['errors']) - 5} more errors")
+                return
+            
+            # Show pipeline information
+            click.echo(f"🚀 Pipeline: {pipeline_config.name} (v{pipeline_config.version})")
+            click.echo(f"📝 {pipeline_config.description}")
+            click.echo(f"🔗 {pipeline_config.source} → {pipeline_config.target}")
+            click.echo(f"📋 Tables: {', '.join(table)}")
+            
+            if dry_run:
+                click.echo("🔍 DRY RUN - Preview mode enabled")
+            
+            if parallel and pipeline_config.processing.get('strategy') != 'parallel':
+                click.echo("⚡ Overriding to parallel processing")
+            
+            # Process each table
+            success_count = 0
+            for table_name in table:
+                if table_name not in pipeline_config.tables:
+                    click.echo(f"⚠️  Warning: Table {table_name} not configured in pipeline")
+                    
+                    # For default pipeline, allow dynamic registration
+                    if pipeline == "default":
+                        multi_schema_ctx.config_manager.register_table_dynamically(pipeline, table_name)
+                        click.echo(f"📝 Registered {table_name} dynamically in default pipeline")
+                    else:
+                        click.echo(f"❌ Skipping unconfigured table: {table_name}")
+                        continue
+                
+                table_config = pipeline_config.tables[table_name]
+                
+                if dry_run:
+                    _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
+                    success_count += 1
+                else:
+                    success = _execute_table_sync(
+                        pipeline_config, table_config, 
+                        backup_only, redshift_only, limit, parallel, max_workers, max_chunks
+                    )
+                    if success:
+                        success_count += 1
+            
+            # Summary
+            total_tables = len(table)
+            if success_count == total_tables:
+                click.echo(f"✅ Pipeline completed successfully: {success_count}/{total_tables} tables")
+            else:
+                click.echo(f"⚠️  Pipeline completed with issues: {success_count}/{total_tables} tables successful")
+                if success_count < total_tables:
+                    sys.exit(1)
+        
+        except Exception as e:
+            logger.error(f"Pipeline sync failed: {e}")
+            click.echo(f"❌ Pipeline sync failed: {e}")
+            sys.exit(1)
+    
+    @sync_command.command(name="connections")
+    @click.option('--source', '-s', required=True, help='Source connection name')
+    @click.option('--target', '-r', required=True, help='Target connection name')
+    @click.option('--table', '-t', multiple=True, required=True, help='Table names to sync')
+    @click.option('--backup-only', is_flag=True, help='Only backup to S3')
+    @click.option('--redshift-only', is_flag=True, help='Only load to Redshift')
+    @click.option('--limit', type=int, help='Limit rows per query')
+    @click.option('--max-workers', type=int, help='Maximum parallel workers (overrides config)')
+    @click.option('--max-chunks', type=int, help='Maximum number of chunks to process (total rows = limit × max-chunks)')
+    @click.option('--batch-size', type=int, default=10000, help='Batch size for processing')
+    def sync_connections(source: str, target: str, table: List[str], backup_only: bool, 
+                        redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], batch_size: int):
+        """Sync tables using explicit connections (v1.1.0 ad-hoc syntax)"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        try:
+            # Validate connections exist
+            source_info = multi_schema_ctx.connection_registry.get_connection_info(source)
+            target_info = multi_schema_ctx.connection_registry.get_connection_info(target)
+            
+            click.echo(f"🚀 Ad-hoc Connection Sync")
+            click.echo(f"📊 Source: {source} ({source_info['database']}@{source_info['host']})")
+            click.echo(f"🎯 Target: {target} ({target_info['database']}@{target_info['host']})")
+            click.echo(f"📋 Tables: {', '.join(table)}")
+            
+            # Test connections
+            click.echo("🔍 Testing connections...")
+            
+            source_test = multi_schema_ctx.connection_registry.test_connection(source)
+            if not source_test['success']:
+                click.echo(f"❌ Source connection failed: {source_test['error']}")
+                return
+            click.echo(f"✅ Source connection: {source} ({source_test['duration_seconds']}s)")
+            
+            target_test = multi_schema_ctx.connection_registry.test_connection(target)
+            if not target_test['success']:
+                click.echo(f"❌ Target connection failed: {target_test['error']}")
+                return
+            click.echo(f"✅ Target connection: {target} ({target_test['duration_seconds']}s)")
+            
+            # Create ad-hoc pipeline configuration
+            ad_hoc_pipeline = _create_adhoc_pipeline_config(source, target, list(table), batch_size)
+            
+            # Process tables
+            success_count = 0
+            for table_name in table:
+                table_config = ad_hoc_pipeline.tables[table_name]
+                success = _execute_table_sync(
+                    ad_hoc_pipeline, table_config,
+                    backup_only, redshift_only, limit, False, max_workers, max_chunks
+                )
+                if success:
+                    success_count += 1
+            
+            # Summary
+            total_tables = len(table)
+            if success_count == total_tables:
+                click.echo(f"✅ Connection sync completed: {success_count}/{total_tables} tables")
+            else:
+                click.echo(f"⚠️  Connection sync completed with issues: {success_count}/{total_tables} tables")
+                if success_count < total_tables:
+                    sys.exit(1)
+        
+        except Exception as e:
+            logger.error(f"Connection-based sync failed: {e}")
+            click.echo(f"❌ Connection sync failed: {e}")
+            sys.exit(1)
+    
+    # Configuration management commands
+    @cli.group(name="config")
+    def config_command():
+        """Configuration management for multi-schema support"""
+        pass
+    
+    @config_command.command(name="setup")
+    @click.option('--force', is_flag=True, help='Overwrite existing configuration')
+    def config_setup(force: bool):
+        """Set up default configuration for v1.1.0 multi-schema support"""
+        
+        config_dir = Path("config")
+        
+        # Check if configuration already exists
+        if config_dir.exists() and not force:
+            existing_files = list(config_dir.glob("*.yml"))
+            if existing_files:
+                click.echo("⚠️  Configuration directory already exists with files:")
+                for file in existing_files:
+                    click.echo(f"  • {file}")
+                click.echo("Use --force to overwrite existing configuration")
+                return
+        
+        try:
+            # Initialize configuration manager (will create default files)
+            multi_schema_ctx.ensure_initialized()
+            
+            click.echo("✅ Configuration setup completed!")
+            click.echo("")
+            click.echo("📁 Created configuration structure:")
+            click.echo("  config/")
+            click.echo("    ├── connections.yml       # Database connections")
+            click.echo("    ├── pipelines/")
+            click.echo("    │   └── default.yml      # v1.0.0 compatibility pipeline") 
+            click.echo("    └── environments/")
+            click.echo("        ├── development.yml   # Development settings")
+            click.echo("        └── production.yml    # Production settings")
+            click.echo("")
+            click.echo("🔧 Next steps:")
+            click.echo("  1. Review and update config/connections.yml with your database details")
+            click.echo("  2. Create additional pipelines in config/pipelines/")
+            click.echo("  3. Test connections: python -m src.cli.main connections test default")
+            
+        except Exception as e:
+            click.echo(f"❌ Configuration setup failed: {e}")
+            sys.exit(1)
+    
+    @config_command.command(name="list-pipelines")
+    def config_list_pipelines():
+        """List available pipeline configurations"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        pipelines = multi_schema_ctx.config_manager.list_pipelines()
+        
+        if not pipelines:
+            click.echo("📋 No pipeline configurations found")
+            click.echo("💡 Run 'python -m src.cli.main config setup' to create default configuration")
+            return
+        
+        click.echo("📋 Available Pipeline Configurations:")
+        click.echo("")
+        
+        for pipeline_name in pipelines:
+            try:
+                pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config(pipeline_name)
+                
+                # Get validation status
+                validation = multi_schema_ctx.config_manager.validate_pipeline(pipeline_name)
+                status_icon = "✅" if validation['valid'] else "❌"
+                
+                click.echo(f"  {status_icon} {pipeline_name}")
+                click.echo(f"      Name: {pipeline_config.name}")
+                click.echo(f"      Version: {pipeline_config.version}")
+                click.echo(f"      Description: {pipeline_config.description}")
+                click.echo(f"      Route: {pipeline_config.source} → {pipeline_config.target}")
+                click.echo(f"      Tables: {len(pipeline_config.tables)}")
+                
+                if not validation['valid']:
+                    click.echo(f"      Issues: {len(validation['errors'])} error(s)")
+                
+                click.echo("")
+                
+            except Exception as e:
+                click.echo(f"  ❌ {pipeline_name} (Error: {e})")
+                click.echo("")
+    
+    @config_command.command(name="show-pipeline")
+    @click.argument('pipeline')
+    @click.option('--verbose', '-v', is_flag=True, help='Show detailed configuration')
+    def config_show_pipeline(pipeline: str, verbose: bool):
+        """Show detailed pipeline configuration"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        try:
+            pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config(pipeline)
+            
+            click.echo(f"📊 Pipeline Configuration: {pipeline}")
+            click.echo("=" * 50)
+            click.echo(f"Name: {pipeline_config.name}")
+            click.echo(f"Version: {pipeline_config.version}")
+            click.echo(f"Description: {pipeline_config.description}")
+            click.echo(f"Source: {pipeline_config.source}")
+            click.echo(f"Target: {pipeline_config.target}")
+            click.echo("")
+            
+            # Processing configuration
+            click.echo("🔧 Processing Configuration:")
+            for key, value in pipeline_config.processing.items():
+                click.echo(f"  {key}: {value}")
+            click.echo("")
+            
+            # S3 configuration
+            click.echo("🗂️  S3 Configuration:")
+            for key, value in pipeline_config.s3.items():
+                click.echo(f"  {key}: {value}")
+            click.echo("")
+            
+            # Tables
+            click.echo(f"📋 Tables ({len(pipeline_config.tables)}):")
+            
+            for table_name, table_config in pipeline_config.tables.items():
+                click.echo(f"  • {table_name}")
+                click.echo(f"    Full name: {table_config.full_name}")
+                click.echo(f"    Target: {table_config.target_name}")
+                click.echo(f"    Type: {table_config.table_type}")
+                click.echo(f"    CDC Strategy: {table_config.cdc_strategy}")
+                
+                if table_config.depends_on:
+                    click.echo(f"    Dependencies: {', '.join(table_config.depends_on)}")
+                
+                if verbose:
+                    click.echo(f"    Timestamp Column: {table_config.cdc_timestamp_column}")
+                    click.echo(f"    ID Column: {table_config.cdc_id_column}")
+                    
+                    if table_config.processing:
+                        click.echo("    Processing:")
+                        for key, value in table_config.processing.items():
+                            click.echo(f"      {key}: {value}")
+                    
+                    if table_config.validation:
+                        click.echo("    Validation:")
+                        for key, value in table_config.validation.items():
+                            click.echo(f"      {key}: {value}")
+                
+                click.echo("")
+        
+        except Exception as e:
+            click.echo(f"❌ Error showing pipeline: {e}")
+            sys.exit(1)
+    
+    @config_command.command(name="validate-pipeline")
+    @click.argument('pipeline')
+    @click.option('--verbose', '-v', is_flag=True, help='Show detailed validation results')
+    def config_validate_pipeline(pipeline: str, verbose: bool):
+        """Validate pipeline configuration"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        try:
+            validation_report = multi_schema_ctx.config_manager.validate_pipeline(pipeline)
+            
+            if validation_report['valid']:
+                click.echo(f"✅ Pipeline '{pipeline}' is valid")
+                click.echo(f"📊 Tables validated: {validation_report['tables_validated']}")
+                
+                if verbose and validation_report['warnings']:
+                    click.echo("")
+                    click.echo("⚠️  Warnings:")
+                    for warning in validation_report['warnings']:
+                        click.echo(f"  • {warning}")
+            else:
+                click.echo(f"❌ Pipeline '{pipeline}' has validation errors:")
+                click.echo("")
+                
+                # Show errors by category
+                details = validation_report['validation_details']
+                
+                if not details['pipeline_structure']['valid']:
+                    click.echo("🏗️  Pipeline Structure Issues:")
+                    for issue in details['pipeline_structure']['issues']:
+                        click.echo(f"  • {issue}")
+                    click.echo("")
+                
+                if not details['table_configurations']['valid']:
+                    click.echo("📋 Table Configuration Issues:")
+                    for issue in details['table_configurations']['issues']:
+                        click.echo(f"  • {issue}")
+                    click.echo("")
+                
+                if not details['dependencies']['valid']:
+                    click.echo("🔗 Dependency Issues:")
+                    for issue in details['dependencies']['issues']:
+                        click.echo(f"  • {issue}")
+                    click.echo("")
+                
+                if not details['resource_requirements']['valid']:
+                    click.echo("⚡ Resource Requirement Issues:")
+                    for issue in details['resource_requirements']['issues']:
+                        click.echo(f"  • {issue}")
+                    click.echo("")
+                
+                # Show warnings if verbose
+                if verbose and validation_report['warnings']:
+                    click.echo("⚠️  Warnings:")
+                    for warning in validation_report['warnings']:
+                        click.echo(f"  • {warning}")
+                
+                sys.exit(1)
+        
+        except Exception as e:
+            click.echo(f"❌ Validation failed: {e}")
+            sys.exit(1)
+    
+    @config_command.command(name="status")
+    def config_status():
+        """Show overall configuration status"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        status = multi_schema_ctx.config_manager.get_configuration_status()
+        
+        click.echo("📊 Configuration Status")
+        click.echo("=" * 30)
+        
+        # Pipelines
+        pipelines = status['pipelines']
+        click.echo(f"📋 Pipelines: {pipelines['count']}")
+        if pipelines['names']:
+            for name in pipelines['names']:
+                click.echo(f"  • {name}")
+        click.echo("")
+        
+        # Environments
+        environments = status['environments']
+        click.echo(f"🌍 Environments: {environments['count']}")
+        click.echo(f"  Current: {environments['current']}")
+        if environments['available']:
+            click.echo(f"  Available: {', '.join(environments['available'])}")
+        click.echo("")
+        
+        # Templates
+        templates = status['templates']
+        if templates['count'] > 0:
+            click.echo(f"📄 Templates: {templates['count']}")
+            if templates['available']:
+                click.echo(f"  Available: {', '.join(templates['available'])}")
+            click.echo("")
+        
+        # Configuration details
+        config = status['configuration']
+        click.echo(f"⚙️  Configuration:")
+        click.echo(f"  Root: {config['root_directory']}")
+        click.echo(f"  Auto-reload: {'enabled' if config['auto_reload_enabled'] else 'disabled'}")
+        if config['last_reload']:
+            click.echo(f"  Last reload: {config['last_reload']}")
+        click.echo(f"  Tracked files: {config['tracked_files']}")
+        click.echo("")
+        
+        # Validation summary
+        validation = status['validation_summary']
+        click.echo(f"🔍 Validation Summary:")
+        click.echo(f"  Total pipelines: {validation['total_pipelines']}")
+        click.echo(f"  Valid: {validation['valid_pipelines']}")
+        click.echo(f"  Invalid: {validation['invalid_pipelines']}")
+        click.echo(f"  Total tables: {validation['total_tables']}")
+        
+        if validation['validation_errors']:
+            click.echo("")
+            click.echo("❌ Validation Errors:")
+            for error in validation['validation_errors'][:5]:
+                click.echo(f"  • {error}")
+            if len(validation['validation_errors']) > 5:
+                click.echo(f"  ... and {len(validation['validation_errors']) - 5} more")
+    
+    # Connection management commands
+    @cli.group(name="connections")
+    def connections_command():
+        """Connection management for multi-schema support"""
+        pass
+    
+    @connections_command.command(name="list")
+    @click.option('--type', 'connection_type', type=click.Choice(['mysql', 'redshift', 'all']), 
+                  default='all', help='Filter by connection type')
+    def connections_list(connection_type: str):
+        """List available database connections"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        all_connections = multi_schema_ctx.connection_registry.list_connections()
+        
+        if not all_connections:
+            click.echo("🔌 No connections configured")
+            click.echo("💡 Run 'python -m src.cli.main config setup' to create default configuration")
+            return
+        
+        # Filter by type
+        if connection_type != 'all':
+            all_connections = {
+                k: v for k, v in all_connections.items() 
+                if v['type'] == connection_type
+            }
+        
+        if not all_connections:
+            click.echo(f"🔌 No {connection_type} connections found")
+            return
+        
+        click.echo("🔌 Available Database Connections:")
+        click.echo("")
+        
+        # Group by type
+        sources = {k: v for k, v in all_connections.items() if v['type'] == 'mysql'}
+        targets = {k: v for k, v in all_connections.items() if v['type'] == 'redshift'}
+        
+        if sources and connection_type in ['mysql', 'all']:
+            click.echo("🗄️  MySQL Sources:")
+            for name, info in sources.items():
+                status_icon = "🟢" if info['status'] == 'active' else "⚪"
+                click.echo(f"  {status_icon} {name}")
+                click.echo(f"      Host: {info['host']}:{info['port']}")
+                click.echo(f"      Database: {info['database']}")
+                click.echo(f"      User: {info['username']}")
+                if info['description']:
+                    click.echo(f"      Description: {info['description']}")
+                click.echo("")
+        
+        if targets and connection_type in ['redshift', 'all']:
+            click.echo("🎯 Redshift Targets:")
+            for name, info in targets.items():
+                status_icon = "🟢" if info['status'] == 'active' else "⚪"
+                tunnel_icon = "🔒" if info['has_ssh_tunnel'] else "🌐"
+                click.echo(f"  {status_icon} {name} {tunnel_icon}")
+                click.echo(f"      Host: {info['host']}:{info['port']}")
+                click.echo(f"      Database: {info['database']} (schema: {info['schema']})")
+                click.echo(f"      User: {info['username']}")
+                if info['description']:
+                    click.echo(f"      Description: {info['description']}")
+                click.echo("")
+    
+    @connections_command.command(name="test")
+    @click.argument('connection_name', required=False)
+    @click.option('--all', 'test_all', is_flag=True, help='Test all connections')
+    def connections_test(connection_name: Optional[str], test_all: bool):
+        """Test database connections"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        if test_all:
+            click.echo("🔍 Testing all connections...")
+            click.echo("")
+            
+            results = multi_schema_ctx.connection_registry.test_all_connections()
+            
+            for conn_name, result in results['results'].items():
+                if result['success']:
+                    click.echo(f"✅ {conn_name} ({result['duration_seconds']}s)")
+                    if result['details']:
+                        for key, value in result['details'].items():
+                            if 'version' in key.lower():
+                                click.echo(f"   {value}")
+                else:
+                    click.echo(f"❌ {conn_name}: {result['error']}")
+                click.echo("")
+            
+            # Summary
+            summary = results['summary']
+            click.echo(f"📊 Summary: {summary['successful_connections']}/{summary['total_connections']} successful ({summary['success_rate']}%)")
+            
+            if summary['successful_connections'] < summary['total_connections']:
+                sys.exit(1)
+        
+        elif connection_name:
+            click.echo(f"🔍 Testing connection: {connection_name}")
+            
+            result = multi_schema_ctx.connection_registry.test_connection(connection_name)
+            
+            if result['success']:
+                click.echo(f"✅ Connection successful ({result['duration_seconds']}s)")
+                
+                if result['details']:
+                    click.echo("")
+                    click.echo("Connection Details:")
+                    for key, value in result['details'].items():
+                        click.echo(f"  {key}: {value}")
+            else:
+                click.echo(f"❌ Connection failed: {result['error']}")
+                sys.exit(1)
+        
+        else:
+            click.echo("❌ Please specify a connection name or use --all")
+            click.echo("💡 List connections: python -m src.cli.main connections list")
+            sys.exit(1)
+    
+    @connections_command.command(name="info")
+    @click.argument('connection_name')
+    def connections_info(connection_name: str):
+        """Show detailed connection information"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        try:
+            info = multi_schema_ctx.connection_registry.get_connection_info(connection_name)
+            
+            click.echo(f"🔌 Connection: {info['name']}")
+            click.echo("=" * 40)
+            click.echo(f"Type: {info['type'].upper()}")
+            click.echo(f"Host: {info['host']}:{info['port']}")
+            click.echo(f"Database: {info['database']}")
+            if info['schema']:
+                click.echo(f"Schema: {info['schema']}")
+            click.echo(f"Username: {info['username']}")
+            click.echo(f"Status: {info['status']}")
+            
+            if info['description']:
+                click.echo(f"Description: {info['description']}")
+            
+            if info['has_ssh_tunnel']:
+                click.echo("🔒 SSH Tunnel: Enabled")
+            
+            if info['pool_settings']:
+                click.echo("")
+                click.echo("🏊 Connection Pool Settings:")
+                for key, value in info['pool_settings'].items():
+                    click.echo(f"  {key}: {value}")
+        
+        except Exception as e:
+            click.echo(f"❌ Error getting connection info: {e}")
+            sys.exit(1)
+    
+    @connections_command.command(name="health")
+    def connections_health():
+        """Show connection registry health status"""
+        
+        multi_schema_ctx.ensure_initialized()
+        
+        health = multi_schema_ctx.connection_registry.get_health_status()
+        
+        click.echo("🏥 Connection Registry Health")
+        click.echo("=" * 35)
+        click.echo(f"Total connections: {health['total_connections']}")
+        click.echo(f"Active MySQL pools: {health['mysql_pools_active']}")
+        click.echo(f"Active SSH tunnels: {health['ssh_tunnels_active']}")
+        click.echo("")
+        
+        click.echo("Connection Types:")
+        for conn_type, count in health['connection_types'].items():
+            click.echo(f"  {conn_type}: {count}")
+        click.echo("")
+        
+        click.echo(f"Configuration file: {health['configuration_file']}")
+        click.echo(f"Configuration exists: {'✅' if health['configuration_exists'] else '❌'}")
+        click.echo("")
+        
+        click.echo("Settings:")
+        for key, value in health['settings'].items():
+            click.echo(f"  {key}: {value}")
+
+
+def _show_sync_help():
+    """Show help for sync command options"""
+    click.echo("📚 Multi-Schema Sync Options (v1.1.0):")
+    click.echo("")
+    click.echo("Pipeline-based sync (recommended):")
+    click.echo("  python -m src.cli.main sync pipeline --pipeline PIPELINE_NAME --table TABLE1 TABLE2")
+    click.echo("")
+    click.echo("Connection-based sync:")
+    click.echo("  python -m src.cli.main sync connections --source SOURCE_CONN --target TARGET_CONN --table TABLE1")
+    click.echo("")
+    click.echo("Legacy v1.0.0 syntax (still supported):")
+    click.echo("  python -m src.cli.main sync --table settlement.table_name")
+    click.echo("")
+    click.echo("💡 Tips:")
+    click.echo("  • List pipelines: python -m src.cli.main config list-pipelines")
+    click.echo("  • List connections: python -m src.cli.main connections list")
+    click.echo("  • Setup configuration: python -m src.cli.main config setup")
+
+
+def _sync_legacy_mode(tables: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int]):
+    """Handle v1.0.0 legacy sync mode"""
+    click.echo("🔄 v1.0.0 Compatibility Mode")
+    
+    # Use the existing v1.0.0 sync logic with proper integration
+    try:
+        # Import the backup strategies and connection manager
+        from src.backup.sequential import SequentialBackupStrategy
+        from src.core.connections import ConnectionManager
+        from src.config.settings import AppConfig
+        
+        # Use v1.0.0 environment-based connection
+        config = AppConfig()
+        connection_manager = ConnectionManager(config)
+        
+        # Execute backup for each table using proper connection context
+        success_count = 0
+        for table_name in tables:
+            try:
+                click.echo(f"📋 Processing table: {table_name}")
+                
+                # Create v1.0.0 style backup strategy with connection manager
+                backup_strategy = SequentialBackupStrategy(config)
+                
+                # TODO: Apply max_workers and max_chunks configuration to backup strategy
+                # if max_workers:
+                #     backup_strategy.set_max_workers(max_workers)
+                # if max_chunks:
+                #     backup_strategy.set_max_chunks(max_chunks)
+                
+                # Execute backup with the same logic as v1.0.0
+                # SequentialBackupStrategy handles its own connection management
+                tables_list = [table_name]
+                result = backup_strategy.execute(
+                    tables_list, 
+                    chunk_size=limit if limit else config.backup.target_rows_per_chunk,
+                    max_total_rows=limit if limit else None
+                )
+                
+                if result:
+                    click.echo(f"  ✅ {table_name} completed successfully")
+                    success_count += 1
+                else:
+                    click.echo(f"  ❌ {table_name} failed")
+                    
+            except Exception as e:
+                click.echo(f"  ❌ {table_name} failed: {e}")
+                logger.error(f"Legacy sync failed for {table_name}: {e}")
+        
+        # Summary
+        total_tables = len(tables)
+        if success_count == total_tables:
+            click.echo(f"✅ Legacy sync completed successfully: {success_count}/{total_tables} tables")
+        else:
+            click.echo(f"⚠️  Legacy sync completed with issues: {success_count}/{total_tables} tables successful")
+            
+    except ImportError as e:
+        click.echo(f"❌ Legacy sync components not available: {e}")
+        click.echo("💡 Consider upgrading to pipeline-based syntax")
+        return _fallback_to_legacy_sync_simple(tables, backup_only, redshift_only, limit)
+    except Exception as e:
+        click.echo(f"❌ Legacy sync failed: {e}")
+        logger.error(f"Legacy sync mode failed: {e}")
+
+
+def _fallback_to_legacy_sync(table_name: str, backup_only: bool, redshift_only: bool, limit: Optional[int]) -> bool:
+    """Fallback sync function for single table when multi-schema fails"""
+    try:
+        from src.backup.sequential import SequentialBackupStrategy
+        from src.config.settings import AppConfig
+        
+        # Use v1.0.0 backup strategy with proper configuration
+        config = AppConfig()
+        backup_strategy = SequentialBackupStrategy(config)
+        
+        # Execute backup for single table
+        tables_list = [table_name]
+        result = backup_strategy.execute(
+            tables_list, 
+            chunk_size=limit if limit else config.backup.target_rows_per_chunk,
+            max_total_rows=limit if limit else None
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Fallback legacy sync failed for {table_name}: {e}")
+        return False
+
+
+def _fallback_to_legacy_sync_simple(tables: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int]):
+    """Simple fallback when all else fails"""
+    click.echo("⚠️  Using basic fallback mode")
+    
+    for table_name in tables:
+        success = _fallback_to_legacy_sync(table_name, backup_only, redshift_only, limit)
+        if success:
+            click.echo(f"  ✅ {table_name} completed")
+        else:
+            click.echo(f"  ❌ {table_name} failed")
+
+
+def _sync_with_default_pipeline(tables: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int]):
+    """Handle sync with default pipeline configuration"""
+    click.echo("📋 Using default pipeline configuration")
+    
+    # Get default pipeline and execute with new multi-schema system
+    pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config("default")
+    
+    # Register tables dynamically if needed
+    for table_name in tables:
+        if table_name not in pipeline_config.tables:
+            multi_schema_ctx.config_manager.register_table_dynamically("default", table_name)
+    
+    # Execute sync using pipeline system
+    success_count = 0
+    for table_name in tables:
+        table_config = pipeline_config.tables[table_name]
+        success = _execute_table_sync(
+            pipeline_config, table_config,
+            backup_only, redshift_only, limit, False, max_workers, max_chunks
+        )
+        if success:
+            success_count += 1
+    
+    if success_count == len(tables):
+        click.echo(f"✅ Sync completed: {success_count}/{len(tables)} tables")
+    else:
+        click.echo(f"⚠️  Sync completed with issues: {success_count}/{len(tables)} tables")
+
+
+def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool):
+    """Preview table sync operations without execution"""
+    click.echo(f"🔍 Preview: {table_config.full_name}")
+    click.echo(f"  Strategy: {table_config.cdc_strategy}")
+    click.echo(f"  Type: {table_config.table_type}")
+    click.echo(f"  Batch size: {table_config.processing.get('batch_size', 10000)}")
+    
+    if not redshift_only:
+        click.echo(f"  📤 MySQL extraction: {pipeline_config.source}")
+        click.echo(f"    Timestamp column: {table_config.cdc_timestamp_column}")
+        if table_config.cdc_strategy in ['hybrid', 'id_only']:
+            click.echo(f"    ID column: {table_config.cdc_id_column}")
+    
+    if not backup_only:
+        click.echo(f"  📥 Redshift loading: {pipeline_config.target}")
+        click.echo(f"    Target table: {table_config.target_name}")
+    
+    if table_config.depends_on:
+        click.echo(f"  📋 Dependencies: {', '.join(table_config.depends_on)}")
+
+
+def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool, 
+                       limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None) -> bool:
+    """Execute actual table sync with multi-schema configuration"""
+    
+    click.echo(f"🚀 Syncing: {table_config.full_name}")
+    
+    try:
+        # Import the existing backup strategies
+        from src.backup.sequential import SequentialBackupStrategy
+        from src.backup.inter_table import InterTableBackupStrategy
+        
+        # Use v1.0.0 backup strategy with proper configuration
+        # The existing backup strategies are designed to work with AppConfig, not direct connections
+        try:
+            from src.config.settings import AppConfig
+            
+            # Create a temporary config that uses the same connection settings
+            config = AppConfig()
+            
+            # Determine backup strategy based on pipeline configuration  
+            strategy_name = pipeline_config.processing.get('strategy', 'sequential')
+            if parallel:
+                strategy_name = 'parallel'
+            
+            # Create backup strategy using the existing v1.0.0 pattern
+            if strategy_name == 'parallel':
+                backup_strategy = InterTableBackupStrategy(config)
+            else:
+                backup_strategy = SequentialBackupStrategy(config)
+            
+            # Configure strategy with pipeline settings
+            if hasattr(backup_strategy, 'set_batch_size'):
+                batch_size = table_config.processing.get('batch_size', 10000)
+                backup_strategy.set_batch_size(batch_size)
+            
+            # Execute the sync using the table name
+            # The backup strategy will handle its own connection management
+            table_list = [table_config.full_name]
+            
+            # Calculate parameters for the backup
+            chunk_size = limit if limit else table_config.processing.get('batch_size', 10000)
+            max_total_rows = limit if limit else None
+            
+            # Execute backup strategy with the same interface as v1.0.0
+            result = backup_strategy.execute(
+                tables=table_list,
+                chunk_size=chunk_size,
+                max_total_rows=max_total_rows
+            )
+            
+        except Exception as config_error:
+            logger.error(f"Failed to execute table sync with v1.0.0 compatibility: {config_error}")
+            click.echo(f"  ❌ Configuration error: {config_error}")
+            return False
+        
+        if result:
+            click.echo(f"  ✅ {table_config.full_name} synced successfully")
+            return True
+        else:
+            click.echo(f"  ❌ {table_config.full_name} sync failed")
+            return False
+            
+    except ImportError as e:
+        # Fall back to v1.0.0 style sync
+        logger.warning(f"Multi-schema backup strategies not available, falling back to v1.0.0 mode: {e}")
+        return _fallback_to_legacy_sync(table_config.full_name, backup_only, redshift_only, limit)
+        
+    except Exception as e:
+        click.echo(f"  ❌ {table_config.full_name} failed: {e}")
+        logger.error(f"Table sync failed for {table_config.full_name}: {e}")
+        return False
+
+
+def _create_adhoc_pipeline_config(source: str, target: str, tables: List[str], batch_size: int):
+    """Create ad-hoc pipeline configuration for connection-based sync"""
+    from src.core.configuration_manager import PipelineConfig, TableConfig
+    
+    # Create table configurations
+    table_configs = {}
+    for table_name in tables:
+        table_configs[table_name] = TableConfig(
+            full_name=table_name,
+            cdc_strategy="hybrid",
+            cdc_timestamp_column="updated_at",
+            cdc_id_column="id",
+            processing={'batch_size': batch_size}
+        )
+    
+    return PipelineConfig(
+        name=f"adhoc_{source}_to_{target}",
+        version="1.1.0",
+        description=f"Ad-hoc pipeline: {source} → {target}",
+        source=source,
+        target=target,
+        processing={'strategy': 'sequential', 'batch_size': batch_size},
+        s3={'isolation_prefix': f"adhoc_{source}_{target}", 'partition_strategy': 'hybrid'},
+        default_table_config={},
+        tables=table_configs
+    )

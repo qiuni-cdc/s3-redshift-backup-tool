@@ -1,4 +1,4 @@
-# Core dependencies
+# Core dependencies for v1.0.0 + v1.1.0
 pandas>=1.5.0
 pyarrow>=10.0.0
 mysql-connector-python>=8.0.0
@@ -7,8 +7,18 @@ sshtunnel>=0.4.0
 paramiko<3.0  # Pin to version compatible with DSSKey
 psycopg2-binary  # For Redshift connections
 pydantic>=1.10.0
+pydantic-settings>=2.0.0  # For settings management with .env support
 click>=8.0.0
 structlog>=22.0.0
+python-dotenv>=1.0.0  # For .env file support in v1.1.0
+
+# V1.1.0 Multi-Schema Dependencies
+PyYAML>=6.0.0  # For YAML configuration files
+typing-extensions>=4.0.0  # Extended typing support for configuration validation
+
+# Enhanced error handling and validation
+cerberus>=1.3.0  # Schema validation for configuration files
+jsonschema>=4.0.0  # JSON schema validation
 
 # Development dependencies
 pytest>=7.0.0
