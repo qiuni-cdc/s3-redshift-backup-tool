@@ -250,17 +250,69 @@ class GeminiRedshiftLoader:
             s3_client = self.connection_manager.get_s3_client()
             
             # Build S3 prefix for this table's data using same logic as S3Manager
-            # FIXED: Use consistent scoped table name cleaning for v1.2.0 multi-schema
+            # FIXED: Use table-specific prefix to avoid scanning all files
             clean_table_name = self._clean_table_name_with_scope(table_name)
-            prefix = f"{self.config.s3.incremental_path.strip('/')}/"
             
-            logger.debug(f"Searching for {clean_table_name} files with prefix: {prefix}")
+            # ENHANCED: Use more efficient prefix strategies to minimize file scanning
+            # Strategy 1: Try to find table-specific partition directories first
+            base_prefix = f"{self.config.s3.incremental_path.strip('/')}/"
             
-            # List objects with this prefix
-            response = s3_client.list_objects_v2(
-                Bucket=self.config.s3.bucket_name,
-                Prefix=prefix
-            )
+            # Check if table partition strategy is used (most efficient)
+            table_partition_prefix = f"{base_prefix}table={clean_table_name}/"
+            
+            logger.debug(f"Trying table-specific partition prefix: {table_partition_prefix}")
+            
+            # First try the most specific prefix (table partition)
+            try:
+                table_partition_response = s3_client.list_objects_v2(
+                    Bucket=self.config.s3.bucket_name,
+                    Prefix=table_partition_prefix,
+                    MaxKeys=1  # Just check if this partition exists
+                )
+                
+                has_table_partition = len(table_partition_response.get('Contents', [])) > 0
+                logger.debug(f"Table partition exists: {has_table_partition}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to check table partition: {e}")
+                has_table_partition = False
+            
+            # Strategy selection based on partition discovery
+            if has_table_partition:
+                # Use table-specific prefix for maximum efficiency
+                logger.info(f"Using table partition strategy for efficient file discovery")
+                prefix = table_partition_prefix
+                max_keys = 1000  # Reasonable limit for table-specific files
+            else:
+                # Fallback to general prefix but with stricter filtering
+                logger.info(f"Using general prefix with enhanced filtering")
+                prefix = base_prefix
+                max_keys = 2000  # Limit scan size to avoid performance issues
+            
+            logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
+            
+            # Execute S3 listing with chosen strategy
+            try:
+                if has_table_partition:
+                    # More comprehensive listing for table-specific partition
+                    response = s3_client.list_objects_v2(
+                        Bucket=self.config.s3.bucket_name,
+                        Prefix=prefix
+                    )
+                else:
+                    # Limited listing with pagination for general prefix
+                    response = s3_client.list_objects_v2(
+                        Bucket=self.config.s3.bucket_name,
+                        Prefix=prefix,
+                        MaxKeys=max_keys
+                    )
+                
+                total_objects = len(response.get('Contents', []))
+                logger.info(f"S3 prefix scan returned {total_objects} total objects")
+                
+            except Exception as e:
+                logger.error(f"S3 listing failed: {e}")
+                return []
             
             parquet_files = []
             filtered_files = []
@@ -275,44 +327,50 @@ class GeminiRedshiftLoader:
             
             for obj in response.get('Contents', []):
                 key = obj['Key']
-                logger.debug(f"Examining S3 object: {key}")
                 
-                # Filter for parquet files that match our table name
-                if key.endswith('.parquet') and clean_table_name in key:
-                    parquet_files.append(key)
-                    s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
-                    logger.debug(f"Found matching parquet file: {key} -> {s3_uri}")
+                # ENHANCED: More efficient filtering - check parquet first, then table name
+                if not key.endswith('.parquet'):
+                    continue
                     
-                    # CRITICAL: Skip files that were already processed
-                    if s3_uri in processed_files:
-                        logger.debug(f"Skipping file (already processed): {key}")
-                        continue
-                    
-                    logger.debug(f"File not in processed list, checking time filters...")
-                    
-                    # Apply timestamp filtering for incremental loading
-                    file_modified_time = obj['LastModified']
-                    if file_modified_time.tzinfo is None:
-                        file_modified_time = file_modified_time.replace(tzinfo=timezone.utc)
-                    
-                    if session_start and session_end:
-                        # Session-based filtering: narrow time window around extraction
-                        if session_start <= file_modified_time <= session_end:
-                            filtered_files.append(s3_uri)
-                            logger.debug(f"Including file (current session): {key} - modified {file_modified_time}")
-                        else:
-                            logger.debug(f"Skipping file (different session): {key} - modified {file_modified_time}")
-                    elif cutoff_time:
-                        # Watermark-based filtering: files after watermark timestamp
-                        if file_modified_time > cutoff_time:
-                            filtered_files.append(s3_uri)
-                            logger.debug(f"Including file (after watermark): {key} - modified {file_modified_time}")
-                        else:
-                            logger.debug(f"Skipping file (before watermark): {key} - modified {file_modified_time}")
-                    else:
-                        # No cutoff - include all files (full load)
+                # For table partition strategy, we already know files match
+                # For general prefix, we need to filter by table name
+                if not has_table_partition and clean_table_name not in key:
+                    continue
+                
+                parquet_files.append(key)
+                s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
+                logger.debug(f"S3 URI: {s3_uri}")
+                
+                # CRITICAL: Skip files that were already processed
+                if s3_uri in processed_files:
+                    logger.debug(f"Skipping file (already processed): {key}")
+                    continue
+                
+                logger.debug(f"File not in processed list, checking time filters...")
+                
+                # Apply timestamp filtering for incremental loading
+                file_modified_time = obj['LastModified']
+                if file_modified_time.tzinfo is None:
+                    file_modified_time = file_modified_time.replace(tzinfo=timezone.utc)
+                
+                if session_start and session_end:
+                    # Session-based filtering: narrow time window around extraction
+                    if session_start <= file_modified_time <= session_end:
                         filtered_files.append(s3_uri)
-                        logger.debug(f"Including file (full load): {key}")
+                        logger.debug(f"Including file (current session): {key} - modified {file_modified_time}")
+                    else:
+                        logger.debug(f"Skipping file (different session): {key} - modified {file_modified_time}")
+                elif cutoff_time:
+                    # Watermark-based filtering: files after watermark timestamp
+                    if file_modified_time > cutoff_time:
+                        filtered_files.append(s3_uri)
+                        logger.debug(f"Including file (after watermark): {key} - modified {file_modified_time}")
+                    else:
+                        logger.debug(f"Skipping file (before watermark): {key} - modified {file_modified_time}")
+                else:
+                    # No cutoff - include all files (full load)
+                    filtered_files.append(s3_uri)
+                    logger.debug(f"Including file (full load): {key}")
             
             logger.info(f"Found {len(parquet_files)} total files, filtered to {len(filtered_files)} files for loading")
             
