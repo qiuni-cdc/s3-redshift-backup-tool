@@ -1,8 +1,29 @@
 """
-Schema management system for table definitions and data validation.
+⚠️  DEPRECATED: Static Schema Management System
 
-This module defines PyArrow schemas for all tables in the backup system,
-providing type safety, validation, and schema evolution capabilities.
+🚨 WARNING: This module contains hardcoded table schemas that pose a HIGH RISK
+of schema drift and Parquet compatibility issues with Redshift Spectrum.
+
+❌ PROBLEMS:
+- Hardcoded schemas become stale when database structure evolves
+- Creates inconsistencies between backup stages using different schema sources  
+- Caused production Parquet schema compatibility errors
+- No automatic detection of schema changes
+
+✅ SOLUTION:
+Use FlexibleSchemaManager for dynamic schema discovery from actual database:
+
+    from src.core.flexible_schema_manager import FlexibleSchemaManager
+    schema_manager = FlexibleSchemaManager()
+    schema_info = schema_manager.get_table_schema(table_name)
+
+📋 MIGRATION STATUS:
+- Validation system: ✅ MIGRATED to FlexibleSchemaManager
+- Backup strategies: ✅ Already using FlexibleSchemaManager
+- Loading system: ✅ COMPLETED - migrated to FlexibleSchemaManager
+- Test files: ⚠️ TODO - update remaining test script imports (non-critical)
+
+🗑️  SCHEDULED FOR REMOVAL: This module will be removed in v1.2.0
 """
 
 import pyarrow as pa
@@ -56,13 +77,13 @@ TABLE_SCHEMAS = {
         pa.field('height_cm', pa.float64(), nullable=True),
         pa.field('volume_weight_kg', pa.float64(), nullable=True),
         pa.field('chargeable_weight_kg', pa.float64(), nullable=True),
-        pa.field('base_fee', pa.decimal128(10, 4), nullable=True),
-        pa.field('fuel_surcharge', pa.decimal128(10, 4), nullable=True),
-        pa.field('remote_surcharge', pa.decimal128(10, 4), nullable=True),
-        pa.field('oversized_surcharge', pa.decimal128(10, 4), nullable=True),
-        pa.field('total_fee', pa.decimal128(10, 4), nullable=True),
+        pa.field('base_fee', pa.decimal128(15, 4), nullable=True),
+        pa.field('fuel_surcharge', pa.decimal128(15, 4), nullable=True),
+        pa.field('remote_surcharge', pa.decimal128(15, 4), nullable=True),
+        pa.field('oversized_surcharge', pa.decimal128(15, 4), nullable=True),
+        pa.field('total_fee', pa.decimal128(15, 4), nullable=True),
         pa.field('currency', pa.string(), nullable=True),
-        pa.field('exchange_rate', pa.decimal128(10, 6), nullable=True),
+        pa.field('exchange_rate', pa.decimal128(15, 6), nullable=True),
         pa.field('settlement_date', pa.date32(), nullable=True),
         pa.field('billing_period', pa.string(), nullable=True),
         pa.field('tracking_status', pa.string(), nullable=True),
@@ -488,9 +509,45 @@ def get_schema_manager() -> SchemaManager:
     return _schema_manager
 
 def get_table_schema(table_name: str) -> Optional[pa.Schema]:
-    """Convenience function to get table schema (deprecated - use flexible_schema_manager)"""
+    """
+    ⚠️ DEPRECATED: Get table schema (DANGEROUS - use FlexibleSchemaManager instead)
+    
+    🚨 CRITICAL WARNING: This function uses hardcoded schemas that become stale!
+    
+    Use dynamic schema discovery instead:
+        from src.core.flexible_schema_manager import FlexibleSchemaManager
+        schema_manager = FlexibleSchemaManager()
+        schema_info = schema_manager.get_table_schema(table_name)
+        schema = schema_info.pyarrow_schema
+    """
+    import warnings
+    warnings.warn(
+        f"get_table_schema() is deprecated and dangerous for {table_name}. "
+        f"Use FlexibleSchemaManager for dynamic schema discovery.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    logger.warning(f"🚨 Using DEPRECATED hardcoded schema for {table_name} - high risk of schema mismatch!")
     return get_schema_manager().get_schema(table_name)
 
 def validate_table_data(data: Any, table_name: str, strict: bool = True) -> pa.Table:
-    """Convenience function to validate table data (deprecated - use flexible_schema_manager)"""
+    """
+    ⚠️ DEPRECATED: Validate table data (DANGEROUS - use FlexibleSchemaManager instead)
+    
+    🚨 CRITICAL WARNING: This function uses hardcoded schemas that cause Parquet errors!
+    
+    Use dynamic validation instead:
+        from src.core.flexible_schema_manager import FlexibleSchemaManager
+        schema_manager = FlexibleSchemaManager()
+        schema_info = schema_manager.get_table_schema(table_name)
+        # Use schema_info.pyarrow_schema for validation
+    """
+    import warnings
+    warnings.warn(
+        f"validate_table_data() is deprecated and dangerous for {table_name}. "
+        f"Use FlexibleSchemaManager for dynamic schema validation.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    logger.warning(f"🚨 Using DEPRECATED hardcoded validation for {table_name} - high risk of Parquet errors!")
     return get_schema_manager().validate_data(data, table_name, strict)

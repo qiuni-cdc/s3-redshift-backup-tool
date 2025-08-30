@@ -148,6 +148,22 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Get current watermark for resume capability
             watermark = self.watermark_manager.get_table_watermark(table_name)
             
+            # DEBUG: Log watermark details to identify MAX query bug
+            if watermark:
+                self.logger.logger.warning(
+                    "DEBUG: Watermark contents",
+                    table_name=table_name,
+                    last_mysql_data_timestamp=watermark.last_mysql_data_timestamp,
+                    last_processed_id=getattr(watermark, 'last_processed_id', 'NOT_SET'),
+                    backup_strategy=getattr(watermark, 'backup_strategy', 'NOT_SET'),
+                    mysql_status=getattr(watermark, 'mysql_status', 'NOT_SET')
+                )
+            else:
+                self.logger.logger.warning(
+                    "DEBUG: No watermark found for table",
+                    table_name=table_name
+                )
+            
             if not watermark or not watermark.last_mysql_data_timestamp:
                 # No watermark - start from beginning
                 last_timestamp = '1970-01-01 00:00:00'
@@ -186,6 +202,11 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Determine chunk size
             effective_chunk_size = chunk_size or self.config.backup.target_rows_per_chunk
+            
+            # Detect timestamp and ID columns for this table once
+            # Try to use pipeline configuration first, then fall back to dynamic detection
+            timestamp_column = self._get_configured_timestamp_column(table_name) or self._detect_timestamp_column(cursor, table_name)
+            id_column = self._get_configured_id_column(table_name) or self._detect_id_column(cursor, table_name)
             
             # Process table in exact row-based chunks
             chunk_number = 1
@@ -254,7 +275,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 # Get next chunk of exactly chunk_size rows (or remaining)
                 chunk_data, chunk_last_timestamp, chunk_last_id = self._get_next_chunk(
-                    cursor, table_name, last_timestamp, last_id, current_chunk_size
+                    cursor, table_name, last_timestamp, last_id, current_chunk_size, timestamp_column, id_column
                 )
                 
                 if not chunk_data:
@@ -273,10 +294,11 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     table_name=table_name,
                     chunk_size_actual=rows_in_chunk,
                     chunk_size_requested=current_chunk_size,
-                    time_range_start=chunk_data[0]['update_at'],
-                    time_range_end=chunk_data[-1]['update_at'],
-                    id_range_start=chunk_data[0]['ID'],
-                    id_range_end=chunk_data[-1]['ID']
+                    time_range_start=chunk_data[0][timestamp_column],
+                    time_range_end=chunk_data[-1][timestamp_column],
+                    id_range_start=chunk_data[0][id_column],
+                    id_range_end=chunk_data[-1][id_column],
+                    columns_detected=f"{timestamp_column}, {id_column}"
                 )
                 
                 # Process chunk in smaller batches for S3 upload
@@ -409,13 +431,223 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 except:
                     pass
     
+    def _detect_timestamp_column(self, cursor, table_name: str) -> str:
+        """
+        Detect the correct timestamp column name for CDC.
+        
+        Args:
+            cursor: Database cursor
+            table_name: Name of the table (may be scoped for v1.2.0)
+            
+        Returns:
+            Name of the timestamp column to use
+        """
+        # Get table columns - extract MySQL table name from potentially scoped name
+        mysql_table_name = self._extract_mysql_table_name(table_name)
+        cursor.execute(f"DESCRIBE {mysql_table_name}")
+        describe_results = cursor.fetchall()
+        
+        if isinstance(describe_results[0], dict):
+            columns = [row['Field'] for row in describe_results]
+        else:
+            columns = [row[0] for row in describe_results]
+        
+        # Check in order of preference
+        timestamp_column_candidates = ['updated_at', 'update_at', 'last_modified', 'modified_at']
+        
+        for candidate in timestamp_column_candidates:
+            if candidate in columns:
+                return candidate
+                
+        # Fallback to default if none found (should not happen after validation)
+        return 'update_at'
+    
+    def _detect_id_column(self, cursor, table_name: str) -> str:
+        """
+        Detect the correct ID column name for CDC.
+        
+        Args:
+            cursor: Database cursor
+            table_name: Name of the table (may be scoped for v1.2.0)
+            
+        Returns:
+            Name of the ID column to use
+        """
+        # Get table columns - extract MySQL table name from potentially scoped name
+        mysql_table_name = self._extract_mysql_table_name(table_name)
+        cursor.execute(f"DESCRIBE {mysql_table_name}")
+        describe_results = cursor.fetchall()
+        
+        if isinstance(describe_results[0], dict):
+            columns = [row['Field'] for row in describe_results]
+        else:
+            columns = [row[0] for row in describe_results]
+        
+        # Check in order of preference
+        id_column_candidates = ['id', 'ID', 'Id', 'pk_id', 'primary_id']
+        
+        for candidate in id_column_candidates:
+            if candidate in columns:
+                return candidate
+                
+        # Fallback to default if none found (should not happen after validation)
+        return 'ID'
+    
+    def _get_configured_timestamp_column(self, table_name: str) -> str:
+        """
+        Get timestamp column from pipeline configuration if available.
+        """
+        try:
+            # Try to load pipeline configuration
+            from src.core.configuration_manager import ConfigurationManager
+            config_manager = ConfigurationManager()
+            
+            # Extract simple table name from full table name (handle scoped names)
+            # For scoped names like 'US_DW_RO_SSH:settlement.settle_orders', we want 'settlement.settle_orders'
+            unscoped_table_name = self._extract_mysql_table_name(table_name)
+            simple_table_name = unscoped_table_name.split('.')[-1] if '.' in unscoped_table_name else unscoped_table_name
+            
+            # Try both full and simple table names across all pipelines
+            # Prioritize specific pipelines over default
+            pipeline_priority = ['us_dw_pipeline', 'us_dw_hybrid_v1_2'] + [p for p in config_manager.list_pipelines() if p not in ['us_dw_pipeline', 'us_dw_hybrid_v1_2', 'default']] + ['default']
+            
+            # FIXED: Try unscoped table name first for scoped lookups
+            for name_variant in [unscoped_table_name, table_name, simple_table_name]:
+                for pipeline_name in pipeline_priority:
+                    try:
+                        table_config = config_manager.get_table_config(pipeline_name, name_variant)
+                        if table_config and table_config.cdc_timestamp_column:
+                            self.logger.logger.info(
+                                f"Using configured timestamp column for {table_name}",
+                                configured_column=table_config.cdc_timestamp_column,
+                                pipeline=pipeline_name,
+                                table_variant_matched=name_variant
+                            )
+                            return table_config.cdc_timestamp_column
+                    except Exception:
+                        continue  # Try next pipeline
+        except Exception as e:
+            self.logger.logger.debug(f"Could not load pipeline config for timestamp: {e}")
+            
+        return None
+    
+    def _get_configured_id_column(self, table_name: str) -> str:
+        """
+        Get ID column from pipeline configuration if available.
+        """
+        try:
+            # Try to load pipeline configuration
+            from src.core.configuration_manager import ConfigurationManager
+            config_manager = ConfigurationManager()
+            
+            # Extract simple table name from full table name (handle scoped names)
+            # For scoped names like 'US_DW_RO_SSH:settlement.settle_orders', we want 'settlement.settle_orders'
+            unscoped_table_name = self._extract_mysql_table_name(table_name)
+            simple_table_name = unscoped_table_name.split('.')[-1] if '.' in unscoped_table_name else unscoped_table_name
+            
+            # Try both full and simple table names across all pipelines
+            # Prioritize specific pipelines over default
+            pipeline_priority = ['us_dw_pipeline', 'us_dw_hybrid_v1_2'] + [p for p in config_manager.list_pipelines() if p not in ['us_dw_pipeline', 'us_dw_hybrid_v1_2', 'default']] + ['default']
+            
+            # FIXED: Try unscoped table name first for scoped lookups
+            for name_variant in [unscoped_table_name, table_name, simple_table_name]:
+                for pipeline_name in pipeline_priority:
+                    try:
+                        table_config = config_manager.get_table_config(pipeline_name, name_variant)
+                        if table_config and table_config.cdc_id_column:
+                            self.logger.logger.info(
+                                f"Using configured ID column for {table_name}",
+                                configured_column=table_config.cdc_id_column,
+                                pipeline=pipeline_name,
+                                table_variant_matched=name_variant
+                            )
+                            return table_config.cdc_id_column
+                    except Exception:
+                        continue  # Try next pipeline
+        except Exception as e:
+            self.logger.logger.debug(f"Could not load pipeline config for ID: {e}")
+            
+        return None
+    
+    def _count_actual_s3_files(self, table_name: str) -> int:
+        """
+        Count actual S3 files for the table using S3Manager's logic.
+        This provides accurate count even after restarts/interruptions.
+        """
+        try:
+            # Use S3Manager to count files for this table
+            from src.core.s3_manager import S3Manager
+            
+            # Create a temporary S3Manager instance to count files
+            temp_s3_manager = S3Manager(self.config)
+            
+            # Get table-specific file pattern
+            safe_table_name = table_name.replace('.', '_')
+            
+            # Search for all parquet files for this table
+            response = temp_s3_manager.s3_client.list_objects_v2(
+                Bucket=temp_s3_manager.bucket_name,
+                Prefix='incremental/',
+                MaxKeys=1000
+            )
+            
+            # Filter for this table's files
+            total_files = 0
+            files = response.get('Contents', [])
+            
+            for file_obj in files:
+                key = file_obj['Key']
+                # Check if file belongs to this table and is a parquet file
+                if (safe_table_name in key and 
+                    key.endswith('.parquet')):
+                    total_files += 1
+                    self.logger.logger.debug(f"Found S3 file: {key}")
+            
+            # Handle pagination if there are more files
+            while response.get('IsTruncated', False):
+                response = temp_s3_manager.s3_client.list_objects_v2(
+                    Bucket=temp_s3_manager.bucket_name,
+                    Prefix='incremental/',
+                    MaxKeys=1000,
+                    ContinuationToken=response['NextContinuationToken']
+                )
+                
+                files = response.get('Contents', [])
+                for file_obj in files:
+                    key = file_obj['Key']
+                    if (safe_table_name in key and 
+                        key.endswith('.parquet')):
+                        total_files += 1
+                        self.logger.logger.debug(f"Found S3 file: {key}")
+            
+            self.logger.logger.info(
+                f"Actual S3 file count for {table_name}: {total_files} files",
+                table_name=table_name,
+                total_files_found=total_files,
+                search_prefix='incremental/'
+            )
+            
+            return total_files
+            
+        except Exception as e:
+            self.logger.logger.error(
+                f"Failed to count S3 files for {table_name}: {e}",
+                table_name=table_name,
+                error=str(e)
+            )
+            # Fallback to in-memory stats if S3 count fails
+            s3_stats = self.s3_manager.get_upload_stats()
+            return s3_stats.get('total_files', 0)
+    
     def _get_next_chunk(
         self, 
         cursor, 
         table_name: str, 
         last_timestamp: str, 
         last_id: int, 
-        chunk_size: int
+        chunk_size: int,
+        timestamp_column: str,
+        id_column: str
     ) -> Tuple[List[Dict], str, int]:
         """
         Get next chunk using timestamp + ID pagination.
@@ -433,7 +665,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         try:
             # Handle None/null parameters with safe defaults
             safe_last_id = last_id if last_id is not None else 0
-            safe_table_name = table_name if table_name is not None else "INVALID_TABLE"
+            # FIXED: Extract actual MySQL table name from potentially scoped name for v1.2.0
+            safe_table_name = self._extract_mysql_table_name(table_name) if table_name is not None else "INVALID_TABLE"
             safe_last_timestamp = last_timestamp if last_timestamp is not None else '1970-01-01 00:00:00'
             
             # Validate critical parameters
@@ -447,12 +680,14 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 )
                 raise ValueError(f"last_timestamp cannot be None for table {table_name}")
             
+            # Use the pre-detected timestamp and ID columns (passed from main loop)
+            
             # Option 2: Timestamp + ID based query for reliable pagination
             query = f"""
             SELECT * FROM {safe_table_name}
-            WHERE update_at > '{safe_last_timestamp}' 
-               OR (update_at = '{safe_last_timestamp}' AND ID > {safe_last_id})
-            ORDER BY update_at, ID 
+            WHERE {timestamp_column} > '{safe_last_timestamp}' 
+               OR ({timestamp_column} = '{safe_last_timestamp}' AND {id_column} > {safe_last_id})
+            ORDER BY {timestamp_column}, {id_column} 
             LIMIT {chunk_size}
             """
             
@@ -479,10 +714,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     rows_found=len(chunk_data),
                     chunk_size_requested=chunk_size,
                     rows_vs_limit_ratio=f"{len(chunk_data)}/{chunk_size}",
-                    first_row_id=first_row.get('ID'),
-                    first_row_timestamp=str(first_row.get('update_at')),
-                    last_row_id=last_row.get('ID'),
-                    last_row_timestamp=str(last_row.get('update_at')),
+                    first_row_id=first_row.get(id_column),
+                    first_row_timestamp=str(first_row.get(timestamp_column)),
+                    last_row_id=last_row.get(id_column),
+                    last_row_timestamp=str(last_row.get(timestamp_column)),
+                    id_column_used=id_column,
+                    timestamp_column_used=timestamp_column,
                     query_executed=query.replace('\n', ' ').strip()
                 )
                 
@@ -522,19 +759,19 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             last_row = chunk_data[-1]
             
             # Handle potential None values in row data
-            update_at_value = last_row.get('update_at')
+            update_at_value = last_row.get(timestamp_column)
             if update_at_value is None:
                 self.logger.logger.error(
-                    "update_at is None in chunk data",
+                    f"{timestamp_column} is None in chunk data",
                     table_name=table_name,
-                    row_id=last_row.get('ID'),
+                    row_id=last_row.get(id_column),
                     chunk_size=len(chunk_data)
                 )
                 chunk_last_timestamp = '1970-01-01 00:00:00'  # Safe fallback
             else:
                 chunk_last_timestamp = update_at_value.strftime('%Y-%m-%d %H:%M:%S')
             
-            chunk_last_id = last_row.get('ID', 0)
+            chunk_last_id = last_row.get(id_column, 0)
             
             self.logger.logger.debug(
                 "Retrieved row-based chunk",
@@ -562,13 +799,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         
         Args:
             cursor: Database cursor
-            table_name: Name of the table to validate
+            table_name: Name of the table to validate (may be scoped for v1.2.0)
         
         Returns:
             True if table has required columns, False otherwise
         """
         try:
-            cursor.execute(f"DESCRIBE {table_name}")
+            # Extract actual MySQL table name from potentially scoped name
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            cursor.execute(f"DESCRIBE {mysql_table_name}")
             describe_results = cursor.fetchall()
             
             # Handle both dictionary and tuple cursors
@@ -577,12 +817,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             else:
                 columns = [row[0] for row in describe_results]
             
-            # Check for required columns
+            # Check for required columns (flexible timestamp and ID column names)
             missing_columns = []
-            if 'update_at' not in columns:
-                missing_columns.append('update_at')
-            if 'ID' not in columns and 'id' not in columns:
-                missing_columns.append('ID')
+            
+            # Check timestamp columns with flexible naming
+            timestamp_candidates = ['updated_at', 'update_at', 'last_modified', 'modified_at']
+            has_timestamp_column = any(col in columns for col in timestamp_candidates)
+            if not has_timestamp_column:
+                missing_columns.append('timestamp column (tried: updated_at, update_at, last_modified)')
+            
+            # Check ID columns with flexible naming  
+            id_candidates = ['id', 'ID', 'Id', 'pk_id', 'primary_id']
+            has_id_column = any(col in columns for col in id_candidates)
+            if not has_id_column:
+                missing_columns.append('ID column (tried: id, ID, Id, pk_id)')
             
             if missing_columns:
                 self.logger.logger.error(
@@ -850,9 +1098,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             import uuid
             session_id = f"row_based_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             
-            # CRITICAL FIX: Get actual S3 file count from S3Manager
-            s3_stats = self.s3_manager.get_upload_stats()
-            actual_s3_files = s3_stats.get('total_files', 0)
+            # CRITICAL FIX: Get actual S3 file count from S3 directly (not in-memory stats)
+            actual_s3_files = self._count_actual_s3_files(table_name)
             
             self.logger.logger.info(
                 "S3 file count tracking for watermark update",

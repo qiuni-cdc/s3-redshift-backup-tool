@@ -17,7 +17,8 @@ from dataclasses import dataclass
 
 from src.utils.exceptions import ValidationError
 from src.utils.logging import get_logger
-from src.config.schemas import get_table_schema
+# DEPRECATED: Removing dangerous hardcoded schema dependency
+# from src.config.schemas import get_table_schema
 
 
 logger = get_logger(__name__)
@@ -68,6 +69,35 @@ class DataValidator:
         # Initialize default validation rules
         self._setup_default_rules()
     
+    def _get_dynamic_table_schema(self, table_name: str) -> Optional[pa.Schema]:
+        """
+        Get table schema from actual database structure (not hardcoded)
+        
+        Args:
+            table_name: Full table name (e.g., 'settlement.table_name')
+            
+        Returns:
+            PyArrow schema from actual database structure
+        """
+        try:
+            # FIXED: Use FlexibleSchemaManager for dynamic schema discovery
+            from src.core.flexible_schema_manager import FlexibleSchemaManager
+            
+            schema_manager = FlexibleSchemaManager()
+            pyarrow_schema, redshift_ddl = schema_manager.get_table_schema(table_name)
+            
+            if pyarrow_schema:
+                logger.debug(f"Retrieved dynamic schema for {table_name}: {len(pyarrow_schema)} fields")
+                return pyarrow_schema
+            else:
+                logger.warning(f"No schema returned for {table_name}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to get dynamic schema for {table_name}: {e}")
+            # Don't fall back to hardcoded schemas - that's the problem we're fixing
+            return None
+
     def _setup_default_rules(self):
         """Setup default validation rules"""
         self.validation_rules = {
@@ -181,10 +211,16 @@ class DataValidator:
         table_name: str, 
         result: ValidationResult
     ):
-        """Validate DataFrame against defined table schema"""
-        schema = get_table_schema(table_name)
-        if not schema:
-            result.add_warning(f"No schema found for table {table_name}")
+        """Validate DataFrame against actual database schema (not hardcoded)"""
+        # FIXED: Use dynamic schema discovery instead of dangerous hardcoded schemas
+        try:
+            schema = self._get_dynamic_table_schema(table_name)
+            if not schema:
+                result.add_warning(f"No schema found for table {table_name}")
+                return
+        except Exception as e:
+            logger.warning(f"Failed to get dynamic schema for {table_name}, falling back to basic validation: {e}")
+            result.add_warning(f"Schema validation limited: {e}")
             return
         
         schema_fields = {field.name: field for field in schema}

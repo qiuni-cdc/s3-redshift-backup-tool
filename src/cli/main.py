@@ -1338,12 +1338,14 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool,
                 return
             
             try:
-                success = watermark_manager.delete_table_watermark(effective_table_name, create_backup=True)
+                # FIXED: Use force_reset_watermark instead of delete for proper cleanup
+                success = watermark_manager.force_reset_watermark(effective_table_name)
                 
                 if success:
                     click.echo(f"✅ Watermark reset for {table}")
-                    click.echo("   Backup created before deletion")
-                    click.echo("   Next sync will start fresh from default timestamp")
+                    click.echo("   Watermark reset to epoch start (1970-01-01)")
+                    click.echo("   All resume points and processed IDs cleared")
+                    click.echo("   Next sync will start fresh from beginning")
                 else:
                     click.echo("❌ Failed to reset watermark", err=True)
                     sys.exit(1)

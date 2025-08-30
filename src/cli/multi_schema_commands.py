@@ -916,18 +916,84 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             
             # Execute the sync using the table name
             # The backup strategy will handle its own connection management
-            table_list = [table_config.full_name]
+            
+            # FIXED: Generate scoped table name for v1.2.0 multi-schema S3 support
+            # For connection-based sync, we need to scope the table name with connection identifier
+            base_table_name = table_config.full_name
+            
+            # Check if we're in ad-hoc connection sync mode (pipeline name contains "adhoc_")
+            if pipeline_config.name.startswith("adhoc_") and "_to_" in pipeline_config.name:
+                # Extract source connection from ad-hoc pipeline name: "adhoc_US_DW_RO_SSH_to_redshift_default"
+                parts = pipeline_config.name.split("_to_")
+                if len(parts) >= 2:
+                    source_connection = parts[0].replace("adhoc_", "")
+                    scoped_table_name = f"{source_connection}:{base_table_name}"
+                    logger.info(f"Using scoped table name for v1.2.0 S3 isolation: {scoped_table_name}")
+                else:
+                    scoped_table_name = base_table_name
+            else:
+                # Regular pipeline sync - use scoped table name for v1.2.0 multi-schema consistency
+                source_connection = pipeline_config.source
+                scoped_table_name = f"{source_connection}:{base_table_name}"
+                logger.info(f"Using scoped table name for v1.2.0 pipeline: {scoped_table_name}")
+            
+            table_list = [scoped_table_name]
             
             # Calculate parameters for the backup
             chunk_size = limit if limit else table_config.processing.get('batch_size', 10000)
-            max_total_rows = limit if limit else None
+            max_total_rows = None
             
-            # Execute backup strategy with the same interface as v1.0.0
-            result = backup_strategy.execute(
-                tables=table_list,
-                chunk_size=chunk_size,
-                max_total_rows=max_total_rows
-            )
+            if limit and max_chunks:
+                # limit = chunk size, max_chunks = number of chunks
+                # total rows = limit × max_chunks
+                max_total_rows = limit * max_chunks
+                logger.info(f"Row limits for {base_table_name}: {chunk_size} rows/chunk × {max_chunks} chunks = {max_total_rows} total rows")
+            elif limit and not max_chunks:
+                # limit = total row limit (user expectation for --limit 100)
+                max_total_rows = limit
+                chunk_size = min(limit, table_config.processing.get('batch_size', 10000))
+                logger.info(f"Total row limit for {base_table_name}: {max_total_rows} rows (chunk size: {chunk_size})")
+            elif max_chunks and not limit:
+                # max_chunks specified but no limit - use default chunk size
+                max_total_rows = chunk_size * max_chunks
+                logger.info(f"Row limits for {base_table_name}: {chunk_size} rows/chunk × {max_chunks} chunks = {max_total_rows} total rows")
+            
+            # FIXED: Properly handle backup_only and redshift_only flags (v1.2.0 regression fix)
+            backup_success = True
+            redshift_success = True
+            
+            if not redshift_only:
+                # Stage 1: MySQL → S3 Backup
+                backup_success = backup_strategy.execute(
+                    tables=table_list,
+                    chunk_size=chunk_size,
+                    max_total_rows=max_total_rows
+                )
+            
+            if not backup_only and backup_success:
+                # Stage 2: S3 → Redshift Loading (using v1.0.0 working pattern)
+                try:
+                    from src.core.gemini_redshift_loader import GeminiRedshiftLoader
+                    from src.core.s3_watermark_manager import S3WatermarkManager
+                    
+                    # Use the proven v1.0.0 pattern for Redshift loading
+                    redshift_loader = GeminiRedshiftLoader(config)
+                    watermark_manager = S3WatermarkManager(config)
+                    
+                    # Test Redshift connection first
+                    connection_test = redshift_loader._test_connection()
+                    if not connection_test:
+                        raise Exception("Redshift connection test failed")
+                    
+                    # Load table data to Redshift using the scoped name for S3 file discovery
+                    redshift_success = redshift_loader.load_table_data(scoped_table_name)
+                    
+                except Exception as redshift_error:
+                    logger.error(f"Redshift loading failed for {scoped_table_name}: {redshift_error}")
+                    redshift_success = False
+            
+            # Overall result
+            result = backup_success and redshift_success
             
         except Exception as config_error:
             logger.error(f"Failed to execute table sync with v1.0.0 compatibility: {config_error}")
@@ -956,14 +1022,47 @@ def _create_adhoc_pipeline_config(source: str, target: str, tables: List[str], b
     """Create ad-hoc pipeline configuration for connection-based sync"""
     from src.core.configuration_manager import PipelineConfig, TableConfig
     
-    # Create table configurations
+    # Create table configurations with proper timestamp column detection
     table_configs = {}
     for table_name in tables:
+        # FIXED: Look up table-specific configuration from existing pipelines
+        timestamp_column = "updated_at"  # Default
+        id_column = "id"  # Default
+        
+        # Try to find existing configuration for this table in any pipeline
+        if multi_schema_ctx.config_manager:
+            try:
+                # Check us_dw_pipeline first (maps to US_DW_RO_SSH connection)
+                if source == "US_DW_RO_SSH":
+                    pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config("us_dw_pipeline")
+                    if pipeline_config and table_name in pipeline_config.tables:
+                        table_def = pipeline_config.tables[table_name]
+                        timestamp_column = table_def.cdc_timestamp_column or timestamp_column
+                        id_column = table_def.cdc_id_column or id_column
+                        logger.info(f"Found pipeline config for {table_name}: timestamp={timestamp_column}, id={id_column}")
+                    else:
+                        logger.info(f"No specific config found for {table_name}, using defaults")
+                else:
+                    # For other connections, try to find matching pipeline
+                    for pipeline_name in multi_schema_ctx.config_manager.list_pipelines():
+                        try:
+                            pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config(pipeline_name)
+                            if pipeline_config and pipeline_config.source == source and table_name in pipeline_config.tables:
+                                table_def = pipeline_config.tables[table_name]
+                                timestamp_column = table_def.cdc_timestamp_column or timestamp_column
+                                id_column = table_def.cdc_id_column or id_column
+                                logger.info(f"Found pipeline config in {pipeline_name} for {table_name}: timestamp={timestamp_column}, id={id_column}")
+                                break
+                        except:
+                            continue
+            except Exception as e:
+                logger.warning(f"Failed to lookup pipeline config for {table_name}: {e}")
+        
         table_configs[table_name] = TableConfig(
             full_name=table_name,
             cdc_strategy="hybrid",
-            cdc_timestamp_column="updated_at",
-            cdc_id_column="id",
+            cdc_timestamp_column=timestamp_column,
+            cdc_id_column=id_column,
             processing={'batch_size': batch_size}
         )
     

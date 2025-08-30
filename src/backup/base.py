@@ -20,7 +20,6 @@ from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
 from src.core.s3_manager import S3Manager
 from src.core.s3_watermark_manager import S3WatermarkManager
-from src.config.schemas import get_table_schema, validate_table_data
 from src.utils.validation import validate_data, ValidationResult
 from src.utils.exceptions import (
     BackupError, 
@@ -416,7 +415,7 @@ class BaseBackupStrategy(ABC):
             SQL query string for incremental data
         """
         where_conditions = [
-            f"`update_at` >= '{last_watermark}'",  # Fixed: Use inclusive comparison
+            f"`update_at` > '{last_watermark}'",  # CRITICAL FIX: Use exclusive comparison to prevent duplicate processing
             f"`update_at` <= '{current_timestamp}'"
         ]
         
@@ -496,7 +495,7 @@ class BaseBackupStrategy(ABC):
                             query = f"""
                             SELECT COUNT(*) as row_count 
                             FROM {table_name}
-                            WHERE `update_at` >= '{current_watermark}'
+                            WHERE `update_at` > '{current_watermark}'
                             AND `update_at` <= DATE_ADD('{current_watermark}', INTERVAL {hours} HOUR)
                             """
                         else:
@@ -820,7 +819,7 @@ class BaseBackupStrategy(ABC):
             SQL query string for the time window
         """
         where_conditions = [
-            f"`update_at` > '{start_timestamp}'",
+            f"`update_at` > '{start_timestamp}'",  # Correct: exclusive start comparison
             f"`update_at` <= '{end_timestamp}'"
         ]
         
@@ -857,31 +856,59 @@ class BaseBackupStrategy(ABC):
         
         return query
     
+    def _extract_mysql_table_name(self, table_name: str) -> str:
+        """
+        Extract actual MySQL table name from potentially scoped table name.
+        
+        Handles v1.2.0 multi-schema scoped names:
+        - 'settlement.settle_orders' → 'settlement.settle_orders' (unscoped)
+        - 'US_DW_RO_SSH:settlement.settle_orders' → 'settlement.settle_orders' (connection scoped)
+        - 'us_dw_pipeline:settlement.settle_orders' → 'settlement.settle_orders' (pipeline scoped)
+        
+        Args:
+            table_name: Table name (may include scope prefix)
+            
+        Returns:
+            MySQL table name without scope prefix
+        """
+        if ':' in table_name:
+            # Scoped table name - extract actual table name after colon
+            _, actual_table = table_name.split(':', 1)
+            return actual_table
+        else:
+            # Unscoped table name - return as-is
+            return table_name
+
     def validate_table_exists(self, cursor, table_name: str) -> bool:
         """
         Validate that table exists and has required columns.
         
         Args:
             cursor: Database cursor
-            table_name: Name of the table to validate
+            table_name: Name of the table to validate (may be scoped for v1.2.0)
         
         Returns:
             True if table is valid, False otherwise
         """
         try:
-            self.logger.logger.debug("Validating table structure", table_name=table_name)
+            # Extract actual MySQL table name from potentially scoped name
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            self.logger.logger.debug("Validating table structure", 
+                                   scoped_table_name=table_name,
+                                   mysql_table_name=mysql_table_name)
             
             # Check if table exists
-            cursor.execute(f"SHOW TABLES LIKE '{table_name.split('.')[-1]}'")
+            cursor.execute(f"SHOW TABLES LIKE '{mysql_table_name.split('.')[-1]}'")
             if not cursor.fetchone():
                 self.logger.error_occurred(
-                    Exception(f"Table {table_name} does not exist"), 
+                    Exception(f"Table {mysql_table_name} does not exist"), 
                     "table_validation"
                 )
                 return False
             
             # Check table structure
-            cursor.execute(f"DESCRIBE {table_name}")
+            cursor.execute(f"DESCRIBE {mysql_table_name}")
             describe_results = cursor.fetchall()
             # Handle both dictionary and tuple cursors
             if describe_results and isinstance(describe_results[0], dict):
@@ -891,10 +918,12 @@ class BaseBackupStrategy(ABC):
                 # Tuple cursor - get the first element
                 columns = [row[0] for row in describe_results]
             
-            # Check for required update_at column
-            if 'update_at' not in columns:
+            # Check for required timestamp column (flexible names)
+            timestamp_candidates = ['updated_at', 'update_at', 'last_modified', 'modified_at']
+            has_timestamp_column = any(col in columns for col in timestamp_candidates)
+            if not has_timestamp_column:
                 self.logger.error_occurred(
-                    Exception(f"Table {table_name} missing update_at column"), 
+                    Exception(f"Table {table_name} missing timestamp column (tried: {', '.join(timestamp_candidates)})"), 
                     "table_validation"
                 )
                 return False

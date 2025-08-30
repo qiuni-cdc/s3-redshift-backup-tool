@@ -1269,11 +1269,19 @@ class S3WatermarkManager:
                 metadata={'force_reset': True, 'reset_time': datetime.utcnow().isoformat() + 'Z'}
             )
             
+            # ENHANCED: Clear ALL backup copies to prevent automatic recovery
+            try:
+                logger.info(f"Clearing backup copies for {table_name} to prevent recovery")
+                self._clear_all_watermark_backups(table_name)
+            except Exception as e:
+                logger.warning(f"Failed to clear backup copies: {e}")
+            
             # Force save the fresh watermark (will overwrite everything)
             success = self._save_watermark(fresh_watermark)
             
             if success:
                 logger.warning(f"Force reset completed for {table_name} - watermark set to epoch start")
+                logger.warning(f"All backup copies cleared to prevent automatic recovery")
                 return True
             else:
                 logger.error(f"Force reset failed to save new watermark for {table_name}")
@@ -1366,21 +1374,164 @@ class S3WatermarkManager:
             logger.error(f"Failed to save watermark for {watermark.table_name}: {e}")
             return False
     
+    def _clear_all_watermark_backups(self, table_name: str) -> bool:
+        """
+        Clear all watermark backup copies for a table to prevent automatic recovery.
+        
+        This method removes:
+        - Daily backup copies
+        - Session backup copies  
+        - Historical backups
+        
+        Used during force_reset_watermark to ensure the reset isn't overridden
+        by automatic recovery from backup locations.
+        
+        Args:
+            table_name: Name of the table to clear backups for
+            
+        Returns:
+            True if cleanup succeeded, False otherwise
+        """
+        try:
+            safe_name = table_name.replace('.', '_')
+            deleted_count = 0
+            errors = []
+            
+            # Clear daily backup
+            try:
+                daily_key = self._get_daily_backup_key(table_name)
+                self.s3_client.delete_object(
+                    Bucket=self.bucket_name,
+                    Key=daily_key
+                )
+                deleted_count += 1
+                logger.debug(f"Deleted daily backup: {daily_key}")
+            except self.s3_client.exceptions.NoSuchKey:
+                logger.debug(f"Daily backup not found (already clean): {daily_key}")
+            except Exception as e:
+                errors.append(f"Daily backup deletion failed: {e}")
+                logger.warning(f"Failed to delete daily backup: {e}")
+            
+            # Clear session backups
+            try:
+                sessions_prefix = f"{self.watermark_prefix}backups/sessions/"
+                
+                # List all session backups for this table
+                paginator = self.s3_client.get_paginator('list_objects_v2')
+                page_iterator = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=sessions_prefix
+                )
+                
+                for page in page_iterator:
+                    for obj in page.get('Contents', []):
+                        # Check if this backup is for our table
+                        if safe_name in obj['Key'] and obj['Key'].endswith('.json'):
+                            try:
+                                self.s3_client.delete_object(
+                                    Bucket=self.bucket_name,
+                                    Key=obj['Key']
+                                )
+                                deleted_count += 1
+                                logger.debug(f"Deleted session backup: {obj['Key']}")
+                            except Exception as e:
+                                errors.append(f"Session backup deletion failed {obj['Key']}: {e}")
+                                logger.warning(f"Failed to delete session backup {obj['Key']}: {e}")
+                                
+            except Exception as e:
+                errors.append(f"Session backup listing failed: {e}")
+                logger.warning(f"Failed to list session backups: {e}")
+            
+            # Clear historical backups
+            try:
+                history_prefix = f"{self.history_prefix}"
+                
+                # List all historical backups for this table
+                paginator = self.s3_client.get_paginator('list_objects_v2')
+                page_iterator = paginator.paginate(
+                    Bucket=self.bucket_name,
+                    Prefix=history_prefix
+                )
+                
+                for page in page_iterator:
+                    for obj in page.get('Contents', []):
+                        # Check if this backup is for our table
+                        if safe_name in obj['Key'] and obj['Key'].endswith('.json'):
+                            try:
+                                self.s3_client.delete_object(
+                                    Bucket=self.bucket_name,
+                                    Key=obj['Key']
+                                )
+                                deleted_count += 1
+                                logger.debug(f"Deleted historical backup: {obj['Key']}")
+                            except Exception as e:
+                                errors.append(f"Historical backup deletion failed {obj['Key']}: {e}")
+                                logger.warning(f"Failed to delete historical backup {obj['Key']}: {e}")
+                                
+            except Exception as e:
+                errors.append(f"Historical backup listing failed: {e}")
+                logger.warning(f"Failed to list historical backups: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"Cleared {deleted_count} watermark backup copies for {table_name}")
+            else:
+                logger.debug(f"No watermark backup copies found for {table_name}")
+            
+            if errors:
+                logger.warning(f"Backup cleanup completed with {len(errors)} errors for {table_name}")
+                return False
+            else:
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to clear watermark backups for {table_name}: {e}")
+            return False
+    
     def _get_table_watermark_key(self, table_name: str) -> str:
-        """Generate S3 key for table watermark"""
-        # Convert settlement.settlement_claim_detail -> settlement_settlement_claim_detail.json
-        safe_name = table_name.replace('.', '_')
+        """Generate S3 key for table watermark with v1.2.0 multi-schema support"""
+        # FIXED: Use consistent scoped table name cleaning (same as S3Manager/RedshiftLoader)
+        safe_name = self._clean_table_name_with_scope(table_name)
         return f"{self.tables_prefix}{safe_name}.json"
     
+    def _clean_table_name_with_scope(self, table_name: str) -> str:
+        """
+        Clean table name for watermark keys with v1.2.0 multi-schema support.
+        
+        Handles both scoped and unscoped table names:
+        - 'settlement.settle_orders' → 'settlement_settle_orders'
+        - 'US_DW_RO_SSH:settlement.settle_orders' → 'us_dw_ro_ssh_settlement_settle_orders'
+        - 'us_dw_pipeline:settlement.settle_orders' → 'us_dw_pipeline_settlement_settle_orders'
+        
+        Args:
+            table_name: Table name (may include scope prefix)
+            
+        Returns:
+            Cleaned table name suitable for watermark keys
+        """
+        # Handle scoped table names (v1.2.0 multi-schema)
+        if ':' in table_name:
+            scope, actual_table = table_name.split(':', 1)
+            # Clean scope: lowercase, replace special chars with underscores
+            clean_scope = scope.lower().replace('-', '_').replace('.', '_')
+            # Clean table: replace dots with underscores
+            clean_table = actual_table.replace('.', '_').replace('-', '_')
+            # Combine: scope_table_name
+            return f"{clean_scope}_{clean_table}"
+        else:
+            # Unscoped table (v1.0.0 compatibility)
+            return table_name.replace('.', '_').replace('-', '_')
+    
     def _get_daily_backup_key(self, table_name: str) -> str:
-        """Generate S3 key for daily backup watermark"""
-        safe_name = table_name.replace('.', '_')
+        """Generate S3 key for daily backup watermark with v1.2.0 multi-schema support"""
+        # FIXED: Use consistent scoped table name cleaning
+        safe_name = self._clean_table_name_with_scope(table_name)
         date_str = datetime.utcnow().strftime("%Y%m%d")
         return f"{self.watermark_prefix}backups/daily/{safe_name}_{date_str}.json"
     
     def _get_session_backup_key(self, table_name: str, session_id: str) -> str:
-        """Generate S3 key for session backup watermark"""
-        safe_name = table_name.replace('.', '_')
+        """Generate S3 key for session backup watermark with v1.2.0 multi-schema support"""
+        # FIXED: Use consistent scoped table name cleaning
+        safe_name = self._clean_table_name_with_scope(table_name)
         return f"{self.watermark_prefix}backups/sessions/{session_id}/{safe_name}.json"
     
     def _save_with_retry(self, s3_key: str, watermark_json: str, watermark: S3TableWatermark, location: str, max_retries: int = 3) -> bool:
@@ -1514,12 +1665,14 @@ class S3WatermarkManager:
                 table_name=table_name,
                 last_mysql_data_timestamp=data_timestamp.isoformat() + 'Z',
                 last_mysql_extraction_time=None,  # Explicitly None for manual watermarks
+                last_processed_id=0,  # CRITICAL FIX: Reset processed ID to 0
                 mysql_rows_extracted=0,
                 mysql_status='success',
                 redshift_rows_loaded=0, 
                 redshift_status='pending',
                 backup_strategy='manual_cli',
                 s3_file_count=0,
+                processed_s3_files=[],  # CRITICAL FIX: Reset processed files list
                 created_at=datetime.utcnow().isoformat() + 'Z',
                 updated_at=datetime.utcnow().isoformat() + 'Z',
                 metadata={'manual_watermark': True}
