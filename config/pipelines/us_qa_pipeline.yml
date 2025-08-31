@@ -1,0 +1,34 @@
+# US QA Pipeline Configuration
+# Uses US_QA_SSH connection for QA environment data sync
+
+pipeline:
+  name: "us_qa_to_dw"
+  description: "US QA MySQL (US-WEST-2) to Redshift Data Warehouse"
+  source: "US_QA_SSH"           # SSH tunnel: 35.82.216.244
+  target: "redshift_default"    # QA Redshift cluster
+  version: "1.1.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 25000           # Smaller batches for QA
+    timeout_minutes: 120
+    max_parallel_tables: 2
+  
+  s3:
+    isolation_prefix: "us_qa/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: false  # Less strict for QA
+      max_null_percentage: 20.0
+
+# Tables for QA testing
+tables:
+  settlement_normal_delivery_detail:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "updated_at"
+    description: "QA delivery settlement data for testing"

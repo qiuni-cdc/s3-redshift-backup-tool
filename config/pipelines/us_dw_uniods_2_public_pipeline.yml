@@ -1,0 +1,30 @@
+# US Data Warehouse Uniods to Redshift Public Pipeline
+# Clear naming: us_dw_uniods_2_public_pipeline
+
+pipeline:
+  name: "us_dw_uniods_2_public"
+  description: "US Data Warehouse Uniods DB → Redshift Public Schema"
+  source: "US_DW_UNIODS_SSH"       # uniods database
+  target: "redshift_default"       # public schema
+  version: "1.2.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 50000
+    timeout_minutes: 300
+    max_parallel_tables: 4
+  
+  s3:
+    isolation_prefix: "us_dw_uniods/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 3.0
+
+# Uniods database tables (add as needed)
+tables: {}

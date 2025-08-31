@@ -84,6 +84,94 @@ s3://your-bucket/watermarks/
 - **Purpose**: Prevents duplicate loading of the same S3 files
 - **Impact**: Eliminates duplicate data in incremental syncs
 
+### **Multi-Schema Watermark Isolation (v1.2.0+)**
+
+**Enhanced Table Naming for Multi-Database Support:**
+
+The watermark system now supports connection-scoped table names to enable multi-schema operations while maintaining complete watermark isolation.
+
+**Connection-Scoped Table Names:**
+```
+Format: CONNECTION_NAME:schema.table
+Examples:
+- US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool
+- US_DW_RO_SSH:settlement.settlement_claim_detail
+- UNIODS_CONN:uniods.customer_orders
+```
+
+**S3 Watermark File Structure (Multi-Schema):**
+```
+s3://your-bucket/watermarks/
+├── US_DW_UNIDW_SSH_unidw_dw_parcel_detail_tool.json
+├── US_DW_RO_SSH_settlement_settlement_claim_detail.json
+├── UNIODS_CONN_uniods_customer_orders.json
+├── settlement.partner_info.json  # Legacy unscoped format (still supported)
+└── ...
+```
+
+**Multi-Schema Watermark JSON Structure:**
+```json
+{
+  "table_name": "US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool",
+  "connection_name": "US_DW_UNIDW_SSH",
+  "schema_name": "unidw", 
+  "table_only": "dw_parcel_detail_tool",
+  "last_mysql_extraction_time": "2025-08-31T10:30:00.123456Z",
+  "last_mysql_data_timestamp": "2025-08-31T09:15:22Z",
+  "mysql_rows_extracted": 385000000,
+  "mysql_status": "success",
+  "backup_strategy": "sequential",
+  "cdc_strategy": "id_only",
+  "metadata": {
+    "pipeline_config": "us_dw_unidw_2_public_pipeline",
+    "source_database": "unidw",
+    "target_database": "redshift_public"
+  }
+}
+```
+
+**Watermark Isolation Benefits:**
+
+1. **Connection Isolation**: Tables with same name from different databases have separate watermarks
+   ```
+   PROD_DB:sales.orders → independent watermark from TEST_DB:sales.orders  
+   ```
+
+2. **Schema Isolation**: Same table name in different schemas tracked separately
+   ```
+   settlement.customer_info → independent from reporting.customer_info
+   ```
+
+3. **Pipeline Safety**: Multi-pipeline environments prevent watermark conflicts
+   ```
+   Pipeline A: source_db → target_warehouse
+   Pipeline B: source_db → target_analytics  
+   Each maintains separate watermark tracking
+   ```
+
+4. **CDC Strategy Isolation**: Different CDC strategies can coexist
+   ```
+   US_DW_UNIDW_SSH:unidw.table1 (id_only strategy)
+   US_DW_RO_SSH:settlement.table1 (timestamp_only strategy)
+   ```
+
+**Backward Compatibility:**
+
+Legacy unscoped table names continue to work:
+- `settlement.partner_info` → uses default connection
+- `customer_orders` → uses default schema and connection
+- Full backward compatibility with v1.0.0 workflows
+
+**CLI Commands with Multi-Schema:**
+```bash
+# Multi-schema watermark operations
+python -m src.cli.main watermark get -t "US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool"
+python -m src.cli.main watermark set -t "US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool" --timestamp "2025-08-31 00:00:00"
+
+# Legacy format still works
+python -m src.cli.main watermark get -t settlement.partner_info
+```
+
 ---
 
 ## 🛡️ **Data Loss Prevention Mechanisms**

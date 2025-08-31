@@ -1,0 +1,45 @@
+# US Data Warehouse Unidw to Redshift Public Pipeline
+# Clear naming: us_dw_unidw_2_public_pipeline
+
+pipeline:
+  name: "us_dw_unidw_2_public"
+  description: "US Data Warehouse Unidw DB → Redshift Public Schema"
+  source: "US_DW_UNIDW_SSH"        # unidw database
+  target: "redshift_default"       # public schema
+  version: "1.2.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 50000
+    timeout_minutes: 300
+    max_parallel_tables: 4
+  
+  s3:
+    isolation_prefix: "us_dw_unidw/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 3.0
+
+# Unidw database tables
+tables:
+  unidw.dw_parcel_detail_tool:
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"
+    description: "Parcel detail tool data with ID-only strategy"
+    processing:
+      batch_size: 10000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+
+  # Add more unidw tables here as needed
+  # other_unidw_table:
+  #   cdc_strategy: "timestamp_only" 
+  #   cdc_timestamp_column: "updated_at"
+  #   description: "Another unidw table"

@@ -348,6 +348,15 @@ class BaseBackupStrategy(ABC):
             logger=self.logger.logger  # Pass logger to prevent circular imports
         )
         
+        # Initialize connection registry for multi-schema support
+        from src.core.connection_registry import ConnectionRegistry
+        try:
+            self.connection_registry = ConnectionRegistry()
+            self.logger.logger.info("Multi-schema connection registry initialized")
+        except Exception as e:
+            self.logger.logger.warning(f"Connection registry initialization failed, using v1.0.0 compatibility mode: {e}")
+            self.connection_registry = None
+        
         # Initialize components with S3 client
         self.s3_client = None
         self._initialize_components()
@@ -378,7 +387,7 @@ class BaseBackupStrategy(ABC):
             raise
     
     @abstractmethod
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
         """
         Execute backup strategy for given tables.
         
@@ -387,6 +396,7 @@ class BaseBackupStrategy(ABC):
             chunk_size: Optional row limit per chunk (overrides config)
             max_total_rows: Optional maximum total rows to process
             limit: Deprecated - use chunk_size instead (for backward compatibility)
+            source_connection: Optional connection name to use instead of default
         
         Returns:
             True if backup successful, False otherwise
@@ -1231,18 +1241,39 @@ class BaseBackupStrategy(ABC):
             return result
     
     @contextmanager
-    def database_session(self):
-        """Context manager for database operations"""
-        try:
-            with self.connection_manager.ssh_tunnel() as local_port:
-                with self.connection_manager.database_connection(local_port) as db_conn:
-                    self.logger.connection_established("Database", host="localhost")
+    def database_session(self, connection_name: Optional[str] = None):
+        """
+        Context manager for database operations with multi-schema support.
+        
+        Args:
+            connection_name: Optional connection name for multi-schema support.
+                           If None, uses v1.0.0 compatibility mode.
+        """
+        if connection_name and self.connection_registry:
+            # Use connection registry for multi-schema support
+            try:
+                with self.connection_registry.get_mysql_connection(connection_name) as db_conn:
+                    config = self.connection_registry.get_connection(connection_name)
+                    self.logger.connection_established("Database", host=config.host, database=config.database)
                     yield db_conn
-        except Exception as e:
-            self.logger.error_occurred(e, "database_session")
-            raise
-        finally:
-            self.logger.connection_closed("Database")
+            except Exception as e:
+                self.logger.error_occurred(e, f"database_session({connection_name})")
+                raise
+            finally:
+                if connection_name:
+                    self.logger.connection_closed(f"Database({connection_name})")
+        else:
+            # Fall back to v1.0.0 compatibility mode
+            try:
+                with self.connection_manager.ssh_tunnel() as local_port:
+                    with self.connection_manager.database_connection(local_port) as db_conn:
+                        self.logger.connection_established("Database", host="localhost")
+                        yield db_conn
+            except Exception as e:
+                self.logger.error_occurred(e, "database_session")
+                raise
+            finally:
+                self.logger.connection_closed("Database")
     
     def calculate_time_chunks(
         self, 

@@ -843,6 +843,14 @@ class ConnectionRegistry:
                     pass
             raise ConnectionError(f"SSH tunnel creation failed for {name}: {e}")
     
+    def get_connection(self, connection_name: str) -> ConnectionConfig:
+        """Get connection configuration by name"""
+        if connection_name not in self.connections:
+            available = list(self.connections.keys())
+            raise ValidationError(f"Unknown connection: {connection_name}. Available: {available}")
+        
+        return self.connections[connection_name]
+    
     def get_connection_info(self, connection_name: str) -> Dict[str, Any]:
         """Get connection information without sensitive data"""
         if connection_name not in self.connections:

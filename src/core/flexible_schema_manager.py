@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from src.core.connections import ConnectionManager
+from src.core.column_mapper import ColumnMapper
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,6 +39,9 @@ class FlexibleSchemaManager:
         
         # Load custom Redshift optimization configuration
         self._redshift_optimizations = self._load_redshift_optimizations()
+        
+        # Initialize column mapper
+        self.column_mapper = ColumnMapper()
     
     def get_table_schema(self, table_name: str, force_refresh: bool = False) -> Tuple[pa.Schema, str]:
         """
@@ -262,6 +266,10 @@ class FlexibleSchemaManager:
         primary_key_candidates = []
         sort_key_candidates = []
         
+        # Collect original column names for mapping
+        original_columns = []
+        column_mapping = {}
+        
         for col in schema_info:
             col_name = col['COLUMN_NAME']
             data_type = col['DATA_TYPE'].lower()
@@ -272,6 +280,13 @@ class FlexibleSchemaManager:
             scale = col['NUMERIC_SCALE']
             extra = col.get('EXTRA', '').lower()
             
+            # Track original column name
+            original_columns.append(col_name)
+            
+            # Sanitize column name for Redshift (can't start with number)
+            safe_col_name = self._sanitize_column_name_for_redshift(col_name)
+            column_mapping[col_name] = safe_col_name
+            
             # Get Redshift type
             rs_type = self._map_mysql_to_redshift(
                 data_type, column_type, max_length, precision, scale
@@ -280,14 +295,14 @@ class FlexibleSchemaManager:
             # Add nullable constraint
             nullable_clause = "" if is_nullable else " NOT NULL"
             
-            column_ddls.append(f"    {col_name} {rs_type}{nullable_clause}")
+            column_ddls.append(f"    {safe_col_name} {rs_type}{nullable_clause}")
             
-            # Identify key candidates for optimization
+            # Identify key candidates for optimization (use sanitized names)
             if 'auto_increment' in extra or col_name.lower() in ['id', 'pk']:
-                primary_key_candidates.append(col_name)
+                primary_key_candidates.append(safe_col_name)
             
             if col_name.lower() in ['create_at', 'update_at', 'created_at', 'updated_at']:
-                sort_key_candidates.append(col_name)
+                sort_key_candidates.append(safe_col_name)
         
         ddl_lines.append(",\n".join(column_ddls))
         ddl_lines.append(")")
@@ -307,11 +322,12 @@ class FlexibleSchemaManager:
             # Apply custom DISTKEY
             if 'distkey' in custom_config:
                 distkey_column = custom_config['distkey']
-                # Verify the column exists in the table schema
+                # Verify the column exists in the table schema and sanitize name
                 column_exists = any(col['COLUMN_NAME'] == distkey_column for col in schema_info)
                 if column_exists:
-                    optimization_clauses.append(f"DISTKEY({distkey_column})")
-                    logger.info(f"Applied custom DISTKEY: {distkey_column}")
+                    safe_distkey = self._sanitize_column_name_for_redshift(distkey_column)
+                    optimization_clauses.append(f"DISTKEY({safe_distkey})")
+                    logger.info(f"Applied custom DISTKEY: {safe_distkey}")
                 else:
                     logger.warning(f"Custom DISTKEY column '{distkey_column}' not found in table schema, using default")
             
@@ -321,11 +337,12 @@ class FlexibleSchemaManager:
                 if isinstance(sortkey_columns, str):
                     sortkey_columns = [sortkey_columns]
                 
-                # Verify all sortkey columns exist
+                # Verify all sortkey columns exist and sanitize
                 valid_sortkeys = []
                 for sortkey_col in sortkey_columns[:2]:  # Max 2 sort keys
                     if any(col['COLUMN_NAME'] == sortkey_col for col in schema_info):
-                        valid_sortkeys.append(sortkey_col)
+                        safe_sortkey = self._sanitize_column_name_for_redshift(sortkey_col)
+                        valid_sortkeys.append(safe_sortkey)
                     else:
                         logger.warning(f"Custom SORTKEY column '{sortkey_col}' not found in table schema")
                 
@@ -345,7 +362,8 @@ class FlexibleSchemaManager:
             if 'settle_orders' in clean_table_name.lower():
                 for col in schema_info:
                     if col['COLUMN_NAME'].lower() == 'tracking_number':
-                        optimization_clauses.append(f"DISTKEY({col['COLUMN_NAME']})")
+                        safe_col_name = self._sanitize_column_name_for_redshift(col['COLUMN_NAME'])
+                        optimization_clauses.append(f"DISTKEY({safe_col_name})")
                         dist_key_set = True
                         break
             
@@ -383,6 +401,11 @@ class FlexibleSchemaManager:
         
         ddl_lines.append(";")
         
+        # Save column mapping if any columns were renamed
+        if any(orig != mapped for orig, mapped in column_mapping.items()):
+            self.column_mapper.generate_mapping(table_name, original_columns)
+            logger.info(f"Saved column mappings for {table_name}")
+        
         return "\n".join(ddl_lines)
     
     def _load_redshift_optimizations(self) -> Dict[str, Dict]:
@@ -411,7 +434,9 @@ class FlexibleSchemaManager:
         
         if data_type in ['varchar', 'char']:
             if max_length and max_length <= 65535:
-                return f"VARCHAR({max_length})"
+                # Add safety buffer for VARCHAR columns to handle longer actual data
+                safe_length = min(max_length * 2, 65535) if max_length < 32768 else 65535
+                return f"VARCHAR({safe_length})"
             return "VARCHAR(65535)"
         
         elif data_type in ['text', 'longtext', 'mediumtext', 'tinytext']:
@@ -726,6 +751,9 @@ class FlexibleSchemaManager:
                 column_name = field.name
                 pyarrow_type = field.type
                 
+                # Sanitize column name for Redshift
+                safe_column_name = self._sanitize_column_name_for_redshift(column_name)
+                
                 # Map PyArrow types to Redshift types
                 if pa.types.is_string(pyarrow_type):
                     redshift_type = "VARCHAR(65535)"
@@ -746,7 +774,7 @@ class FlexibleSchemaManager:
                     # Default fallback
                     redshift_type = "VARCHAR(65535)"
                 
-                columns.append(f"    {column_name} {redshift_type}")
+                columns.append(f"    {safe_column_name} {redshift_type}")
             
             ddl = f"""
 CREATE TABLE IF NOT EXISTS {clean_name} (
@@ -759,3 +787,20 @@ CREATE TABLE IF NOT EXISTS {clean_name} (
         except Exception as e:
             logger.error(f"Failed to generate Redshift DDL from PyArrow schema: {e}")
             raise
+    
+    def _sanitize_column_name_for_redshift(self, column_name: str) -> str:
+        """Sanitize column names for Redshift compatibility
+        
+        Redshift column names:
+        - Cannot start with a number
+        - Can contain letters, numbers, underscores
+        - Must start with a letter or underscore
+        """
+        # If column starts with a number, prefix with 'col_'
+        if column_name and column_name[0].isdigit():
+            sanitized = f"col_{column_name}"
+            logger.warning(f"Column name '{column_name}' starts with number, renamed to '{sanitized}' for Redshift")
+            return sanitized
+        
+        # Return original name if it's already valid
+        return column_name

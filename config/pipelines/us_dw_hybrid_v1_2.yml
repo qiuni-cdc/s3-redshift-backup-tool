@@ -1,0 +1,67 @@
+# US Data Warehouse Hybrid CDC Pipeline (v1.2.0)
+# Specifically configured for settlement.settle_order with hybrid CDC strategy
+
+pipeline:
+  name: "us_dw_hybrid_cdc_v1.2"
+  description: "US Data Warehouse settlement.settle_order with hybrid CDC (timestamp + ID)"
+  source: "US_DW_RO_SSH"           # US Data Warehouse (us-west-2) with SSH tunnel
+  target: "redshift_default"       # QA Redshift cluster
+  version: "1.2.0"                 # v1.2.0 CDC Intelligence Engine
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 50000              # Optimal for hybrid CDC
+    timeout_minutes: 240           # 4 hours for large table processing
+    max_parallel_tables: 1         # Sequential for controlled processing
+  
+  s3:
+    isolation_prefix: "us_dw_hybrid/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  # v1.2.0 CDC Intelligence settings
+  cdc_settings:
+    default_strategy: "hybrid"
+    enable_watermark_validation: true
+    enable_schema_validation: true
+    fallback_to_legacy: true       # Maintain v1.0.0/v1.1.0 compatibility
+
+# Table configuration for settlement.settle_orders
+tables:
+  settle_orders:
+    # v1.2.0 Hybrid CDC Configuration
+    cdc_strategy: "hybrid"                    # Use timestamp + ID for robust CDC
+    cdc_timestamp_column: "updated_at"        # Primary timestamp column
+    cdc_id_column: "id"                       # Primary ID column for ordering
+    cdc_ordering: ["updated_at", "id"]        # Explicit ordering for consistency
+    
+    description: "Settlement orders data with hybrid CDC (timestamp + ID)"
+    
+    # Processing optimization for hybrid strategy
+    processing:
+      batch_size: 75000                       # Larger batches for efficiency
+      enable_parallel_processing: false      # Sequential for data integrity
+      
+    # Enhanced validation for production data
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 2.0               # Allow some nulls in settlement data
+      
+    # Watermark management
+    watermark_settings:
+      enable_backup: true                     # Backup watermarks before changes
+      validation_mode: "strict"              # Strict watermark validation
+      recovery_strategy: "manual"            # Manual recovery for production data
+      
+    # Performance settings for settle_order
+    performance:
+      memory_limit_mb: 4096                   # 4GB memory limit
+      connection_timeout: 300                 # 5 minute connection timeout
+      query_timeout: 1800                     # 30 minute query timeout
+      
+    # Monitoring and alerting
+    monitoring:
+      enable_progress_tracking: true
+      enable_performance_metrics: true
+      alert_on_failures: true

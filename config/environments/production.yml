@@ -1,0 +1,8 @@
+pipeline:
+  default_table_config:
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+  processing:
+    max_parallel_tables: 5
+    timeout_minutes: 240

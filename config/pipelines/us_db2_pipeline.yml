@@ -1,0 +1,40 @@
+# US DB2 Pipeline Configuration
+# Uses US_DB2_RO_SSH connection for DB2 data sync
+
+pipeline:
+  name: "us_db2_to_dw"
+  description: "US DB2 MySQL (US-WEST-2) to Redshift Data Warehouse"
+  source: "US_DB2_RO_SSH"        # SSH tunnel: 35.83.114.196
+  target: "redshift_default"     # QA Redshift cluster
+  version: "1.1.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 50000
+    timeout_minutes: 240
+    max_parallel_tables: 3
+  
+  s3:
+    isolation_prefix: "us_db2/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+
+# Tables can be registered dynamically or specified here
+tables:
+  settlement_normal_delivery_detail:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "updated_at"
+    description: "DB2 delivery settlement data"
+    
+  # Example: Additional table configuration
+  # other_table_name:
+  #   cdc_strategy: "timestamp_only"
+  #   cdc_timestamp_column: "created_at"
+  #   description: "Another table from DB2"

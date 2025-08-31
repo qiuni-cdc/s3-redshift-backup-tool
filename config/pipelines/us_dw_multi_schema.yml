@@ -1,0 +1,67 @@
+# US Data Warehouse Multi-Schema Pipeline Configuration
+# Supports multiple schema connections (settlement, unidw, uniods)
+
+pipeline:
+  name: "us_dw_multi_schema"
+  description: "US Data Warehouse Multi-Schema MySQL to Redshift (settlement/unidw/uniods)"
+  source: "US_DW_UNIDW_SSH"       # Default source for this pipeline
+  target: "redshift_default"      # QA Redshift cluster
+  version: "1.2.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 50000             # Standard batch size
+    timeout_minutes: 300          # 5 hours for large tables
+    max_parallel_tables: 4
+  
+  s3:
+    isolation_prefix: "us_dw_multi/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 3.0
+
+# Multi-schema table configurations
+# Format: connection:table_name for scoped tables
+tables:
+  
+  # Settlement schema tables (US_DW_RO_SSH connection)
+  settlement.settle_orders:
+    connection: "US_DW_RO_SSH"
+    cdc_strategy: "hybrid"
+    cdc_timestamp_column: "created_at"
+    cdc_id_column: "id"
+    description: "Settlement orders with hybrid CDC"
+    processing:
+      batch_size: 50000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 2.0
+        
+  # Unidw schema tables (US_DW_UNIDW_SSH connection)
+  dw_parcel_detail_tool:
+    connection: "US_DW_UNIDW_SSH"
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"
+    description: "Parcel detail tool data with ID-only strategy"
+    processing:
+      batch_size: 10000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+        
+  # Alternative format - full scoped table name
+  US_DW_UNIDW_SSH:dw_parcel_detail_tool:
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"
+    description: "Parcel detail tool data with ID-only strategy (scoped format)"
+    processing:
+      batch_size: 10000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0

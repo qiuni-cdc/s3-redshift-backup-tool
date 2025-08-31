@@ -1,0 +1,41 @@
+# Canada Data Warehouse Pipeline Configuration
+# Uses CA_DW_RO_SSH connection for Canadian data warehouse sync
+
+pipeline:
+  name: "ca_dw_to_redshift"
+  description: "Canada Data Warehouse MySQL (US-EAST-1) to Redshift Data Warehouse"
+  source: "CA_DW_RO_SSH"          # SSH tunnel: 44.209.128.227 (unidw schema)
+  target: "redshift_default"      # QA Redshift cluster
+  version: "1.1.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 75000             # Large batches for data warehouse operations
+    timeout_minutes: 300          # 5 hours for large DW tables
+    max_parallel_tables: 4
+  
+  s3:
+    isolation_prefix: "ca_dw/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 3.0    # Strict validation for DW data
+      
+  # Canadian data warehouse specific settings
+  ca_dw_settings:
+    enable_large_table_optimization: true
+    memory_management: "aggressive"
+    connection_pool_size: "large"
+    data_region: "canada"
+
+# Canadian data warehouse tables - can be registered dynamically or specified here
+tables:
+  settlement.settlement_normal_delivery_detail:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "updated_at"
+    description: "Canadian settlement delivery data"

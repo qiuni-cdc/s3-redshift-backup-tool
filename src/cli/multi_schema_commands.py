@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import sys
 import os
+from dataclasses import asdict
 
 from src.core.connection_registry import ConnectionRegistry
 from src.core.configuration_manager import ConfigurationManager
@@ -909,6 +910,11 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             else:
                 backup_strategy = SequentialBackupStrategy(config)
             
+            # Pass pipeline configuration to backup strategy for CDC integration
+            backup_strategy.pipeline_config = {
+                'tables': {name: asdict(cfg) for name, cfg in pipeline_config.tables.items()}
+            }
+            
             # Configure strategy with pipeline settings
             if hasattr(backup_strategy, 'set_batch_size'):
                 batch_size = table_config.processing.get('batch_size', 10000)
@@ -963,11 +969,13 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             redshift_success = True
             
             if not redshift_only:
-                # Stage 1: MySQL → S3 Backup
+                # Stage 1: MySQL → S3 Backup with multi-schema support
+                source_connection = pipeline_config.source
                 backup_success = backup_strategy.execute(
                     tables=table_list,
                     chunk_size=chunk_size,
-                    max_total_rows=max_total_rows
+                    max_total_rows=max_total_rows,
+                    source_connection=source_connection
                 )
             
             if not backup_only and backup_success:

@@ -1,0 +1,83 @@
+# US Data Warehouse Pipeline Configuration
+# Uses US_DW_RO_SSH connection for data warehouse sync
+
+pipeline:
+  name: "us_dw_to_redshift"
+  description: "US Data Warehouse MySQL (US-EAST-1) to Redshift Data Warehouse"
+  source: "US_DW_RO_SSH"          # SSH tunnel: 44.209.128.227 (same as mysql_default)
+  target: "redshift_default"      # QA Redshift cluster
+  version: "1.1.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 75000             # Larger batches for data warehouse operations
+    timeout_minutes: 300          # 5 hours for large DW tables
+    max_parallel_tables: 4
+  
+  s3:
+    isolation_prefix: "us_dw/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 3.0    # Stricter validation for DW data
+      
+  # Data warehouse specific settings
+  dw_settings:
+    enable_large_table_optimization: true
+    memory_management: "aggressive"
+    connection_pool_size: "large"
+
+# Data warehouse tables - can be registered dynamically or specified here
+tables:
+
+  settlement.settle_orders:
+    cdc_strategy: "hybrid"
+    cdc_timestamp_column: "created_at"
+    cdc_id_column: "id"
+    description: "Settlement orders with hybrid CDC (timestamp + ID)"
+    processing:
+      batch_size: 50000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 2.0
+
+  unidw.dw_parcel_detail_tool:
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"
+    description: "Parcel detail tool data with ID-only strategy"
+    processing:
+      batch_size: 10000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+
+  US_DW_UNIDW_SSH:dw_parcel_detail_tool:
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"
+    description: "Parcel detail tool data with ID-only strategy (connection-scoped)"
+    processing:
+      batch_size: 10000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+      
+  # Example: Additional DW tables
+  # dw_summary_table:
+  #   cdc_strategy: "timestamp_only"
+  #   cdc_timestamp_column: "last_updated"
+  #   description: "Data warehouse summary aggregations"
+  #   processing:
+  #     batch_size: 50000
+  #     
+  # dw_fact_table:
+  #   cdc_strategy: "timestamp_only"
+  #   cdc_timestamp_column: "created_at"
+  #   description: "Data warehouse fact table"
+  #   validation:
+  #     enable_data_quality_checks: true
+  #     max_null_percentage: 1.0   # Very strict for fact tables

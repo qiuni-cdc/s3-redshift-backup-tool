@@ -358,6 +358,90 @@ python -m src.cli.main watermark get -t your_table_name
 
 **Status**: ✅ **RESOLVED** - All fixes tested and validated. Future backups protected against double-counting.
 
+### **P0 VARCHAR LENGTH & COLUMN NAMING BUG (RESOLVED)**
+
+**Issue Discovered (August 31, 2025)**: MySQL VARCHAR data exceeding declared lengths and Redshift-incompatible column names causing production loading failures
+- **Symptoms**: `Redshift Spectrum Scan Error` with VARCHAR length violations, "Column name is invalid" for columns starting with numbers
+- **Root Cause**: MySQL utf8mb4 charset allows data exceeding VARCHAR declarations; Redshift strictly enforces length limits and column naming rules
+- **Impact**: Production pipeline failures, data loading errors, sync interruptions
+
+#### **Technical Root Cause**
+```sql
+-- PROBLEMATIC MYSQL TABLE:
+CREATE TABLE dw_parcel_detail_tool (
+    id BIGINT,
+    190_time VARCHAR(255),  -- ❌ Column starts with number (Redshift invalid)
+    start_address VARCHAR(255)  -- ❌ Contains 263 characters (exceeds declared 255)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- MySQL: Lenient enforcement, allows 263 chars in VARCHAR(255)
+-- Redshift: Strict enforcement, rejects > 255 chars and numeric-start columns
+```
+
+#### **Comprehensive Fix Implemented**
+1. **VARCHAR Length Safety Buffer** (`src/core/flexible_schema_manager.py:437-439`)
+   ```python
+   # Automatic doubling of VARCHAR sizes for safety
+   safe_length = min(max_length * 2, 65535) if max_length < 32768 else 65535
+   return f"VARCHAR({safe_length})"
+   # MySQL: VARCHAR(255) → Redshift: VARCHAR(510)
+   ```
+
+2. **Column Name Sanitization** (`src/core/flexible_schema_manager.py:791-803`)
+   ```python
+   def _sanitize_column_name_for_redshift(self, column_name: str) -> str:
+       if column_name and column_name[0].isdigit():
+           sanitized = f"col_{column_name}"
+           return sanitized
+   # MySQL: 190_time → Redshift: col_190_time
+   ```
+
+3. **Persistent Column Mapping System** (`src/core/column_mapper.py`)
+   - Automatic detection and sanitization during schema discovery
+   - Persistent storage in `column_mappings/` directory for reuse
+   - CLI commands for mapping management and verification
+
+#### **Critical Lessons Learned**
+
+**🔴 CHARSET & LENGTH ENFORCEMENT PRINCIPLES**
+1. **MySQL Leniency**: utf8mb4 charset with lenient sql_mode can store data exceeding VARCHAR declarations
+2. **Redshift Strictness**: Strict enforcement of declared column lengths and naming rules
+3. **Safety Buffers**: Production systems need safety margins for data length variations
+4. **Character vs Byte Awareness**: UTF-8 multi-byte characters require careful length calculations
+
+**🔴 PRODUCTION COMPATIBILITY METHODOLOGY**
+1. **Proactive Schema Analysis**: Check for numeric-start columns and length enforcement differences
+2. **Safety Multipliers**: Double VARCHAR sizes to handle real-world data variations
+3. **Persistent Mappings**: Remember column transformations across sync operations
+4. **Transparent Handling**: Users should not need to manually handle compatibility issues
+
+**🔴 PREVENTION MEASURES**
+- **Automatic Schema Sanitization**: All schema discovery includes compatibility fixes
+- **Persistent Column Mappings**: System remembers transformations for consistent loading
+- **CLI Management Tools**: Commands to view, verify, and manage column mappings
+- **Production Testing**: Verify with actual data, not just schema definitions
+
+#### **User Recovery Process**
+```bash
+# All fixes are automatic - no user action required
+# To verify column mappings were applied:
+python -m src.cli.main column-mappings show -t your_table_name
+
+# To check VARCHAR length doubling:
+python -m src.cli.main sync -t your_table --dry-run | grep VARCHAR
+
+# Expected: VARCHAR(255) → VARCHAR(510) transformations
+```
+
+**Real-World Resolution:**
+```
+Problem: unidw.dw_parcel_detail_tool with 190_time column and VARCHAR(255) containing 263 characters
+Solution: Automatic column rename (col_190_time) and length doubling (VARCHAR(510))
+Result: ✅ Sync successful, 385M+ rows processed without user intervention
+```
+
+**Status**: ✅ **RESOLVED** - All schema compatibility issues resolved automatically. Production pipelines handle VARCHAR length and column naming transparently.
+
 ---
 
 ## 🚀 **DEVELOPMENT ROADMAP - v2.0 Enterprise Data Platform**

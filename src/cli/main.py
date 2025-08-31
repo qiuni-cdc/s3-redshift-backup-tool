@@ -187,6 +187,22 @@ def setup_v1_2_0_commands():
     return False
 
 
+def setup_column_mapping_commands():
+    """Setup column mapping management commands"""
+    try:
+        from src.cli.column_mapping_commands import column_mappings_group
+        cli.add_command(column_mappings_group)
+        return True
+    except ImportError:
+        # Column mapping components not available
+        pass
+    except Exception:
+        # Other initialization errors
+        pass
+    
+    return False
+
+
 # Strategy mapping
 STRATEGIES = {
     'sequential': SequentialBackupStrategy,
@@ -262,6 +278,10 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
         try:
             from src.cli.cli_integration import integrate_multi_schema_cli, add_version_detection_commands
             integrate_multi_schema_cli(cli)
+            
+            # Add column mapping commands
+            from src.cli.column_mapping_commands import column_mappings_group
+            cli.add_command(column_mappings_group)
             add_version_detection_commands(cli)
         except ImportError as e:
             if debug:
@@ -282,6 +302,14 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
     except Exception as e:
         click.echo(f"❌ Failed to initialize: {e}", err=True)
         sys.exit(1)
+
+
+# Add column mapping commands
+try:
+    from src.cli.column_mapping_commands import column_mappings_group
+    cli.add_command(column_mappings_group)
+except ImportError:
+    pass
 
 
 @cli.command()
@@ -634,7 +662,17 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
                 max_total_rows = chunk_size * max_chunks
                 click.echo(f"   📏 Row limits: {chunk_size} rows/chunk × {max_chunks} chunks = {max_total_rows} total rows")
             
-            backup_success = backup_strategy.execute(list(tables), chunk_size=chunk_size, max_total_rows=max_total_rows)
+            # Get source connection for multi-schema support
+            source_connection = None
+            if pipeline:
+                source_connection = _get_canonical_connection_for_pipeline(pipeline)
+                if source_connection:
+                    click.echo(f"   🔗 Using connection: {source_connection} (from pipeline {pipeline})")
+            elif connection:
+                source_connection = connection
+                click.echo(f"   🔗 Using connection: {source_connection}")
+            
+            backup_success = backup_strategy.execute(list(tables), chunk_size=chunk_size, max_total_rows=max_total_rows, source_connection=source_connection)
             backup_summary = backup_strategy.get_backup_summary()
             
             if backup_success:
@@ -2235,5 +2273,11 @@ if __name__ == '__main__':
     if v1_2_0_enabled:
         import os
         os.environ['CLI_CDC_ENGINE'] = 'v1.2.0'
+    
+    # Setup column mapping commands
+    column_mapping_enabled = setup_column_mapping_commands()
+    if column_mapping_enabled:
+        import os
+        os.environ['CLI_COLUMN_MAPPING'] = 'enabled'
     
     cli()

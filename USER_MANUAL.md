@@ -43,6 +43,9 @@
 - **Unified Schema System**: All components now use FlexibleSchemaManager
 - **Dynamic Schema Discovery**: No more hardcoded schemas - adapts to your database
 - **Type Mapping Consistency**: Proper handling of DECIMAL precision across pipeline
+- **VARCHAR Length Safety**: Automatic doubling of VARCHAR sizes to handle MySQL data exceeding declared lengths
+- **Column Name Sanitization**: Automatic handling of Redshift-incompatible column names (e.g., columns starting with numbers)
+- **Persistent Column Mappings**: System remembers column name transformations for consistent data loading
 - **Production-Tested**: Resolved critical schema mismatch issues in production
 
 #### 🔧 CLI Command Enhancements
@@ -559,6 +562,75 @@ python -m src.cli.main watermark-count validate-counts -t settlement.table_name
 - **Additive Mode**: Adds to existing count (for incremental updates)
 - **Fixed Bug**: CLI now updates BOTH MySQL and Redshift counts (previously only MySQL)
 - **Future-Proofed**: Prevents session-based double-counting with intelligent accumulation logic
+
+#### Column Mapping Management (column-mappings)
+```bash
+python -m src.cli.main column-mappings [OPERATION] [OPTIONS]
+```
+
+**AUTOMATIC REDSHIFT COMPATIBILITY** - Manages column name transformations for Redshift compatibility (e.g., columns starting with numbers).
+
+**Operations:**
+- `list` - List all tables with column mappings
+- `show` - Show detailed column mappings for a specific table
+- `clear` - Clear column mapping for a table
+- `clear-all` - Clear all column mappings (with confirmation)
+
+**Options:**
+- `-t, --table`: Table name for table-specific operations
+- `--force`: Skip confirmation prompts
+
+**Examples:**
+
+**View Column Mappings:**
+```bash
+# List all tables with column mappings
+python -m src.cli.main column-mappings list
+
+# Show detailed mappings for specific table
+python -m src.cli.main column-mappings show -t "US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool"
+```
+
+**Manage Mappings:**
+```bash
+# Clear mappings for a specific table
+python -m src.cli.main column-mappings clear -t "US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool"
+
+# Clear all mappings (with confirmation)
+python -m src.cli.main column-mappings clear-all
+```
+
+**How Column Mapping Works:**
+
+1. **Automatic Detection**: System automatically detects Redshift-incompatible column names during schema discovery
+2. **Smart Sanitization**: Columns starting with numbers get "col_" prefix (e.g., `190_time` → `col_190_time`)
+3. **Persistent Storage**: Mappings are saved to `column_mappings/` directory for reuse
+4. **Transparent Loading**: Redshift COPY commands automatically use mapped column names
+
+**Column Mapping Use Cases:**
+
+**Scenario 1: MySQL table has columns starting with numbers**
+```
+Original MySQL columns: id, 190_time, 200_status, name
+Redshift-safe mapping:  id, col_190_time, col_200_status, name
+```
+
+**Scenario 2: Verify mapping was applied correctly**
+```bash
+# Check which columns were mapped
+python -m src.cli.main column-mappings show -t your_table_name
+
+# Example output:
+# Column Mapping for US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool:
+#   190_time → col_190_time
+#   200_status → col_200_status
+```
+
+**Key Benefits:**
+- **Automatic**: No manual intervention needed - mappings created during first sync
+- **Persistent**: Mappings remembered across sync operations  
+- **Safe**: Ensures consistent column names between MySQL source and Redshift target
+- **Transparent**: Data loading works seamlessly with mapped names
 
 #### S3 Storage Management (s3clean)
 ```bash
@@ -1231,7 +1303,64 @@ python -m src.cli.main sync -t your_table --dry-run | grep -A5 "Schema"
 # Should see consistent precision and type mapping across all stages
 ```
 
-#### 8. S3 Clean Issues
+#### 8. VARCHAR Length and Column Name Issues (AUTO-RESOLVED in v1.2.0)
+
+**Symptoms:**
+- "Data too long for column" errors during Redshift loading
+- "Redshift Spectrum Scan Error" with VARCHAR length violations
+- "Column name is invalid" errors for columns starting with numbers
+- MySQL VARCHAR(255) containing more than 255 characters
+
+**Root Cause:**
+MySQL with utf8mb4 charset can store data exceeding declared VARCHAR lengths:
+- MySQL: VARCHAR(255) can contain 263+ characters (lenient enforcement)
+- Redshift: VARCHAR(255) strictly enforces 255 character limit
+- Column names starting with numbers are invalid in Redshift
+
+**v1.2.0 Automatic Solutions:**
+
+**1. VARCHAR Length Safety Buffer:**
+```bash
+# System automatically doubles VARCHAR sizes for safety
+# MySQL: VARCHAR(255) → Redshift: VARCHAR(510) 
+# MySQL: VARCHAR(1000) → Redshift: VARCHAR(2000)
+# Handles MySQL data exceeding declared column lengths
+```
+
+**2. Column Name Sanitization:**
+```bash
+# System automatically renames problematic columns
+# MySQL: 190_time → Redshift: col_190_time
+# MySQL: 200_status → Redshift: col_200_status
+# Persistent mappings remember transformations
+```
+
+**3. Verification Commands:**
+```bash
+# Check if your table has column mappings
+python -m src.cli.main column-mappings show -t your_table_name
+
+# Verify VARCHAR sizes in generated schema
+python -m src.cli.main sync -t your_table --dry-run | grep VARCHAR
+```
+
+**Technical Details:**
+- **MySQL utf8mb4**: Each character can be 1-4 bytes, MySQL may not strictly enforce declared lengths
+- **Redshift Enforcement**: Strictly enforces declared VARCHAR character limits
+- **Safety Multiplier**: System doubles VARCHAR lengths (VARCHAR(255) → VARCHAR(510))
+- **Column Mapping**: Persistent storage in `column_mappings/` directory
+
+**User Action Required:** 
+✅ **NONE** - All fixes are automatic and transparent
+
+**Real-World Example:**
+```
+Problem: MySQL table ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 with VARCHAR(255) containing 263 characters
+Solution: System automatically creates Redshift table with VARCHAR(510) and handles the data correctly
+Result: Sync succeeds without user intervention
+```
+
+#### 9. S3 Clean Issues
 
 **Symptoms:**
 - "S3 clean operation failed"

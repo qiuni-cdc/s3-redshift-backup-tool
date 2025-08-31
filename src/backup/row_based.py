@@ -13,6 +13,7 @@ from datetime import datetime
 from src.backup.base import BaseBackupStrategy
 from src.utils.exceptions import BackupError, DatabaseError, raise_backup_error
 from src.utils.logging import get_backup_logger
+from src.backup.cdc_backup_integration import create_cdc_integration
 
 
 class RowBasedBackupStrategy(BaseBackupStrategy):
@@ -26,8 +27,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
     def __init__(self, config):
         super().__init__(config)
         self.logger.set_context(strategy="row_based", chunking_type="timestamp_id")
+        self.cdc_integration = None
     
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
         """
         Execute row-based backup for all specified tables.
         
@@ -36,6 +38,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             chunk_size: Optional row limit per chunk (overrides config)
             max_total_rows: Optional maximum total rows to process across all chunks
             limit: Deprecated - use chunk_size instead (for backward compatibility)
+            source_connection: Optional connection name to use instead of default
         
         Returns:
             True if all tables backed up successfully, False otherwise
@@ -49,7 +52,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         successful_tables = []
         failed_tables = []
         
-        with self.database_session() as db_conn:
+        # Initialize CDC integration if not already done
+        if not self.cdc_integration:
+            pipeline_config = getattr(self, 'pipeline_config', None)
+            self.cdc_integration = create_cdc_integration(None, pipeline_config)
+        
+        with self.database_session(source_connection) as db_conn:
             for i, table_name in enumerate(tables):
                 table_start_time = time.time()
                 
@@ -64,7 +72,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 try:
                     success = self._process_single_table_row_based(
-                        db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows
+                        db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows, source_connection
                     )
                     
                     if success:
@@ -101,7 +109,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         table_name: str, 
         current_timestamp: str, 
         chunk_size: Optional[int] = None,
-        max_total_rows: Optional[int] = None
+        max_total_rows: Optional[int] = None,
+        source_connection: Optional[str] = None
     ) -> bool:
         """
         Process a single table using row-based chunking.
@@ -112,6 +121,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             current_timestamp: Current backup timestamp
             chunk_size: Optional row limit per chunk (chunk size)
             max_total_rows: Optional maximum total rows to process (total limit)
+            source_connection: Optional connection name (for logging and context)
             
         Returns:
             True if table processed successfully
@@ -141,8 +151,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 )
                 return False
             
-            # Check for required columns
-            if not self._validate_required_columns(cursor, table_name):
+            # Use CDC system for table validation
+            table_config = self._get_table_config(table_name)
+            table_schema = self._get_table_schema(cursor, table_name)
+            
+            is_valid, issues = self.cdc_integration.validate_table_for_cdc(
+                table_name, table_schema, table_config
+            )
+            
+            if not is_valid:
+                self.logger.logger.error(
+                    "CDC validation failed for table",
+                    table_name=table_name,
+                    issues=issues
+                )
                 return False
             
             # Get current watermark for resume capability
@@ -203,10 +225,15 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Determine chunk size
             effective_chunk_size = chunk_size or self.config.backup.target_rows_per_chunk
             
-            # Detect timestamp and ID columns for this table once
-            # Try to use pipeline configuration first, then fall back to dynamic detection
-            timestamp_column = self._get_configured_timestamp_column(table_name) or self._detect_timestamp_column(cursor, table_name)
-            id_column = self._get_configured_id_column(table_name) or self._detect_id_column(cursor, table_name)
+            # Get column information from CDC strategy
+            table_config = self._get_table_config(table_name)
+            if table_config:
+                timestamp_column = table_config.get('cdc_timestamp_column', 'updated_at')
+                id_column = table_config.get('cdc_id_column', 'id')
+            else:
+                # Fallback to old detection logic for legacy tables
+                timestamp_column = self._get_configured_timestamp_column(table_name) or self._detect_timestamp_column(cursor, table_name)
+                id_column = self._get_configured_id_column(table_name) or self._detect_id_column(cursor, table_name)
             
             # Process table in exact row-based chunks
             chunk_number = 1
@@ -289,16 +316,26 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 rows_in_chunk = len(chunk_data)
                 
+                # Safe logging for both timestamp and id_only strategies
+                log_data = {
+                    "table_name": table_name,
+                    "chunk_size_actual": rows_in_chunk,
+                    "chunk_size_requested": current_chunk_size,
+                    "id_range_start": chunk_data[0][id_column],
+                    "id_range_end": chunk_data[-1][id_column],
+                    "columns_detected": f"{timestamp_column}, {id_column}"
+                }
+                
+                # Only add timestamp ranges if timestamp column exists in data
+                if timestamp_column in chunk_data[0]:
+                    log_data["time_range_start"] = chunk_data[0][timestamp_column]
+                    log_data["time_range_end"] = chunk_data[-1][timestamp_column]
+                else:
+                    log_data["strategy_note"] = "id_only strategy - no timestamp tracking"
+                
                 self.logger.logger.info(
                     f"Processing row-based chunk {chunk_number}",
-                    table_name=table_name,
-                    chunk_size_actual=rows_in_chunk,
-                    chunk_size_requested=current_chunk_size,
-                    time_range_start=chunk_data[0][timestamp_column],
-                    time_range_end=chunk_data[-1][timestamp_column],
-                    id_range_start=chunk_data[0][id_column],
-                    id_range_end=chunk_data[-1][id_column],
-                    columns_detected=f"{timestamp_column}, {id_column}"
+                    **log_data
                 )
                 
                 # Process chunk in smaller batches for S3 upload
@@ -575,18 +612,17 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         This provides accurate count even after restarts/interruptions.
         """
         try:
-            # Use S3Manager to count files for this table
-            from src.core.s3_manager import S3Manager
-            
-            # Create a temporary S3Manager instance to count files
-            temp_s3_manager = S3Manager(self.config)
+            # Use existing S3Manager to count files for this table
+            if not self.s3_manager or not hasattr(self.s3_manager, 's3_client') or not self.s3_manager.s3_client:
+                self.logger.logger.warning(f"S3Manager not available for file counting: {table_name}")
+                return 0
             
             # Get table-specific file pattern
             safe_table_name = table_name.replace('.', '_')
             
             # Search for all parquet files for this table
-            response = temp_s3_manager.s3_client.list_objects_v2(
-                Bucket=temp_s3_manager.bucket_name,
+            response = self.s3_manager.s3_client.list_objects_v2(
+                Bucket=self.s3_manager.bucket_name,
                 Prefix='incremental/',
                 MaxKeys=1000
             )
@@ -605,8 +641,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Handle pagination if there are more files
             while response.get('IsTruncated', False):
-                response = temp_s3_manager.s3_client.list_objects_v2(
-                    Bucket=temp_s3_manager.bucket_name,
+                response = self.s3_manager.s3_client.list_objects_v2(
+                    Bucket=self.s3_manager.bucket_name,
                     Prefix='incremental/',
                     MaxKeys=1000,
                     ContinuationToken=response['NextContinuationToken']
@@ -672,27 +708,31 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Validate critical parameters
             if table_name is None:
                 raise ValueError(f"table_name cannot be None")
-            if last_timestamp is None:
-                self.logger.logger.error(
-                    "last_timestamp is None in _get_next_chunk",
-                    table_name=table_name,
-                    last_id=last_id
-                )
-                raise ValueError(f"last_timestamp cannot be None for table {table_name}")
             
-            # Use the pre-detected timestamp and ID columns (passed from main loop)
+            # Initialize CDC integration if not already done
+            if not self.cdc_integration:
+                try:
+                    pipeline_config = getattr(self, 'pipeline_config', None)
+                    self.cdc_integration = create_cdc_integration(None, pipeline_config)
+                except Exception as e:
+                    self.logger.logger.error(f"Failed to initialize CDC integration: {e}")
+                    return [], last_timestamp, last_id
             
-            # Option 2: Timestamp + ID based query for reliable pagination
-            query = f"""
-            SELECT * FROM {safe_table_name}
-            WHERE {timestamp_column} > '{safe_last_timestamp}' 
-               OR ({timestamp_column} = '{safe_last_timestamp}' AND {id_column} > {safe_last_id})
-            ORDER BY {timestamp_column}, {id_column} 
-            LIMIT {chunk_size}
-            """
+            # Use CDC integration to build query
+            table_config = self._get_table_config(table_name)
+            watermark = {
+                'last_mysql_data_timestamp': safe_last_timestamp,
+                'last_processed_id': safe_last_id
+            }
+            
+            # Extract MySQL table name for query building
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            query = self.cdc_integration.build_incremental_query(
+                mysql_table_name, watermark, chunk_size, table_config
+            )
             
             self.logger.logger.info(
-                "Executing row-based chunk query",
+                "Executing CDC-generated chunk query",
                 table_name=table_name,
                 last_timestamp=last_timestamp,
                 last_id=last_id,
@@ -703,6 +743,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             cursor.execute(query)
             chunk_data = cursor.fetchall()
+            
+            # Convert to list of dictionaries if needed
+            if chunk_data and not isinstance(chunk_data[0], dict):
+                # Handle tuple results from regular cursors
+                column_names = [desc[0] for desc in cursor.description]
+                chunk_data = [dict(zip(column_names, row)) for row in chunk_data]
+            
+            if not chunk_data:
+                # No more data
+                return [], safe_last_timestamp, safe_last_id
             
             # Debug: Log query result with first/last row details
             if chunk_data:
@@ -715,11 +765,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     chunk_size_requested=chunk_size,
                     rows_vs_limit_ratio=f"{len(chunk_data)}/{chunk_size}",
                     first_row_id=first_row.get(id_column),
-                    first_row_timestamp=str(first_row.get(timestamp_column)),
                     last_row_id=last_row.get(id_column),
-                    last_row_timestamp=str(last_row.get(timestamp_column)),
                     id_column_used=id_column,
-                    timestamp_column_used=timestamp_column,
                     query_executed=query.replace('\n', ' ').strip()
                 )
                 
@@ -755,23 +802,24 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 )
                 return [], last_timestamp, last_id
             
-            # Extract last timestamp and ID for next iteration
-            last_row = chunk_data[-1]
+            # Initialize CDC integration if not already done
+            if not self.cdc_integration:
+                try:
+                    pipeline_config = getattr(self, 'pipeline_config', None)
+                    self.cdc_integration = create_cdc_integration(None, pipeline_config)
+                except Exception as e:
+                    self.logger.logger.error(f"Failed to initialize CDC integration: {e}")
+                    return [], safe_last_timestamp, safe_last_id
             
-            # Handle potential None values in row data
-            update_at_value = last_row.get(timestamp_column)
-            if update_at_value is None:
-                self.logger.logger.error(
-                    f"{timestamp_column} is None in chunk data",
-                    table_name=table_name,
-                    row_id=last_row.get(id_column),
-                    chunk_size=len(chunk_data)
-                )
-                chunk_last_timestamp = '1970-01-01 00:00:00'  # Safe fallback
-            else:
-                chunk_last_timestamp = update_at_value.strftime('%Y-%m-%d %H:%M:%S')
+            # Extract watermark using CDC integration
+            table_config = self._get_table_config(table_name)
+            watermark_data = self.cdc_integration.extract_watermark_from_batch(
+                table_name, chunk_data, table_config
+            )
             
-            chunk_last_id = last_row.get(id_column, 0)
+            # Convert to legacy format for compatibility
+            chunk_last_timestamp = watermark_data.last_timestamp or safe_last_timestamp
+            chunk_last_id = watermark_data.last_id or safe_last_id
             
             self.logger.logger.debug(
                 "Retrieved row-based chunk",
@@ -820,11 +868,27 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Check for required columns (flexible timestamp and ID column names)
             missing_columns = []
             
-            # Check timestamp columns with flexible naming
+            # Check timestamp columns with flexible naming (only required for timestamp-based strategies)
             timestamp_candidates = ['updated_at', 'update_at', 'last_modified', 'modified_at']
             has_timestamp_column = any(col in columns for col in timestamp_candidates)
-            if not has_timestamp_column:
-                missing_columns.append('timestamp column (tried: updated_at, update_at, last_modified)')
+            
+            # Check if this is an id_only table by checking existing watermark strategy
+            is_id_only_table = False
+            try:
+                from src.core.s3_watermark_manager import S3WatermarkManager
+                from src.config.settings import AppConfig
+                config = AppConfig()
+                watermark_manager = S3WatermarkManager(config)
+                watermark = watermark_manager.get_table_watermark(table_name)
+                if watermark and watermark.backup_strategy == 'id_only':
+                    is_id_only_table = True
+                    self.logger.logger.info(f"Table {table_name} detected as id_only strategy from watermark")
+            except:
+                pass
+            
+            # Only require timestamp column for non-id_only tables
+            if not has_timestamp_column and not is_id_only_table:
+                missing_columns.append('timestamp column (tried: updated_at, update_at, last_modified, modified_at)')
             
             # Check ID columns with flexible naming  
             id_candidates = ['id', 'ID', 'Id', 'pk_id', 'primary_id']
@@ -1159,3 +1223,102 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 status=status,
                 error_message=error_message
             )
+    
+    def _get_table_config(self, table_name: str) -> Optional[Dict[str, Any]]:
+        """Get table configuration from pipeline config"""
+        if hasattr(self, 'pipeline_config') and self.pipeline_config:
+            tables = self.pipeline_config.get('tables', {})
+            
+            # Try exact match first
+            if table_name in tables:
+                return tables.get(table_name)
+            
+            # Extract unscoped table name for scoped lookups (US_DW_UNIDW_SSH:unidw.table -> unidw.table)
+            unscoped_name = self._extract_mysql_table_name(table_name)
+            if unscoped_name in tables:
+                return tables.get(unscoped_name)
+        
+        return None
+    
+    def _get_table_schema(self, cursor, table_name: str) -> Dict[str, str]:
+        """Get table schema from database"""
+        try:
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            cursor.execute(f"DESCRIBE {mysql_table_name}")
+            describe_results = cursor.fetchall()
+            
+            # Handle both dictionary and tuple cursors
+            if describe_results and isinstance(describe_results[0], dict):
+                schema = {row['Field']: row['Type'] for row in describe_results}
+            else:
+                schema = {row[0]: row[1] for row in describe_results}
+            
+            return schema
+        except Exception as e:
+            self.logger.logger.error(f"Failed to get table schema for {table_name}: {e}")
+            return {}
+    
+    def validate_table_exists(self, cursor, table_name: str) -> bool:
+        """
+        Override BaseBackupStrategy validation to use CDC system
+        
+        Args:
+            cursor: Database cursor
+            table_name: Name of the table to validate (may be scoped for v1.2.0)
+        
+        Returns:
+            True if table is valid, False otherwise
+        """
+        try:
+            # Extract actual MySQL table name from potentially scoped name
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            self.logger.logger.debug("Validating table structure", 
+                                   scoped_table_name=table_name,
+                                   mysql_table_name=mysql_table_name)
+            
+            # Check if table exists
+            cursor.execute(f"SHOW TABLES LIKE '{mysql_table_name.split('.')[-1]}'")
+            if not cursor.fetchone():
+                self.logger.error_occurred(
+                    Exception(f"Table {mysql_table_name} does not exist"), 
+                    "table_validation"
+                )
+                return False
+            
+            # Initialize CDC integration if not already done
+            if not self.cdc_integration:
+                try:
+                    pipeline_config = getattr(self, 'pipeline_config', None)
+                    self.cdc_integration = create_cdc_integration(None, pipeline_config)
+                except Exception as e:
+                    self.logger.logger.error(f"Failed to initialize CDC integration: {e}")
+                    return False
+            
+            # Use CDC system for column validation instead of hardcoded requirements
+            table_config = self._get_table_config(table_name)
+            table_schema = self._get_table_schema(cursor, table_name)
+            
+            is_valid, issues = self.cdc_integration.validate_table_for_cdc(
+                table_name, table_schema, table_config
+            )
+            
+            if not is_valid:
+                self.logger.logger.error(
+                    "CDC validation failed for table",
+                    table_name=table_name,
+                    issues=issues
+                )
+                return False
+            
+            self.logger.logger.info(
+                "Table validation successful using CDC system",
+                table_name=table_name,
+                column_count=len(table_schema)
+            )
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error_occurred(e, "table_validation")
+            return False

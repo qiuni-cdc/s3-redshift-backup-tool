@@ -1,0 +1,39 @@
+# Default Pipeline Configuration for v1.1.0
+# This maintains your current settlement database workflow
+
+pipeline:
+  name: "settlement_default"
+  description: "Default settlement database pipeline (v1.0.0 compatible)"
+  
+  # Source database (your current MySQL setup)
+  source: "default"  # References connections.yaml -> default
+  
+  # Target database (your current Redshift setup)  
+  target: "redshift_default"  # References connections.yaml -> redshift_default
+
+# Tables configuration (maintains v1.0.0 behavior)
+tables:
+  # Your current tables - no changes needed
+  settlement.settlement_normal_delivery_detail:
+    enabled: true
+    strategy: "sequential"  # Your preferred strategy
+    
+  settlement.settlement_claim_detail:
+    enabled: true
+    strategy: "sequential"
+    
+  # Add other tables as needed
+  # settlement.other_table:
+  #   enabled: true
+  #   strategy: "sequential"
+
+# Processing options (from your .env optimizations)
+processing:
+  batch_size: 50000
+  memory_limit_mb: 6144
+  compression_enabled: true
+  
+# Watermark settings (maintains current behavior)
+watermarks:
+  storage: "s3"  # Your current S3-based watermark system
+  auto_manage: true

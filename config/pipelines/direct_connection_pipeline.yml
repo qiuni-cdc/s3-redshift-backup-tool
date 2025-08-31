@@ -1,0 +1,36 @@
+# Direct Connection Pipeline Configuration
+# Uses direct connections (no SSH tunnel) for high-speed transfers
+
+pipeline:
+  name: "direct_connection_sync"
+  description: "High-speed sync using direct database connections (no SSH)"
+  source: "US_PROD_RO_DIRECT"  # Direct connection to production
+  target: "redshift_default"    # Redshift target
+  version: "1.1.0"
+  
+  processing:
+    strategy: "sequential"      # Use sequential for compatibility
+    batch_size: 100000          # Large batches for efficiency
+    timeout_minutes: 180
+    max_parallel_tables: 5      # More parallelism without SSH overhead
+  
+  s3:
+    isolation_prefix: "direct_sync/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+
+# Tables optimized for direct high-speed sync
+tables:
+  settlement_normal_delivery_detail:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "updated_at"
+    description: "High-speed production sync via direct connection"
+    processing:
+      batch_size: 150000        # Even larger batches for this table

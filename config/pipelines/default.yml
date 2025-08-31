@@ -1,0 +1,17 @@
+pipeline:
+  default_table_config:
+    backup_strategy: sequential
+    watermark_strategy: automatic
+  description: Default pipeline for v1.0.0 compatibility
+  name: default_legacy
+  processing:
+    batch_size: 10000
+    strategy: sequential
+  s3:
+    compression: snappy
+    isolation_prefix: ''
+    partition_strategy: datetime
+  source: default
+  target: default
+  version: 1.0.0
+tables: {}
