@@ -1150,17 +1150,18 @@ def config(ctx, output: str):
 @click.argument('operation', type=click.Choice(['get', 'set', 'reset', 'force-reset', 'list']))
 @click.option('--table', '-t', help='Table name for table-specific watermark')
 @click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
+@click.option('--id', type=int, help='Starting ID for set operation (for ID-based CDC)')
 @click.option('--show-files', is_flag=True, help='Show processed S3 files list (for get operation)')
 @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool, pipeline: str, connection: str):
+def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_files: bool, pipeline: str, connection: str):
     """
-    Manage table-specific watermark timestamps for incremental backups.
+    Manage table-specific watermark timestamps and IDs for incremental backups.
     
     Operations:
         get - Get current table watermark
-        set - Set new watermark timestamp for table  
+        set - Set new watermark timestamp and/or ID for table  
         reset - Delete watermark completely (fresh start)
         force-reset - Force overwrite watermark to epoch start (bypasses backups)
         list - List all table watermarks
@@ -1169,6 +1170,8 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool,
         s3-backup watermark get -t settlement.settlement_claim_detail
         s3-backup watermark get -t settlement.settlement_claim_detail --show-files
         s3-backup watermark set -t settlement.settlement_claim_detail --timestamp "2024-01-01 00:00:00"
+        s3-backup watermark set -t unidw.dw_parcel_detail_tool --id 41471788
+        s3-backup watermark set -t hybrid_table --timestamp "2024-01-01 00:00:00" --id 1000000
         s3-backup watermark reset -t settlement.settlement_claim_detail
         s3-backup watermark list
     """
@@ -1264,9 +1267,26 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool,
                 click.echo(f"      Last Data Timestamp: {watermark.last_mysql_data_timestamp}")
                 click.echo(f"      Last Extraction Time: {watermark.last_mysql_extraction_time}")
                 
-                # Show row-based chunking information if available
+                # Show ID-based CDC information prominently
                 if hasattr(watermark, 'last_processed_id') and watermark.last_processed_id is not None:
-                    click.echo(f"      Last Processed ID: {watermark.last_processed_id:,} (row-based resume point)")
+                    # Check if this is an ID-based CDC table
+                    metadata = watermark.metadata or {}
+                    is_manual_id = metadata.get('manual_id', False)
+                    cdc_config = metadata.get('cdc_config', {})
+                    manual_id_set = cdc_config.get('manual_id_set', False)
+                    
+                    if is_manual_id or manual_id_set:
+                        click.echo(f"      Starting ID (Manual): {watermark.last_processed_id:,} (user-configured)")
+                    else:
+                        click.echo(f"      Last Processed ID: {watermark.last_processed_id:,} (resume point)")
+                        
+                    # Show ID range if available
+                    if hasattr(watermark, 'id_range_extracted') and watermark.id_range_extracted:
+                        id_range = watermark.id_range_extracted
+                        if 'session_start' in id_range and 'session_end' in id_range:
+                            click.echo(f"      ID Range (Session): {id_range['session_start']:,} → {id_range['session_end']:,}")
+                        if 'cumulative_max' in id_range:
+                            click.echo(f"      Max ID Processed: {id_range['cumulative_max']:,} (all-time)")
                 
                 # Show backup strategy information
                 if hasattr(watermark, 'backup_strategy') and watermark.backup_strategy:
@@ -1292,6 +1312,15 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool,
                 # Next Incremental Backup
                 click.echo("   🔜 Next Incremental Backup:")
                 click.echo(f"      Will start from: {start_timestamp}")
+                
+                # Show next ID if this is ID-based CDC
+                if hasattr(watermark, 'last_processed_id') and watermark.last_processed_id is not None:
+                    metadata = watermark.metadata or {}
+                    is_id_based = metadata.get('manual_id', False) or 'id_only' in str(metadata.get('cdc_config', {}))
+                    if is_id_based:
+                        next_id = watermark.last_processed_id + 1
+                        click.echo(f"      Next ID: WHERE id > {watermark.last_processed_id:,} (starts from {next_id:,})")
+                
                 click.echo()
                 
                 # Show processed S3 files if requested
@@ -1330,29 +1359,54 @@ def watermark(ctx, operation: str, table: str, timestamp: str, show_files: bool,
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
                 
-            if not timestamp:
-                click.echo("❌ Timestamp required for set operation", err=True)
-                click.echo("   Use --timestamp 'YYYY-MM-DD HH:MM:SS'")
+            if not timestamp and id is None:
+                click.echo("❌ Either timestamp or ID required for set operation", err=True)
+                click.echo("   Use --timestamp 'YYYY-MM-DD HH:MM:SS' and/or --id <number>")
                 sys.exit(1)
             
             from datetime import datetime
             try:
-                # Parse timestamp
-                target_timestamp = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                # Parse timestamp if provided
+                target_timestamp = None
+                if timestamp:
+                    target_timestamp = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
                 
-                # Set manual watermark (data timestamp only, no extraction time)
+                # Provide helpful guidance for ID-only tables
+                if id is not None and not timestamp:
+                    click.echo(f"💡 Setting ID watermark for {table}")
+                    click.echo("   Note: ID watermarks control WHERE id > {id} filtering")
+                    click.echo("   Timestamp will remain null (appropriate for id_only CDC strategy)")
+                    
+                elif timestamp and id is None:
+                    # Check if this might be an ID-only table (warn but allow)
+                    existing_watermark = watermark_manager.get_table_watermark(effective_table_name)
+                    if existing_watermark and existing_watermark.metadata:
+                        cdc_info = existing_watermark.metadata.get('cdc_config', {})
+                        if 'id_only' in str(cdc_info):
+                            click.echo("⚠️  Warning: Setting timestamp on potential id_only table")
+                            click.echo("   Timestamp will only affect S3 file filtering, not MySQL data extraction")
+                
+                # Set manual watermark (timestamp and/or ID)
                 success = watermark_manager.set_manual_watermark(
                     table_name=effective_table_name,
-                    data_timestamp=target_timestamp
+                    data_timestamp=target_timestamp,
+                    data_id=id
                 )
                 
                 if success:
                     click.echo(f"✅ Watermark updated for {table}")
-                    click.echo(f"   Data timestamp reset to: {timestamp}")
+                    if timestamp:
+                        click.echo(f"   Data timestamp reset to: {timestamp}")
+                    if id is not None:
+                        click.echo(f"   Starting ID set to: {id:,}")
                     
-                    # Verify the change
-                    new_start = watermark_manager.get_incremental_start_timestamp(table)
-                    click.echo(f"   Next incremental backup will start from: {new_start}")
+                    # Show what will happen next
+                    if id is not None:
+                        click.echo(f"   Next incremental backup will start from ID > {id:,}")
+                    elif timestamp:
+                        # Verify the change
+                        new_start = watermark_manager.get_incremental_start_timestamp(table)
+                        click.echo(f"   Next incremental backup will start from: {new_start}")
                 else:
                     click.echo("❌ Failed to update watermark", err=True)
                     sys.exit(1)

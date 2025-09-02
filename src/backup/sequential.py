@@ -37,7 +37,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         """Delegate to memory manager"""
         return self.memory_manager.force_gc_if_needed(batch_number)
     
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
         """
         Execute sequential backup for all specified tables using row-based chunking.
         
@@ -46,6 +46,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             chunk_size: Optional row limit per chunk (overrides config)
             max_total_rows: Optional maximum total rows to process  
             limit: Deprecated - use chunk_size instead (for backward compatibility)
+            source_connection: Optional connection name to use instead of default
         
         Returns:
             True if all tables backed up successfully, False otherwise
@@ -65,7 +66,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             successful_tables = []
             failed_tables = []
             
-            with self.database_session() as db_conn:
+            with self.database_session(source_connection) as db_conn:
                 for i, table_name in enumerate(tables):
                     table_start_time = time.time()
                     
@@ -86,7 +87,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                         effective_chunk_size = chunk_size or limit
                         
                         success = self._process_single_table_row_based(
-                            db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows
+                            db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows, source_connection
                         )
                         
                         table_duration = time.time() - table_start_time
@@ -167,7 +168,8 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         table_name: str, 
         current_timestamp: str,
         chunk_size: Optional[int] = None,
-        max_total_rows: Optional[int] = None
+        max_total_rows: Optional[int] = None,
+        source_connection: Optional[str] = None
     ) -> bool:
         """
         Process a single table using row-based chunking (timestamp + ID pagination).
@@ -178,6 +180,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             current_timestamp: Current backup timestamp
             chunk_size: Optional row limit per chunk
             max_total_rows: Optional maximum total rows to process
+            source_connection: Optional connection name (for logging and context)
             
         Returns:
             True if table processed successfully
@@ -201,13 +204,18 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             
             row_based_strategy.s3_manager = self.s3_manager
             row_based_strategy.process_batch = self.process_batch
-            row_based_strategy.validate_table_exists = self.validate_table_exists
+            # Use row-based strategy's own validate_table_exists (with CDC support)
+            # row_based_strategy.validate_table_exists = self.validate_table_exists  # REMOVED
             row_based_strategy.update_watermarks = self.update_watermarks
             row_based_strategy.database_session = self.database_session
             
+            # Pass pipeline configuration for CDC integration
+            if hasattr(self, 'pipeline_config'):
+                row_based_strategy.pipeline_config = self.pipeline_config
+            
             # Use the row-based strategy to process this single table
             success = row_based_strategy._process_single_table_row_based(
-                db_conn, table_name, current_timestamp, chunk_size, max_total_rows
+                db_conn, table_name, current_timestamp, chunk_size, max_total_rows, source_connection
             )
             
             # CRITICAL FIX: Transfer metrics back from row-based strategy to sequential strategy

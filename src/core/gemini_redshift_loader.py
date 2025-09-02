@@ -16,6 +16,7 @@ from src.config.settings import AppConfig
 from src.core.flexible_schema_manager import FlexibleSchemaManager
 from src.core.connections import ConnectionManager
 from src.core.s3_watermark_manager import S3WatermarkManager
+from src.core.column_mapper import ColumnMapper
 from src.utils.exceptions import BackupError, DatabaseError
 from src.utils.logging import get_logger
 
@@ -38,6 +39,7 @@ class GeminiRedshiftLoader:
         self.connection_manager = ConnectionManager(config)
         self.schema_manager = FlexibleSchemaManager(self.connection_manager)
         self.watermark_manager = S3WatermarkManager(config)
+        self.column_mapper = ColumnMapper()
         self.logger = logger
         
     def _test_connection(self) -> bool:
@@ -110,7 +112,7 @@ class GeminiRedshiftLoader:
             with self._redshift_connection() as conn:
                 for s3_file in s3_files:
                     try:
-                        rows_loaded = self._copy_parquet_file(conn, redshift_table_name, s3_file)
+                        rows_loaded = self._copy_parquet_file(conn, redshift_table_name, s3_file, table_name)
                         total_rows_loaded += rows_loaded
                         successful_files += 1
                         logger.debug(f"Loaded {rows_loaded} rows from {s3_file}")
@@ -433,15 +435,23 @@ class GeminiRedshiftLoader:
             logger.error(f"Failed to get S3 parquet files for {table_name}: {e}")
             return []
     
-    def _copy_parquet_file(self, conn, table_name: str, s3_uri: str) -> int:
+    def _copy_parquet_file(self, conn, table_name: str, s3_uri: str, full_table_name: str = None) -> int:
         """Execute COPY command for a single parquet file"""
         cursor = None
         try:
             cursor = conn.cursor()
             
+            # Check if table has column mappings
+            column_list = ""
+            if full_table_name and self.column_mapper.has_mapping(full_table_name):
+                # Get the parquet schema to know source columns
+                # For now, we'll rely on Redshift's automatic column matching
+                # In a full implementation, we'd read the parquet schema
+                logger.info(f"Table {full_table_name} has column mappings - using automatic matching")
+            
             # Build COPY command for direct parquet loading
             copy_command = f"""
-                COPY {self.config.redshift.schema}.{table_name}
+                COPY {self.config.redshift.schema}.{table_name}{column_list}
                 FROM '{s3_uri}'
                 ACCESS_KEY_ID '{self.config.s3.access_key}'
                 SECRET_ACCESS_KEY '{self.config.s3.secret_key.get_secret_value()}'

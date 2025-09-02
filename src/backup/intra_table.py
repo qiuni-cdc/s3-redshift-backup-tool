@@ -43,7 +43,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
         self._connection_pool = []
         self._pool_lock = threading.Lock()
     
-    def execute(self, tables: List[str], limit: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
         """
         Execute intra-table parallel backup for specified tables.
         

@@ -418,15 +418,20 @@ python -m src.cli.main watermark [OPERATION] [OPTIONS]
 
 **Operations:**
 - `get`: Get current table watermark with detailed statistics
-- `set`: Set new watermark timestamp for table  
+- `set`: Set new watermark timestamp or ID for table  
 - `reset`: Delete watermark completely (fresh start)
 - `list`: List all table watermarks
 
 **Options:**
 - `-t, --table`: Table name for table-specific watermark operations
-- `--timestamp`: Timestamp for set operation (YYYY-MM-DD HH:MM:SS)
+- `--timestamp`: Timestamp for set operation (YYYY-MM-DD HH:MM:SS) - for timestamp-based CDC
+- `--id`: Starting ID for set operation (for ID-based CDC) **NEW in v1.2.0**
+- `--pipeline`: Pipeline name for multi-schema support
+- `--show-files`: Show processed S3 files list (for get operation)
 
 **Examples:**
+
+**Timestamp-Based Watermarks (Traditional):**
 ```bash
 # View current watermark with detailed statistics
 python -m src.cli.main watermark get -t settlement.settlement_claim_detail
@@ -435,7 +440,29 @@ python -m src.cli.main watermark get -t settlement.settlement_claim_detail
 python -m src.cli.main watermark set \
   -t settlement.settlement_claim_detail \
   --timestamp "2025-08-09 20:00:01"
+```
 
+**ID-Based Watermarks (NEW in v1.2.0):**
+```bash
+# Set manual starting ID for ID-based CDC tables
+python -m src.cli.main watermark set \
+  -t unidw.dw_parcel_detail_tool \
+  --pipeline us_dw_unidw_2_public_pipeline \
+  --id 281623217
+
+# View ID-based watermark status
+python -m src.cli.main watermark get \
+  -t unidw.dw_parcel_detail_tool \
+  --pipeline us_dw_unidw_2_public_pipeline
+
+# Show which S3 files have been processed
+python -m src.cli.main watermark get \
+  -t unidw.dw_parcel_detail_tool \
+  --show-files
+```
+
+**General Operations:**
+```bash
 # Reset watermark completely (fresh start)
 python -m src.cli.main watermark reset -t settlement.settlement_claim_detail
 
@@ -445,8 +472,9 @@ python -m src.cli.main watermark list
 
 **Understanding Watermark Output (v1.2.0+):**
 
-The watermark display now shows both **session** and **cumulative** statistics:
+The watermark display now shows both **session** and **cumulative** statistics, with different formats for timestamp-based vs ID-based CDC tables:
 
+**Timestamp-Based CDC Table (Traditional):**
 ```
 📊 Watermark Status for settlement.settlement_claim_detail:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -466,12 +494,40 @@ Cumulative Total:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
+**ID-Based CDC Table (NEW in v1.2.0):**
+```
+📊 Watermark Status for US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Last Data Timestamp:     (not applicable - ID-based CDC)
+Last Extraction Time:    2025-09-02 10:35:00
+Starting ID (Manual):    281,623,217 (user-configured)
+Last Processed ID:       281,651,626 (resume point)
+MySQL Status:            success
+Redshift Status:         pending
+
+📈 Row Count Statistics:
+Session Stats:
+  MySQL Extracted:       10,000 rows (this session)
+  Redshift Loaded:       0 rows (backup-only)
+
+ID Processing Statistics:
+  ID Range Extracted:    281,623,217 → 281,651,626 (28,409 IDs processed)
+  Current Resume Point:  281,651,627 (next sync starts here)
+
+Backup Strategy:         manual_cli (ID-based watermark set by user)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
 **Key Concepts:**
 - **Session Stats**: Rows processed in the most recent backup/sync operation
-- **Cumulative Total**: Total rows processed across all historical operations
+- **Cumulative Total**: Total rows processed across all historical operations (timestamp-based)
+- **ID Processing**: Specific to ID-based tables showing ID range progression
+- **Manual vs Automatic**: Manual watermarks show "(user-configured)", automatic show "(resume point)"
 - **Why Both Matter**: Session stats help verify individual runs, cumulative shows overall progress
 
 **Watermark Use Cases:**
+
+**Timestamp-Based CDC Tables:**
 
 1. **Load Existing S3 Files After Specific Timestamp:**
 ```bash
@@ -489,6 +545,36 @@ aws s3 rm s3://bucket/incremental/ --recursive --exclude "*" --include "*table_n
 python -m src.cli.main watermark reset -t settlement.table_name
 python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-08-09 20:00:01'
 python -m src.cli.main sync -t settlement.table_name
+```
+
+**ID-Based CDC Tables (NEW in v1.2.0):**
+
+3. **Backup Table from Specific ID (e.g., after bulk data import):**
+```bash
+# Set starting ID to skip already processed records  
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 281623217
+
+# Backup from that ID onwards
+python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 10000
+```
+
+4. **Resume ID-Based Backup After Failure:**
+```bash
+# Check current ID progress
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+
+# System automatically resumes from last processed ID
+python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+```
+
+5. **Process Specific ID Range for Testing:**
+```bash
+# Set starting ID for controlled testing
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 100000
+
+# Process limited rows to test pipeline  
+python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 5000
 ```
 
 #### Watermark Count Management (watermark-count)
@@ -1404,7 +1490,101 @@ python -m src.cli.main s3clean clean -t settlement.table_name --older-than "7d"
 - **"Invalid time format"**: Use formats like "7d", "24h", "30m"
 - **Large file counts**: Command processes up to 1000 files per operation
 
-#### 9. Performance Issues
+#### 9. ID Watermark Issues (NEW in v1.2.0)
+
+**Symptoms:**
+- Manual ID watermark set but system starts from ID 0
+- "No watermark found" despite ID being set
+- ID-based sync restarts from beginning instead of resuming
+
+**Root Cause:**
+ID-only watermarks have different requirements than timestamp-based watermarks and require proper CDC strategy configuration.
+
+**Solutions:**
+
+**1. Verify ID Watermark is Set Correctly:**
+```bash
+# Check current watermark status
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+
+# Look for these indicators of correct ID watermark:
+# - "Starting ID (Manual): XXX,XXX,XXX (user-configured)"
+# - "Backup Strategy: manual_cli"
+# - "Last Processed ID: XXX,XXX,XXX"
+```
+
+**2. Set ID Watermark with Proper Pipeline:**
+```bash
+# INCORRECT: Missing pipeline specification
+python -m src.cli.main watermark set -t dw_parcel_detail_tool --id 281623217
+
+# CORRECT: Include pipeline for multi-schema tables
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 281623217
+```
+
+**3. Verify CDC Strategy Configuration:**
+```bash
+# Check pipeline configuration includes id_only strategy
+cat config/pipelines/us_dw_unidw_2_public_pipeline.yml
+
+# Should contain:
+# tables:
+#   unidw.dw_parcel_detail_tool:
+#     cdc_strategy: "id_only"
+#     cdc_id_column: "id"
+```
+
+**4. Debug Watermark Retrieval in Logs:**
+```bash
+# Run sync with verbose logging
+python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 100
+
+# Check log for these success indicators:
+# - "last_processed_id": 281623217, "backup_strategy": "manual_cli"
+# - "Resuming row-based backup from watermark", "last_id": 281623217  
+# - "WHERE id > 281623217" in query
+# - "first_row_id" should be > 281623217
+```
+
+**5. Fix Common ID Watermark Problems:**
+
+**Problem: ID watermark not recognized**
+```bash
+# Reset and set ID with explicit parameters
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 281623217
+```
+
+**Problem: System starts from ID 0 despite manual setting**
+```bash
+# This was a critical bug fixed in v1.2.0
+# Update to latest version and verify fix with:
+python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 10
+
+# Log should show: "resume_from_id": 281623217 (NOT 0)
+```
+
+**Problem: Mixed timestamp and ID requirements**
+```bash
+# ID-only tables don't need timestamp columns
+# Verify table is configured for id_only CDC strategy in pipeline YAML
+# System should handle null timestamps correctly for ID-based tables
+```
+
+**Key Debugging Steps:**
+1. **Check Pipeline**: Ensure table uses `cdc_strategy: "id_only"`
+2. **Verify Watermark**: Use `watermark get` to confirm ID is set and shows "(user-configured)"
+3. **Test Small**: Use `--limit 10` to test ID watermark behavior with minimal data
+4. **Check Logs**: Look for `resume_from_id` and `WHERE id >` clauses in debug output
+5. **Validate Table**: Ensure table has proper ID column and CDC configuration
+
+**Technical Details:**
+- **ID-only watermarks**: Store `last_processed_id` with null `last_mysql_data_timestamp`
+- **Manual vs Automatic**: Manual IDs show `backup_strategy: "manual_cli"`
+- **Resume Logic**: System uses `last_processed_id` for `WHERE id > X` queries
+- **Session Tracking**: Multiple sessions accumulate ID progress correctly
+
+#### 10. Performance Issues
 
 **Symptoms:**
 - Slow backup performance

@@ -276,6 +276,67 @@ python -m src.cli.main s3clean clean -t settlement.table_name --force
 
 **Status**: ✅ **RESOLVED** - All components unified under single schema system. Production Parquet compatibility issues eliminated.
 
+### **P0 ID-ONLY WATERMARK RETRIEVAL BUG (RESOLVED)**
+
+**Issue Discovered (September 2, 2025)**: Critical bug in backup watermark retrieval logic causing manual ID watermarks to be completely ignored for ID-only CDC strategies.
+
+- **Symptoms**: Manual ID watermarks appear to be set correctly but backup system starts from ID 0 
+- **Root Cause**: Backup logic incorrectly required BOTH watermark AND timestamp, treating ID-only watermarks as "no watermark"
+- **Impact**: ID-only tables couldn't use manual starting points, causing data duplication
+
+#### **Technical Root Cause**
+```python
+# BUGGY CODE (src/backup/row_based.py:189):
+if not watermark or not watermark.last_mysql_data_timestamp:
+    # No watermark - start from beginning ❌ WRONG FOR ID-ONLY!
+    last_id = 0
+
+# For ID-only watermarks: watermark exists but timestamp is null
+# System incorrectly treated this as "no watermark"
+```
+
+#### **The Critical Fix**
+```python
+# FIXED CODE:
+if not watermark:
+    last_id = 0  # Truly no watermark
+elif not watermark.last_mysql_data_timestamp and not getattr(watermark, 'last_processed_id', 0):
+    last_id = 0  # Empty watermark (no timestamp AND no ID)
+else:
+    # Valid watermark - use timestamp OR ID based approach
+    last_id = getattr(watermark, 'last_processed_id', 0)
+```
+
+#### **Verification Results**
+```
+BEFORE FIX:
+- "last_processed_id": 281623217 (watermark correctly stored)
+- "No watermark found, starting from beginning" (incorrect logic)
+- "resume_from_id": 0 (ignores manual ID)
+
+AFTER FIX:
+- "last_processed_id": 281623217 (watermark correctly stored) 
+- "Resuming row-based backup from watermark" (correct logic)
+- "resume_from_id": 281623217 (uses manual ID correctly!)
+- "WHERE id > 281623217" (correct query generation)
+```
+
+#### **Critical Lessons Learned**
+
+**🔴 ID-ONLY WATERMARK PRINCIPLES**
+1. **Null Timestamps Valid**: ID-only strategies legitimately have null timestamps
+2. **Separate Validation Logic**: Don't require timestamp AND ID - validate either/or
+3. **CDC Strategy Awareness**: Backup logic must understand ID-only vs timestamp strategies
+4. **Debug Log Analysis**: "resume_from_id" must match manually set ID in logs
+
+**🔴 WATERMARK RETRIEVAL DEBUGGING**
+1. **Check Stored vs Retrieved**: Watermark may be stored correctly but retrieved incorrectly
+2. **Logic Condition Analysis**: Trace exact conditional logic causing retrieval failures
+3. **Log Cross-Validation**: Compare watermark contents vs resume parameters
+4. **CDC Strategy Integration**: Verify manual overrides work across all CDC strategies
+
+**Status**: ✅ **RESOLVED** - ID-only watermarks now work correctly for all CDC strategies.
+
 ### **P0 WATERMARK DOUBLE-COUNTING BUG (RESOLVED)**
 
 **Issue Discovered (August 25, 2025)**: Critical watermark row count discrepancy

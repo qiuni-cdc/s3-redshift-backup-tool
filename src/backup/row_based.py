@@ -186,12 +186,21 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     table_name=table_name
                 )
             
-            if not watermark or not watermark.last_mysql_data_timestamp:
+            if not watermark:
                 # No watermark - start from beginning
                 last_timestamp = '1970-01-01 00:00:00'
                 last_id = 0
                 self.logger.logger.info(
                     "No watermark found, starting row-based backup from beginning",
+                    table_name=table_name,
+                    initial_timestamp=last_timestamp
+                )
+            elif not watermark.last_mysql_data_timestamp and not getattr(watermark, 'last_processed_id', 0):
+                # No timestamp AND no ID - start from beginning
+                last_timestamp = '1970-01-01 00:00:00'
+                last_id = 0
+                self.logger.logger.info(
+                    "Empty watermark found, starting row-based backup from beginning",
                     table_name=table_name,
                     initial_timestamp=last_timestamp
                 )

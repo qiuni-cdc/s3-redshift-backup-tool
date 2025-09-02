@@ -34,7 +34,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         self._results_lock = threading.Lock()
         self._table_results = {}
     
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, limit: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
         """
         Execute inter-table parallel backup for all specified tables.
         
@@ -42,6 +42,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             tables: List of table names to backup
             chunk_size: Optional row limit per chunk (overrides config)
             limit: Deprecated - use chunk_size instead (for backward compatibility)
+            source_connection: Optional connection name to use instead of default
         
         Returns:
             True if all tables backed up successfully, False otherwise
@@ -213,9 +214,9 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             table_start_time = time.time()
             
             # Create dedicated database session for this thread
-            with self.database_session() as db_conn:
+            with self.database_session(source_connection) as db_conn:
                 success = self._process_single_table_parallel(
-                    db_conn, table_name, current_timestamp, thread_id
+                    db_conn, table_name, current_timestamp, thread_id, source_connection
                 )
                 
                 table_duration = time.time() - table_start_time
@@ -247,7 +248,8 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         db_conn, 
         table_name: str, 
         current_timestamp: str,
-        thread_id: int
+        thread_id: int,
+        source_connection: Optional[str] = None
     ) -> bool:
         """
         Process a single table with parallel-specific optimizations.
@@ -257,6 +259,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             table_name: Name of the table to process
             current_timestamp: Current backup timestamp
             thread_id: Thread identifier
+            source_connection: Optional connection name (for logging and context)
         
         Returns:
             True if table processed successfully

@@ -39,6 +39,7 @@ class S3TableWatermark:
     metadata: Optional[Dict[str, Any]] = None
     last_session_id: Optional[str] = None  # MySQL session ID for mode detection
     last_redshift_session_id: Optional[str] = None  # Redshift session ID for accumulation logic
+    id_range_extracted: Optional[Dict[str, int]] = None  # Track ID ranges for better visibility
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -1644,28 +1645,48 @@ class S3WatermarkManager:
     def set_manual_watermark(
         self,
         table_name: str,
-        data_timestamp: datetime
+        data_timestamp: Optional[datetime] = None,
+        data_id: Optional[int] = None
     ) -> bool:
         """
-        Set manual watermark for CLI operations (without extraction time).
+        Set manual watermark for CLI operations (timestamp and/or ID).
         
-        This creates a completely fresh watermark with only the data timestamp, 
-        which enables watermark-based filtering instead of session-based filtering.
+        This creates a completely fresh watermark with the specified timestamp and/or ID, 
+        which enables watermark-based filtering for both timestamp and ID-based CDC strategies.
         
         Args:
             table_name: Name of the table
-            data_timestamp: The data cutoff timestamp
+            data_timestamp: The data cutoff timestamp (optional)
+            data_id: The starting ID for ID-based CDC (optional)
             
         Returns:
             True if successful, False otherwise
         """
         try:
+            # Validate that at least one parameter is provided
+            if data_timestamp is None and data_id is None:
+                raise ValueError("Must provide either data_timestamp or data_id")
+            
+            # Create metadata to track manual settings
+            metadata = {
+                'manual_watermark': True,
+                'manual_timestamp': data_timestamp is not None,
+                'manual_id': data_id is not None
+            }
+            
+            # If ID is provided, add CDC configuration
+            if data_id is not None:
+                metadata['cdc_config'] = {
+                    'id_start_override': data_id,
+                    'manual_id_set': True
+                }
+            
             # Create a completely fresh watermark (ignore existing)
             watermark = S3TableWatermark(
                 table_name=table_name,
-                last_mysql_data_timestamp=data_timestamp.isoformat() + 'Z',
+                last_mysql_data_timestamp=data_timestamp.isoformat() + 'Z' if data_timestamp else None,
                 last_mysql_extraction_time=None,  # Explicitly None for manual watermarks
-                last_processed_id=0,  # CRITICAL FIX: Reset processed ID to 0
+                last_processed_id=data_id if data_id is not None else 0,  # Use provided ID or reset to 0
                 mysql_rows_extracted=0,
                 mysql_status='success',
                 redshift_rows_loaded=0, 
@@ -1675,16 +1696,24 @@ class S3WatermarkManager:
                 processed_s3_files=[],  # CRITICAL FIX: Reset processed files list
                 created_at=datetime.utcnow().isoformat() + 'Z',
                 updated_at=datetime.utcnow().isoformat() + 'Z',
-                metadata={'manual_watermark': True}
+                metadata=metadata
             )
             
             success = self._save_watermark(watermark)
             
             if success:
+                log_data = {
+                    'table': table_name,
+                    'watermark_type': 'manual'
+                }
+                if data_timestamp:
+                    log_data['data_timestamp'] = data_timestamp
+                if data_id is not None:
+                    log_data['data_id'] = data_id
+                    
                 logger.info(
                     f"Set manual watermark for {table_name}",
-                    data_timestamp=data_timestamp,
-                    watermark_type='manual'
+                    **log_data
                 )
             
             return success
