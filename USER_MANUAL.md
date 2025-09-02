@@ -552,29 +552,29 @@ python -m src.cli.main sync -t settlement.table_name
 3. **Backup Table from Specific ID (e.g., after bulk data import):**
 ```bash
 # Set starting ID to skip already processed records  
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 281623217
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --id 281623217
 
 # Backup from that ID onwards
-python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 10000
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --limit 10000
 ```
 
 4. **Resume ID-Based Backup After Failure:**
 ```bash
 # Check current ID progress
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
 
 # System automatically resumes from last processed ID
-python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
 ```
 
 5. **Process Specific ID Range for Testing:**
 ```bash
 # Set starting ID for controlled testing
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 100000
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --id 100000
 
 # Process limited rows to test pipeline  
-python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 5000
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --limit 5000
 ```
 
 #### Watermark Count Management (watermark-count)
@@ -1505,7 +1505,7 @@ ID-only watermarks have different requirements than timestamp-based watermarks a
 **1. Verify ID Watermark is Set Correctly:**
 ```bash
 # Check current watermark status
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
 
 # Look for these indicators of correct ID watermark:
 # - "Starting ID (Manual): XXX,XXX,XXX (user-configured)"
@@ -1519,7 +1519,7 @@ python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool --pipeline u
 python -m src.cli.main watermark set -t dw_parcel_detail_tool --id 281623217
 
 # CORRECT: Include pipeline for multi-schema tables
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 281623217
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --id 281623217
 ```
 
 **3. Verify CDC Strategy Configuration:**
@@ -1537,7 +1537,7 @@ cat config/pipelines/us_dw_unidw_2_public_pipeline.yml
 **4. Debug Watermark Retrieval in Logs:**
 ```bash
 # Run sync with verbose logging
-python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 100
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --limit 100
 
 # Check log for these success indicators:
 # - "last_processed_id": 281623217, "backup_strategy": "manual_cli"
@@ -1551,15 +1551,15 @@ python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unid
 **Problem: ID watermark not recognized**
 ```bash
 # Reset and set ID with explicit parameters
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --id 281623217
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --id 281623217
 ```
 
 **Problem: System starts from ID 0 despite manual setting**
 ```bash
 # This was a critical bug fixed in v1.2.0
 # Update to latest version and verify fix with:
-python -m src.cli.main sync -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public --limit 10
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --limit 10
 
 # Log should show: "resume_from_id": 281623217 (NOT 0)
 ```

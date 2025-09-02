@@ -1991,6 +1991,10 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
                     filtered_files.append((key, size, modified))
                     total_size += size
         
+        # Sort by newest first
+        all_files.sort(key=lambda x: x[2], reverse=True)
+        filtered_files.sort(key=lambda x: x[2], reverse=True)
+        
         # Display results
         if table:
             click.echo(f"📁 S3 Files for {table}:")
@@ -2002,23 +2006,44 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
             click.echo(f"   Files matching criteria: {len(filtered_files)}")
             click.echo(f"   Total size: {total_size / 1024 / 1024:.2f} MB")
         
-        # Show sample files
-        sample_files = filtered_files[:10]
-        for key, size, modified in sample_files:
+        # Show newest files first (increased from 10 to 20)
+        click.echo("   Showing newest files first:")
+        click.echo()
+        
+        display_limit = 20  # Show more files
+        # Use filtered_files if filters were applied, otherwise use all_files
+        files_to_display = filtered_files if (older_than or pattern) else all_files
+        sample_files = files_to_display[:display_limit]
+        
+        for i, (key, size, modified) in enumerate(sample_files, 1):
             size_mb = size / 1024 / 1024
             filename = key.split('/')[-1]
             
             if show_timestamps:
                 # Show detailed format with full timestamp
-                click.echo(f"     {filename} ({size_mb:.2f} MB, {modified})")
-                click.echo(f"       Full path: {key}")
+                click.echo(f"   {i:2d}. {filename}")
+                click.echo(f"       Size: {size_mb:.2f} MB")
+                click.echo(f"       Modified: {modified}")
+                click.echo(f"       Path: {key}")
             else:
-                # Show simplified format with just date
-                date_str = modified.strftime('%Y-%m-%d %H:%M')
-                click.echo(f"     {filename} ({size_mb:.2f} MB, {date_str})")
+                # Show simplified format with relative time
+                date_str = modified.strftime('%Y-%m-%d %H:%M:%S')
+                # Calculate age
+                from datetime import datetime
+                age = datetime.now(modified.tzinfo) - modified
+                if age.days > 0:
+                    age_str = f"{age.days}d ago"
+                elif age.seconds > 3600:
+                    age_str = f"{age.seconds // 3600}h ago"
+                else:
+                    age_str = f"{age.seconds // 60}m ago"
+                
+                click.echo(f"   {i:2d}. {filename}")
+                click.echo(f"       {size_mb:.2f} MB | {date_str} ({age_str})")
         
-        if len(filtered_files) > 10:
-            click.echo(f"     ... and {len(filtered_files) - 10} more files")
+        if len(files_to_display) > display_limit:
+            click.echo()
+            click.echo(f"   ... and {len(files_to_display) - display_limit} more files (oldest not shown)")
             
     except Exception as e:
         click.echo(f"❌ Failed to list S3 files: {e}", err=True)
@@ -2027,7 +2052,19 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
 def _s3_clean_table(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, dry_run: bool, force: bool, simple_delete: bool = False):
     """Clean S3 files for a specific table"""
     try:
-        clean_table_name = table.replace('.', '_').replace('-', '_')
+        # Use the same table name cleaning logic as _s3_list_files for v1.2.0 compatibility
+        if ':' in table:
+            scope, actual_table = table.split(':', 1)
+            # Clean scope: lowercase, replace special chars with underscores
+            clean_scope = scope.lower().replace('-', '_').replace('.', '_')
+            # Clean table: replace dots with underscores
+            clean_table = actual_table.replace('.', '_').replace('-', '_')
+            # Combine: scope_table_name
+            clean_table_name = f"{clean_scope}_{clean_table}"
+        else:
+            # Unscoped table (v1.0.0 compatibility)
+            clean_table_name = table.replace('.', '_').replace('-', '_')
+            
         prefix = f"{config.s3.incremental_path.strip('/')}/"
         
         # Find files to delete (handle pagination)
