@@ -1,0 +1,73 @@
+# US Data Warehouse Unidw Full Sync Test Pipeline
+# Testing full_sync CDC strategy with dimension tables
+
+pipeline:
+  name: "us_dw_unidw_full_sync_test"
+  description: "Enhanced test pipeline for all three full sync modes: replace/paginate/append"
+  source: "US_DW_UNIDW_SSH"        # unidw database  
+  target: "redshift_default"       # public schema
+  version: "1.2.0"
+  
+  processing:
+    strategy: "sequential"
+    batch_size: 50000
+    timeout_minutes: 300
+    max_parallel_tables: 4
+  
+  s3:
+    isolation_prefix: "us_dw_unidw_full_sync/"
+    partition_strategy: "table"  # Better for full sync - groups all table files together
+    compression: "snappy"
+  
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
+
+# Enhanced full sync testing with all three modes
+tables:
+  unidw.dw_dim_driver:
+    cdc_strategy: "full_sync"
+    full_sync_mode: "replace"    # TRUNCATE table before loading (true dimension refresh)
+    description: "Driver dimension table - true dimension refresh with replace mode"
+    processing:
+      batch_size: 50000000  # Very large batch size for full table processing
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 10.0
+    notes: |
+      Full sync replace mode:
+      - TRUNCATE table before loading
+      - True dimension table refresh
+      - No data duplication
+      - Suitable for small dimension tables that change completely
+
+  unidw.large_fact_table:
+    cdc_strategy: "full_sync"
+    full_sync_mode: "paginate"   # OFFSET-based pagination for large tables
+    description: "Large table without CDC columns - uses pagination"
+    processing:
+      batch_size: 50000
+    validation:
+      enable_data_quality_checks: true
+    notes: |
+      Full sync paginate mode:
+      - OFFSET-based pagination
+      - Processes large tables in chunks
+      - Uses APPEND loading (no TRUNCATE)
+      - Suitable for large tables without CDC columns
+  
+  unidw.legacy_test_table:
+    cdc_strategy: "full_sync"
+    full_sync_mode: "append"     # Backward compatible mode (current behavior)
+    description: "Legacy compatibility test - uses append mode"
+    processing:
+      batch_size: 5000
+    notes: |
+      Full sync append mode:
+      - Current behavior (backward compatibility)
+      - Always queries same rows with LIMIT
+      - APPEND loading (may cause duplicates)
+      - Used for testing migration scenarios
