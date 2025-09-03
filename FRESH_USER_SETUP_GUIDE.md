@@ -55,26 +55,23 @@ pip install pydantic mysql-connector-python boto3 psycopg2-binary click pandas p
 
 ## 🔧 **Step 2: Configuration Setup**
 
-### **2.1 Initialize Configuration**
+### **2.1 Check System Status**
 ```bash
-# Create default configuration structure
-python -m src.cli.main config setup
+# First, check if system is properly configured
+python -m src.cli.main status
+
+# View system information
+python -m src.cli.main info
+
+# Check available commands
+python -m src.cli.main --help
 ```
 
-This creates:
-```
-config/
-├── connections.yml       # Database connections
-├── pipelines/
-│   └── default.yml      # Default pipeline
-└── environments/
-    ├── development.yml   # Dev settings
-    └── production.yml    # Prod settings
-```
+**Note**: The system uses `.env` file configuration rather than separate config directories. The CLI will guide you through any missing configuration.
 
 ### **2.2 Configure Environment Variables**
 
-Create `.env` file in project root:
+**CRITICAL**: This is the main configuration step. Create `.env` file in project root:
 ```bash
 # Copy from template (if exists)
 cp .env.template .env
@@ -108,53 +105,28 @@ LOG_FILE=logs/backup.log
 EOF
 ```
 
-### **2.3 Configure Database Connections**
+### **2.3 Verify Configuration**
 
-Edit `config/connections.yml`:
-```yaml
-connections:
-  # Source MySQL Database
-  US_DW_UNIDW_SSH:
-    type: "mysql"
-    host: "your-mysql-host.com"
-    port: 3306
-    database: "unidw"
-    username: "your_mysql_user"
-    password: "your_mysql_password"
-    
-    # SSH tunnel configuration (if needed)
-    ssh_tunnel:
-      enabled: true
-      host: "your-bastion-host.com"
-      port: 22
-      username: "your_ssh_user"
-      key_path: "/path/to/your/ssh/key"
-      remote_bind_address: "your-mysql-host.internal"
-      remote_bind_port: 3306
-    
-    connection_params:
-      charset: "utf8mb4"
-      sql_mode: "TRADITIONAL"
-      autocommit: false
+```bash
+# Test system with your .env configuration
+python -m src.cli.main status
 
-  # Target Redshift
-  redshift_default:
-    type: "redshift"
-    host: "your-redshift-cluster.redshift.amazonaws.com"
-    port: 5439
-    database: "your_redshift_db"
-    schema: "public"
-    username: "your_redshift_user"
-    password: "your_redshift_password"
-    
-    # SSH tunnel for Redshift (if needed)
-    ssh_tunnel:
-      enabled: true
-      host: "your-redshift-bastion.com"
-      port: 22
-      username: "your_ssh_user"
-      key_path: "/path/to/your/ssh/key"
+# This will show:
+# - Database connectivity (MySQL via SSH tunnel)
+# - S3 bucket access
+# - Redshift connectivity (if configured)
+# - Any configuration issues
 ```
+
+**Expected Output:**
+```
+✅ Database Connection: Connected via SSH tunnel
+✅ S3 Bucket Access: Accessible
+✅ Redshift Connection: Connected via SSH tunnel
+✅ System Status: Ready for backup operations
+```
+
+**If you see errors**, check your `.env` file settings and network connectivity.
 
 ---
 
@@ -275,23 +247,30 @@ aws s3 ls s3://your-s3-bucket-name/test_pipeline/ --recursive
 
 ### **7.1 Connection Issues**
 
-**MySQL Connection Failed:**
+**System Status Shows Connection Errors:**
 ```bash
-# Check SSH tunnel
-ssh -v -i /path/to/your/ssh/key your_ssh_user@your-bastion-host.com
+# Check system status first
+python -m src.cli.main status
 
-# Test MySQL connection manually
-mysql -h your-mysql-host -u your_mysql_user -p -e "SELECT 1"
+# Common issues:
+# 1. SSH key permissions (must be 600)
+chmod 600 /path/to/your/ssh/key.pem
+
+# 2. Test SSH tunnel manually
+ssh -i /path/to/your/ssh/key your_ssh_user@your-bastion-host.com
+
+# 3. Check .env file settings
+grep -E "DB_|SSH_|S3_" .env
 ```
 
-**Redshift Connection Failed:**
+**Dependency Issues:**
 ```bash
-# Test Redshift connection manually
-psql -h your-redshift-cluster.redshift.amazonaws.com \
-     -p 5439 \
-     -U your_redshift_user \
-     -d your_redshift_db \
-     -c "SELECT 1"
+# If you get "ModuleNotFoundError: No module named 'pydantic'"
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Or install individual dependencies:
+pip install pydantic mysql-connector-python boto3 psycopg2-binary click pandas pyarrow paramiko
 ```
 
 ### **7.2 AWS/S3 Issues**
