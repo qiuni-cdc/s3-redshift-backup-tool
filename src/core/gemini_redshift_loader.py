@@ -59,12 +59,13 @@ class GeminiRedshiftLoader:
             self.logger.error(f"Redshift connection test failed: {e}")
             return False
         
-    def load_table_data(self, table_name: str) -> bool:
+    def load_table_data(self, table_name: str, cdc_strategy=None) -> bool:
         """
         Load S3 parquet data to Redshift using Gemini direct COPY approach.
         
         Args:
             table_name: Name of the table to load
+            cdc_strategy: CDC strategy instance (optional, for full_sync replace mode)
             
         Returns:
             True if loading successful, False otherwise
@@ -94,8 +95,14 @@ class GeminiRedshiftLoader:
                 self._set_error_status(table_name, "Table creation failed")
                 return False
             
+            # Step 2.5: Check if we need to truncate table before loading (full_sync replace mode)
+            if cdc_strategy and hasattr(cdc_strategy, 'requires_truncate_before_load'):
+                if cdc_strategy.requires_truncate_before_load():
+                    self._truncate_table_before_load(redshift_table_name)
+                    logger.info(f"Truncated table {redshift_table_name} for full_sync replace mode")
+            
             # Step 3: Get S3 parquet files for this table
-            s3_files = self._get_s3_parquet_files(table_name)
+            s3_files = self._get_s3_parquet_files(table_name, cdc_strategy)
             
             if not s3_files:
                 logger.warning(f"No S3 parquet files found for {table_name}")
@@ -137,6 +144,30 @@ class GeminiRedshiftLoader:
             logger.error(f"Gemini Redshift load failed for {table_name}: {e}")
             self._set_error_status(table_name, str(e))
             return False
+    
+    def _truncate_table_before_load(self, redshift_table: str) -> None:
+        """
+        Truncate table before loading for full_sync replace mode.
+        
+        Args:
+            redshift_table: Redshift table name to truncate
+        """
+        try:
+            with self._redshift_connection() as connection:
+                with connection.cursor() as cursor:
+                    # Construct full table name with schema
+                    full_table_name = f"{self.config.redshift.schema}.{redshift_table}"
+                    
+                    logger.info(f"Truncating table {full_table_name} for full_sync replace mode")
+                    cursor.execute(f"TRUNCATE TABLE {full_table_name}")
+                    connection.commit()
+                    
+                    logger.info(f"Successfully truncated table {full_table_name}")
+                    
+        except Exception as e:
+            error_msg = f"Failed to truncate table {redshift_table}: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg) from e
     
     def _get_redshift_table_name(self, mysql_table_name: str) -> str:
         """Convert MySQL table name to Redshift table name with v1.2.0 scoped support"""
@@ -191,7 +222,7 @@ class GeminiRedshiftLoader:
             logger.error(f"Failed to ensure Redshift table {table_name}: {e}")
             return False
     
-    def _get_s3_parquet_files(self, table_name: str) -> List[str]:
+    def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None) -> List[str]:
         """Get list of S3 parquet files for the table"""
         try:
             # Get watermark to determine what data needs to be loaded
@@ -230,15 +261,29 @@ class GeminiRedshiftLoader:
                 # Session-based filtering for actual backup operations
                 from datetime import datetime, timezone, timedelta
                 mysql_extraction_dt = datetime.fromisoformat(watermark.last_mysql_extraction_time.replace('Z', '+00:00'))
-                # Create a very wide time window to handle timezone differences and processing delays
-                session_start = mysql_extraction_dt - timedelta(hours=2)
-                session_end = mysql_extraction_dt + timedelta(hours=10)
+                
+                # CRITICAL FIX: For full_sync replace mode, use a much narrower time window
+                # to avoid loading accumulated files from previous test runs
+                if (cdc_strategy and hasattr(cdc_strategy, 'strategy_name') and 
+                    cdc_strategy.strategy_name == 'full_sync' and
+                    hasattr(cdc_strategy, 'sync_mode') and 
+                    cdc_strategy.sync_mode == 'replace'):
+                    
+                    # Very narrow window for full_sync replace: only files from this exact session
+                    session_start = mysql_extraction_dt - timedelta(minutes=30)
+                    session_end = mysql_extraction_dt + timedelta(hours=1)
+                    logger.info(f"Using NARROW session window for full_sync replace mode: files from {session_start} to {session_end}")
+                else:
+                    # Standard wide window for incremental operations
+                    session_start = mysql_extraction_dt - timedelta(hours=2)
+                    session_end = mysql_extraction_dt + timedelta(hours=10)
+                    logger.info(f"Using standard session-based incremental Redshift loading: files from {session_start} to {session_end}")
+                
                 # Ensure both times have timezone info
                 if session_start.tzinfo is None:
                     session_start = session_start.replace(tzinfo=timezone.utc)
                 if session_end.tzinfo is None:
                     session_end = session_end.replace(tzinfo=timezone.utc)
-                logger.info(f"Using session-based incremental Redshift loading: files from {session_start} to {session_end}")
             elif watermark.last_mysql_data_timestamp:
                 # Fallback: use data timestamp if no extraction time
                 from datetime import datetime, timezone
