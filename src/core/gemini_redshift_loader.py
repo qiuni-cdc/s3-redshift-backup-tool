@@ -400,20 +400,42 @@ class GeminiRedshiftLoader:
                 if file_modified_time.tzinfo is None:
                     file_modified_time = file_modified_time.replace(tzinfo=timezone.utc)
                 
+                # CRITICAL FIX: Extract timestamp from filename as primary source
+                # S3 LastModified can be significantly delayed due to processing
+                filename_timestamp = None
+                try:
+                    import re
+                    # Extract timestamp from filename pattern: *_YYYYMMDD_HHMMSS_*
+                    timestamp_match = re.search(r'_(\d{8}_\d{6})_', key)
+                    if timestamp_match:
+                        timestamp_str = timestamp_match.group(1)
+                        filename_timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+                        filename_timestamp = filename_timestamp.replace(tzinfo=timezone.utc)
+                        logger.debug(f"Extracted filename timestamp: {filename_timestamp} from {key}")
+                except Exception as e:
+                    logger.debug(f"Could not extract filename timestamp from {key}: {e}")
+                
+                # Use filename timestamp if available, fallback to LastModified
+                effective_timestamp = filename_timestamp if filename_timestamp else file_modified_time
+                
                 if session_start and session_end:
-                    # Session-based filtering: narrow time window around extraction
-                    if session_start <= file_modified_time <= session_end:
+                    # Session-based filtering: use effective timestamp (filename preferred)
+                    if session_start <= effective_timestamp <= session_end:
                         filtered_files.append(s3_uri)
-                        logger.debug(f"Including file (current session): {key} - modified {file_modified_time}")
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
+                        logger.debug(f"Including file (current session): {key} - {timestamp_source} {effective_timestamp}")
                     else:
-                        logger.debug(f"Skipping file (different session): {key} - modified {file_modified_time}")
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified" 
+                        logger.debug(f"Skipping file (different session): {key} - {timestamp_source} {effective_timestamp}")
                 elif cutoff_time:
-                    # Watermark-based filtering: files after watermark timestamp
-                    if file_modified_time > cutoff_time:
+                    # Watermark-based filtering: use effective timestamp
+                    if effective_timestamp > cutoff_time:
                         filtered_files.append(s3_uri)
-                        logger.debug(f"Including file (after watermark): {key} - modified {file_modified_time}")
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
+                        logger.debug(f"Including file (after watermark): {key} - {timestamp_source} {effective_timestamp}")
                     else:
-                        logger.debug(f"Skipping file (before watermark): {key} - modified {file_modified_time}")
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
+                        logger.debug(f"Skipping file (before watermark): {key} - {timestamp_source} {effective_timestamp}")
                 else:
                     # No cutoff - include all files (full load)
                     filtered_files.append(s3_uri)
@@ -460,17 +482,37 @@ class GeminiRedshiftLoader:
                             file_time = obj['LastModified']
                             if file_time.tzinfo is None:
                                 file_time = file_time.replace(tzinfo=timezone.utc)
+                            
+                            # Also extract filename timestamp for debugging
+                            filename_timestamp = None
+                            try:
+                                import re
+                                timestamp_match = re.search(r'_(\d{8}_\d{6})_', obj_key)
+                                if timestamp_match:
+                                    timestamp_str = timestamp_match.group(1)
+                                    filename_timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+                                    filename_timestamp = filename_timestamp.replace(tzinfo=timezone.utc)
+                            except:
+                                pass
+                            
+                            effective_timestamp = filename_timestamp if filename_timestamp else file_time
+                            
                             logger.info(f"DEBUG: File {i+1}: {obj_key}")
-                            logger.info(f"DEBUG:   LastModified: {file_time}")
+                            logger.info(f"DEBUG:   S3 LastModified: {file_time}")
+                            if filename_timestamp:
+                                logger.info(f"DEBUG:   Filename timestamp: {filename_timestamp}")
+                                logger.info(f"DEBUG:   Using timestamp: FILENAME (more reliable)")
+                            else:
+                                logger.info(f"DEBUG:   Using timestamp: S3 LASTMODIFIED (fallback)")
+                            logger.info(f"DEBUG:   Effective timestamp: {effective_timestamp}")
                             logger.info(f"DEBUG:   Cutoff time:  {cutoff_time}")
-                            if cutoff_time:
-                                logger.info(f"DEBUG:   After cutoff: {file_time > cutoff_time}")
+                            
                             # Check session window if applicable
                             if session_start and session_end:
                                 logger.info(f"DEBUG:   Session window: {session_start} to {session_end}")
-                                logger.info(f"DEBUG:   In session: {session_start <= file_time <= session_end}")
+                                logger.info(f"DEBUG:   In session: {session_start <= effective_timestamp <= session_end}")
                             elif cutoff_time:
-                                logger.info(f"DEBUG:   After cutoff: {file_time > cutoff_time}")
+                                logger.info(f"DEBUG:   After cutoff: {effective_timestamp > cutoff_time}")
                     except Exception as e:
                         logger.warning(f"DEBUG: Failed to get file info for {obj_key}: {e}")
             

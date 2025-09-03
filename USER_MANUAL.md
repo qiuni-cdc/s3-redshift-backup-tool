@@ -48,11 +48,19 @@
 - **Persistent Column Mappings**: System remembers column name transformations for consistent data loading
 - **Production-Tested**: Resolved critical schema mismatch issues in production
 
+#### 📋 CDC Strategies for Intelligent Data Processing
+- **Four CDC Strategies**: hybrid, id_only, timestamp_only, and **full_sync** for different table patterns
+- **Full Sync Strategy**: Complete table refresh for dimension tables and reference data
+- **ID-based Watermarks**: Support for append-only tables with auto-increment IDs
+- **Flexible Pipeline Configuration**: YAML-based CDC strategy configuration per table
+- **Smart Query Generation**: Automatic query optimization based on table characteristics
+
 #### 🔧 CLI Command Enhancements
 - **Better Error Messages**: Clear, actionable error reporting
 - **Progress Indicators**: Real-time progress for long-running operations
 - **Validation Commands**: New commands for data integrity checking
 - **Debug Mode**: Enhanced debugging output for troubleshooting
+- **Pipeline Commands**: New `sync pipeline` command for multi-schema support
 
 ### Quick Migration Guide
 
@@ -78,6 +86,15 @@ If you're upgrading from v1.0.0 or v1.1.0:
    REDSHIFT_COPY_OPTIONS=GZIP MAXERROR 1000
    ```
 
+4. **CDC Strategies**: Explore new data processing strategies:
+   ```bash
+   # Traditional incremental (hybrid strategy)
+   python -m src.cli.main sync pipeline -t settlement.claim_detail --pipeline settlement_pipeline
+   
+   # NEW: Complete refresh for dimension tables (full_sync strategy)
+   python -m src.cli.main sync pipeline -t dim.customer_types --pipeline dimension_pipeline
+   ```
+
 ---
 
 ## 🎯 System Overview
@@ -94,10 +111,13 @@ The S3 to Redshift Backup System is a production-grade data pipeline that:
 
 ### Key Features
 - ✅ **Two backup strategies** (Sequential, Inter-table Parallel)
+- ✅ **Four CDC strategies** (hybrid, id_only, timestamp_only, **full_sync**)
 - ✅ **Complete S3 to Redshift pipeline** with CSV conversion method
+- ✅ **Multi-schema pipeline support** with intelligent data processing
 - ✅ **Latest status views** for parcel tracking deduplication
 - ✅ **Production-ready table structure** with performance optimizations
 - ✅ **Incremental processing** with watermark management
+- ✅ **Complete refresh capability** for dimension tables (full_sync)
 - ✅ **Production monitoring** with structured logging
 - ✅ **Error handling** with retry mechanisms
 - ✅ **Data validation** and quality checks
@@ -857,6 +877,167 @@ python -m src.cli.main backup \
 - ⚠️ Higher memory and connection usage
 - 🎯 Use when: Multiple tables need backup, system can handle parallelism
 
+### 3. CDC Strategies (Multi-Schema Pipeline Support)
+
+The v1.2.0 system introduces **Change Data Capture (CDC) strategies** for intelligent incremental processing within multi-schema pipelines. These strategies determine how the system identifies and processes new/changed data.
+
+#### CDC Strategy Configuration
+
+CDC strategies are configured in pipeline YAML files:
+
+```yaml
+# config/pipelines/your_pipeline.yml
+tables:
+  schema.table_name:
+    cdc_strategy: "hybrid"           # or "id_only", "timestamp_only", "full_sync"
+    cdc_timestamp_column: "updated_at"  # for timestamp-based strategies
+    cdc_id_column: "id"                # for ID-based strategies
+```
+
+#### Available CDC Strategies
+
+**3.1. Hybrid Strategy (Recommended)**
+**Best for:** Most production tables with both timestamp and ID columns
+
+```bash
+# Pipeline sync using hybrid strategy (timestamp + ID)
+python -m src.cli.main sync pipeline -t settlement.settle_orders --pipeline us_dw_settlement_2_public_pipeline
+```
+
+**Characteristics:**
+- ✅ Uses BOTH timestamp and ID for maximum reliability
+- ✅ Handles timestamp ties and clock adjustments correctly
+- ✅ Most robust resume capability after failures
+- ✅ Handles high-frequency updates accurately
+- ⚙️ Query pattern: `WHERE updated_at > X OR (updated_at = X AND id > Y)`
+- 🎯 Use when: Tables have both reliable timestamp and ID columns
+
+**3.2. ID-Only Strategy**
+**Best for:** Append-only tables, tables with unreliable timestamps
+
+```bash
+# Pipeline sync using ID-only strategy
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
+```
+
+**Characteristics:**
+- ✅ Simple, reliable progression based on auto-increment IDs
+- ✅ Perfect for append-only data (logs, events, transactions)
+- ✅ No timestamp dependency issues
+- ✅ Supports manual starting ID watermarks
+- ⚙️ Query pattern: `WHERE id > X`
+- 🎯 Use when: Append-only tables, unreliable timestamp columns
+
+**Manual ID Watermark Management:**
+```bash
+# Set starting ID for incremental processing
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline --id 281623217
+
+# System resumes from ID 281623218 onwards
+python -m src.cli.main sync pipeline -t unidw.dw_parcel_detail_tool --pipeline us_dw_unidw_2_public_pipeline
+```
+
+**3.3. Timestamp-Only Strategy**
+**Best for:** Tables with reliable timestamps but no meaningful ID column
+
+```bash
+# Pipeline sync using timestamp-only strategy
+python -m src.cli.main sync pipeline -t analytics.daily_summary --pipeline analytics_pipeline
+```
+
+**Characteristics:**
+- ✅ Traditional incremental processing by timestamp
+- ✅ Works with any timestamp column (created_at, updated_at, etc.)
+- ⚠️ Potential issues with timestamp ties and clock adjustments
+- ⚙️ Query pattern: `WHERE updated_at > 'timestamp'`
+- 🎯 Use when: Reliable timestamps, no suitable ID column
+
+**3.4. Full Sync Strategy** ⭐ **NEW FEATURE**
+**Best for:** Small dimension tables, reference data, complete refresh scenarios
+
+```bash
+# Pipeline sync using full_sync strategy (complete table refresh)
+python -m src.cli.main sync pipeline -t unidw.dw_dim_driver --pipeline us_dw_unidw_full_sync_test_pipeline
+```
+
+**Characteristics:**
+- ✅ **Complete table refresh** on every sync (no incremental logic)
+- ✅ **No watermark dependency** - always queries entire table
+- ✅ **Simple and predictable** - guarantees complete data consistency
+- ✅ **No resume complexity** - starts fresh every time
+- ✅ **Schema independent** - works with any table structure
+- ⚙️ **Query pattern**: `SELECT * FROM table LIMIT N` (no WHERE clause)
+- 🎯 **Use when**: Small dimension tables, reference data, daily snapshots
+
+**Full Sync Use Cases:**
+
+**✅ Ideal Scenarios:**
+- **Small dimension tables** (< 100K rows): Customer types, product categories, lookup tables
+- **Reference data**: Currency rates, configuration settings, business rules
+- **Daily snapshots**: Complete state captures for reporting
+- **Data quality issues**: When timestamps/IDs are unreliable
+- **Complete refresh requirements**: When incremental logic isn't suitable
+
+**❌ Not Suitable For:**
+- **Large fact tables** (millions of rows): High storage and processing costs
+- **Append-only tables**: Use id_only strategy instead
+- **High-frequency updates**: Inefficient for frequently changing data
+- **Cost-sensitive environments**: Creates duplicate data in S3
+
+**Full Sync Examples:**
+
+```bash
+# Dimension table sync (complete refresh)
+python -m src.cli.main sync pipeline -t unidw.dw_dim_driver --pipeline us_dw_unidw_full_sync_test_pipeline --limit 5000
+
+# Reference data sync with backup-only
+python -m src.cli.main sync pipeline -t reference.currency_rates --pipeline reference_pipeline --backup-only
+
+# Complete daily snapshot
+python -m src.cli.main sync pipeline -t analytics.daily_config --pipeline analytics_full_sync_pipeline
+```
+
+**Full Sync Behavior:**
+- **No Incremental Logic**: Every sync processes the entire table
+- **S3 Storage**: Creates new complete files each time (not appended)
+- **Watermark Tracking**: Tracked for monitoring but doesn't affect queries
+- **Redshift Loading**: Loads complete dataset each sync
+- **Storage Management**: Regular cleanup recommended (`s3clean` command)
+
+**S3 Storage Considerations for Full Sync:**
+```bash
+# Full sync creates complete copies - cleanup recommended
+python -m src.cli.main s3clean clean -t unidw.dw_dim_driver -p us_dw_unidw_full_sync_test_pipeline --older-than "7d"
+
+# Check storage usage
+python -m src.cli.main s3clean list -t unidw.dw_dim_driver -p us_dw_unidw_full_sync_test_pipeline
+```
+
+**Full Sync vs Other Strategies Comparison:**
+
+| Aspect | Full Sync | Hybrid | ID-Only | Timestamp-Only |
+|--------|-----------|---------|---------|---------------|
+| Query Pattern | `SELECT * FROM table` | `WHERE timestamp > X OR (timestamp = X AND id > Y)` | `WHERE id > X` | `WHERE timestamp > 'Y'` |
+| Watermark Usage | Tracking only | Critical for queries | Critical for queries | Critical for queries |
+| Data Volume | Same every sync | Only new/changed | Only new records | Only recent records |
+| Resume Capability | No (starts fresh) | Yes (precise position) | Yes (by ID) | Yes (by timestamp) |
+| Storage Efficiency | Low (duplicates) | High (incremental) | High (incremental) | High (incremental) |
+| Use Case | Small dimensions | Most production tables | Append-only logs | Time-series data |
+
+### Pipeline vs Legacy Commands
+
+**v1.2.0 Multi-Schema (Recommended):**
+```bash
+# Use pipeline commands for multi-schema support
+python -m src.cli.main sync pipeline -t schema.table_name --pipeline your_pipeline
+```
+
+**Legacy v1.0/v1.1 (Still Supported):**
+```bash
+# Legacy commands still work for backward compatibility
+python -m src.cli.main sync -t table_name
+```
+
 ### Strategy Recommendation
 
 **For most use cases, use `sequential` strategy** - it's reliable, fast, and handles all table sizes efficiently.
@@ -868,12 +1049,40 @@ python -m src.cli.main backup \
 
 ### Strategy Selection Guide
 
+#### Backup Processing Strategies (Legacy & Multi-Schema)
+
 | Table Size | Number of Tables | Recommended Strategy | Example |
 |------------|------------------|---------------------|---------|
 | Small-Medium | 1 | Sequential | Single claim table |
 | Small-Medium | 2-10 | Inter-table | Multiple settlement tables |
 | Large | 1 | Sequential | Delivery detail table |
 | Mixed | Mixed | Sequential (safe) | Production environments |
+
+#### CDC Data Processing Strategies (v1.2.0 Multi-Schema Pipelines)
+
+| Table Type | Data Pattern | CDC Strategy | Query Behavior | Use Case |
+|------------|--------------|--------------|----------------|----------|
+| **Small Dimensions** | Any structure | **full_sync** | `SELECT * FROM table` | Lookup tables, reference data |
+| **Large Fact Tables** | Timestamp + ID | **hybrid** | `WHERE time > X OR (time = X AND id > Y)` | Most production tables |
+| **Append-only Tables** | Auto-increment ID | **id_only** | `WHERE id > X` | Logs, events, transactions |
+| **Time-series Data** | Reliable timestamp | **timestamp_only** | `WHERE timestamp > 'Y'` | Sensor data, analytics |
+
+#### Combined Selection Guide
+
+**For Small Tables (< 100K rows):**
+- Dimension/Reference data → **full_sync** (complete refresh)
+- Incremental data → **hybrid** or **id_only** 
+
+**For Large Tables (> 100K rows):**
+- Most tables → **hybrid** (timestamp + ID)
+- Append-only → **id_only** 
+- Time-series → **timestamp_only**
+- Never use **full_sync** for large tables
+
+**Storage & Performance Considerations:**
+- **full_sync**: Creates duplicate S3 files, needs regular cleanup
+- **hybrid/id_only/timestamp_only**: Efficient incremental storage
+- Multiple tables: Use **inter-table** processing + appropriate CDC strategy
 
 ---
 

@@ -463,7 +463,8 @@ class S3WatermarkManager:
         s3_file_count: int = 0,
         error_message: Optional[str] = None,
         mode: str = 'auto',
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
         Update MySQL extraction watermark with mode control.
@@ -471,6 +472,7 @@ class S3WatermarkManager:
         Args:
             mode: 'auto' (smart detection), 'absolute' (replace count), 'additive' (add to existing)
             session_id: Session identifier for auto mode detection
+            metadata: Optional metadata dictionary to merge with existing watermark metadata
         """
         try:
             # Get existing watermark or create new
@@ -531,6 +533,12 @@ class S3WatermarkManager:
             watermark.backup_strategy = backup_strategy
             watermark.s3_file_count = s3_file_count
             watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
+            
+            # Merge metadata if provided (for full_sync_mode and other CDC strategy metadata)
+            if metadata:
+                existing_metadata = watermark.metadata or {}
+                existing_metadata.update(metadata)
+                watermark.metadata = existing_metadata
             
             if error_message:
                 watermark.last_error = error_message

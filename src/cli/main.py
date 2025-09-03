@@ -28,6 +28,94 @@ from src.utils.exceptions import BackupSystemError, ConfigurationError
 from src.core.connections import ConnectionManager
 
 
+def _create_cdc_strategy_for_table(pipeline_name: str, table_name: str):
+    """
+    Create CDC strategy instance for a table from pipeline configuration.
+    
+    Args:
+        pipeline_name: Name of the pipeline (e.g., 'us_dw_hybrid_v1_2')
+        table_name: Table name (e.g., 'settlement.settle_orders')
+        
+    Returns:
+        CDCStrategy instance or None if no CDC configuration found
+    """
+    try:
+        import yaml
+        from pathlib import Path
+        from src.core.cdc_strategy_engine import CDCStrategyFactory, CDCConfig, CDCStrategyType
+        from src.utils.logging import get_logger
+        
+        logger = get_logger(__name__)
+        
+        # Load pipeline configuration
+        config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
+        if not config_path.exists():
+            logger.warning(f"Pipeline configuration not found: {config_path}")
+            return None
+        
+        with open(config_path, 'r') as f:
+            pipeline_config = yaml.safe_load(f)
+        
+        # Extract table-specific CDC configuration
+        tables_config = pipeline_config.get('tables', {})
+        
+        # Remove scope prefix from table name for config lookup
+        config_table_name = table_name
+        if ':' in table_name:
+            _, config_table_name = table_name.split(':', 1)
+        
+        table_config = tables_config.get(config_table_name, {})
+        
+        if not table_config:
+            # Use print instead of logger for CLI context
+            print(f"No CDC configuration found for {config_table_name} in {pipeline_name}")
+            return None
+        
+        # Parse CDC configuration
+        cdc_strategy_name = table_config.get('cdc_strategy', 'timestamp_only')
+        
+        # Map string to enum
+        strategy_mapping = {
+            'timestamp_only': CDCStrategyType.TIMESTAMP_ONLY,
+            'hybrid': CDCStrategyType.HYBRID,
+            'id_only': CDCStrategyType.ID_ONLY,
+            'full_sync': CDCStrategyType.FULL_SYNC,
+            'custom_sql': CDCStrategyType.CUSTOM_SQL
+        }
+        
+        if cdc_strategy_name not in strategy_mapping:
+            print(f"Unknown CDC strategy: {cdc_strategy_name}")
+            return None
+        
+        strategy_type = strategy_mapping[cdc_strategy_name]
+        
+        # Build CDC configuration
+        cdc_config = CDCConfig(
+            strategy=strategy_type,
+            timestamp_column=table_config.get('cdc_timestamp_column'),
+            id_column=table_config.get('cdc_id_column'),
+            ordering_columns=table_config.get('cdc_ordering_columns'),
+            custom_query=table_config.get('cdc_custom_query'),
+            batch_size=table_config.get('cdc_batch_size', 50000)
+        )
+        
+        # For full_sync strategy, add metadata for mode
+        if strategy_type == CDCStrategyType.FULL_SYNC:
+            full_sync_mode = table_config.get('full_sync_mode', 'append')
+            cdc_config.metadata = {'full_sync_mode': full_sync_mode}
+        
+        # Create strategy instance
+        cdc_strategy = CDCStrategyFactory.create_strategy(cdc_config)
+        
+        # Use print instead of logger for CLI context - success is shown by CLI
+        return cdc_strategy
+        
+    except Exception as e:
+        # Use print for CLI context
+        print(f"Failed to create CDC strategy for {table_name}: {e}")
+        return None
+
+
 def _auto_detect_pipeline_for_table(table_name: str) -> Tuple[Optional[str], List[str], bool]:
     """
     Auto-detect the appropriate pipeline for a given table with conflict detection.
@@ -715,6 +803,18 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
                 for table_name in tables:
                     click.echo(f"   Loading: {table_name}")
                     
+                    # Create CDC strategy for this table if pipeline is specified
+                    cdc_strategy = None
+                    if effective_pipeline:
+                        try:
+                            cdc_strategy = _create_cdc_strategy_for_table(effective_pipeline, table_name)
+                            if cdc_strategy:
+                                strategy_info = cdc_strategy.get_sync_mode() if hasattr(cdc_strategy, 'get_sync_mode') else cdc_strategy.strategy_name
+                                click.echo(f"   CDC Strategy: {strategy_info}")
+                        except Exception as cdc_e:
+                            click.echo(f"   ⚠️  CDC Strategy creation failed: {cdc_e}")
+                            # Continue without CDC strategy (fallback to default behavior)
+                    
                     # Add timeout and retry for individual table loading
                     max_attempts = 2
                     table_success = False
@@ -724,7 +824,7 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
                             if attempt > 0:
                                 click.echo(f"   Retrying {table_name} (attempt {attempt + 1}/{max_attempts})...")
                             
-                            table_success = redshift_loader.load_table_data(table_name)
+                            table_success = redshift_loader.load_table_data(table_name, cdc_strategy)
                             
                             if table_success:
                                 break  # Success, exit retry loop
@@ -2370,5 +2470,93 @@ if __name__ == '__main__':
     if column_mapping_enabled:
         import os
         os.environ['CLI_COLUMN_MAPPING'] = 'enabled'
+    
+    
+    # Add CDC validation command
+    @cli.command()
+    @click.option('--table', '-t', help='Table name to validate CDC strategy for')
+    @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support')
+    @click.pass_context
+    def validate_cdc(ctx, table: str, pipeline: str):
+        """
+        Validate CDC strategy configuration for tables.
+        
+        Shows CDC strategy information and validates configuration.
+        
+        Examples:
+            # Validate CDC strategy for a table
+            s3-backup validate-cdc -t settlement.settle_orders -p us_dw_hybrid_v1_2
+            
+            # Show all available CDC strategies
+            s3-backup validate-cdc
+        """
+        config = ctx.obj['config']
+        
+        if table and pipeline:
+            # Validate specific table
+            click.echo(f"🔍 Validating CDC strategy for {table} in pipeline {pipeline}")
+            
+            try:
+                cdc_strategy = _create_cdc_strategy_for_table(pipeline, table)
+                
+                if cdc_strategy:
+                    click.echo(f"✅ CDC Strategy: {cdc_strategy.strategy_name}")
+                    
+                    # Show strategy details
+                    config_obj = cdc_strategy.config
+                    click.echo(f"   Strategy type: {config_obj.strategy.value}")
+                    
+                    if config_obj.timestamp_column:
+                        click.echo(f"   Timestamp column: {config_obj.timestamp_column}")
+                    
+                    if config_obj.id_column:
+                        click.echo(f"   ID column: {config_obj.id_column}")
+                    
+                    if hasattr(cdc_strategy, 'get_sync_mode'):
+                        mode = cdc_strategy.get_sync_mode()
+                        click.echo(f"   Full sync mode: {mode}")
+                        
+                        if mode == 'replace':
+                            click.echo(f"   ⚠️  Replace mode: Will TRUNCATE table before loading")
+                        elif mode == 'paginate':
+                            click.echo(f"   📄 Paginate mode: Uses OFFSET-based pagination")
+                        elif mode == 'append':
+                            click.echo(f"   ➕ Append mode: Backwards compatible (may cause duplicates)")
+                    
+                    click.echo(f"   Batch size: {config_obj.batch_size}")
+                    
+                    click.echo("✅ Configuration is valid")
+                    
+                else:
+                    click.echo("❌ No CDC strategy configuration found")
+                    click.echo("   Check pipeline configuration file and table name")
+                    
+            except Exception as e:
+                click.echo(f"❌ Validation failed: {e}")
+        
+        else:
+            # Show available strategies
+            click.echo("📋 Available CDC Strategies:")
+            click.echo("")
+            
+            strategies = [
+                ("timestamp_only", "Uses timestamp column for change detection (v1.0.0 compatible)"),
+                ("hybrid", "Uses timestamp + ID columns for robust change detection"),
+                ("id_only", "Uses ID column for append-only tables"),
+                ("full_sync", "Complete table refresh with replace/paginate/append modes"),
+                ("custom_sql", "User-defined SQL query for custom change detection")
+            ]
+            
+            for strategy_name, description in strategies:
+                click.echo(f"   • {strategy_name:15} - {description}")
+            
+            click.echo("")
+            click.echo("🔧 Full Sync Modes:")
+            click.echo("   • replace   - TRUNCATE table before loading (true dimension refresh)")
+            click.echo("   • paginate  - OFFSET-based pagination for large tables")
+            click.echo("   • append    - Current behavior (backward compatibility)")
+            
+            click.echo("")
+            click.echo("Use --table and --pipeline options to validate specific configurations.")
     
     cli()

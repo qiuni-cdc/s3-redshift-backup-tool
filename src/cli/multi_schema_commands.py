@@ -983,10 +983,31 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                 try:
                     from src.core.gemini_redshift_loader import GeminiRedshiftLoader
                     from src.core.s3_watermark_manager import S3WatermarkManager
+                    from src.core.cdc_configuration_manager import CDCConfigurationManager
                     
                     # Use the proven v1.0.0 pattern for Redshift loading
                     redshift_loader = GeminiRedshiftLoader(config)
                     watermark_manager = S3WatermarkManager(config)
+                    
+                    # Create CDC strategy for full_sync replace mode support
+                    cdc_strategy = None
+                    try:
+                        cdc_config_manager = CDCConfigurationManager()
+                        # Convert table_config to dict for CDC parsing
+                        table_config_dict = {
+                            'cdc_strategy': table_config.cdc_strategy,
+                            'cdc_timestamp_column': table_config.cdc_timestamp_column,
+                            'cdc_id_column': table_config.cdc_id_column,
+                            'full_sync_mode': table_config.full_sync_mode,
+                            'batch_size': table_config.processing.get('batch_size', 50000)
+                        }
+                        cdc_strategy = cdc_config_manager.create_cdc_strategy(table_config_dict, base_table_name)
+                        if cdc_strategy:
+                            strategy_mode = cdc_strategy.get_sync_mode() if hasattr(cdc_strategy, 'get_sync_mode') else 'unknown'
+                            logger.info(f"Created CDC strategy for {base_table_name}: {cdc_strategy.strategy_name} ({strategy_mode} mode)")
+                    except Exception as cdc_e:
+                        logger.warning(f"Failed to create CDC strategy for {base_table_name}: {cdc_e}")
+                        # Continue without CDC strategy - will use default behavior
                     
                     # Test Redshift connection first
                     connection_test = redshift_loader._test_connection()
@@ -994,7 +1015,8 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                         raise Exception("Redshift connection test failed")
                     
                     # Load table data to Redshift using the scoped name for S3 file discovery
-                    redshift_success = redshift_loader.load_table_data(scoped_table_name)
+                    # Pass CDC strategy for full_sync replace mode TRUNCATE support
+                    redshift_success = redshift_loader.load_table_data(scoped_table_name, cdc_strategy)
                     
                 except Exception as redshift_error:
                     logger.error(f"Redshift loading failed for {scoped_table_name}: {redshift_error}")
