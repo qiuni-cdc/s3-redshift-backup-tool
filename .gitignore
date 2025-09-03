@@ -42,6 +42,7 @@ venv/
 env/
 ENV/
 test_env/
+s3_backup_venv/
 
 # IDE
 .vscode/
