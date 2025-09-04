@@ -54,12 +54,21 @@ Welcome to our production-ready MySQL → S3 → Redshift incremental backup sys
 - Automatic table creation
 
 ### 5. **Advanced Features (v1.2.0)**
+- **Pipeline Configuration System**: YAML-based pipeline definitions in `config/pipelines/`
 - **CDC (Change Data Capture) strategies**: timestamp_only, hybrid, id_only, full_sync, custom_sql
-- **Multi-Schema Support**: Pipeline-based (`-p`) and connection-based (`-c`) table handling
+- **Auto-Detection**: Automatically finds the right pipeline for your table
 - **Column Mapping System**: Automatic MySQL → Redshift column name compatibility
 - **Advanced Watermark Management**: ID-based watermarks, hybrid timestamp+ID strategies
 - **Enhanced S3 Management**: Timestamp-based cleanup, force operations, dry-run previews
 - **Row Count Validation**: Cross-system validation and discrepancy fixing
+
+#### Pipeline Configuration Files
+Each pipeline in `config/pipelines/*.yml` defines:
+- Source and target connections
+- Table-specific CDC strategies
+- Processing settings (batch size, timeouts)
+- S3 isolation paths
+- Data validation rules
 
 ## 📚 Basic Concepts
 
@@ -72,6 +81,24 @@ Think of watermarks as "bookmarks" that track where the last sync ended:
 ### Backup Strategies
 1. **Sequential** (Default): Tables processed one by one
 2. **Inter-table Parallel**: Multiple tables simultaneously
+
+### Pipeline System (v1.2.0)
+Pipelines are YAML configurations that define how tables are synced:
+
+```yaml
+# Example: config/pipelines/us_dw_hybrid_v1_2.yml
+pipeline:
+  name: "us_dw_hybrid_cdc_v1.2"
+  source: "US_DW_RO_SSH"      # MySQL connection
+  target: "redshift_default"   # Redshift connection
+
+tables:
+  settle_orders:
+    cdc_strategy: "hybrid"     # timestamp + ID columns
+    cdc_timestamp_column: "updated_at"
+    cdc_id_column: "id"
+    batch_size: 75000
+```
 
 ### Data Flow
 ```
@@ -157,18 +184,20 @@ pip install -r requirements.txt
 
 #### Basic Table Sync
 ```bash
-# Sync a single table (incremental)
+# Sync a single table (auto-detects pipeline from config/pipelines/)
 python -m src.cli.main sync -t settlement.orders
 
 # Sync multiple tables (comma-separated)
 python -m src.cli.main sync -t settlement.orders,settlement.customers
 
-# Multi-schema sync (v1.2.0) - if you have pipeline configurations
-python -m src.cli.main sync -t settlement.orders -p us_dw_pipeline
+# Specify pipeline explicitly (when multiple pipelines match the table)
+python -m src.cli.main sync -t settlement.settle_orders -p us_dw_hybrid_v1_2
+
+# Use connection name instead of pipeline
 python -m src.cli.main sync -t settlement.orders -c US_DW_RO_SSH
 ```
 
-**Note**: The `-p` (pipeline) and `-c` (connection) flags are optional and only needed if you have multiple database configurations. Most users can omit these flags.
+**Pipeline Auto-Detection**: The tool checks `config/pipelines/*.yml` files to find which pipeline handles your table. If multiple pipelines match, you'll need to specify `-p pipeline_name`.
 
 #### Check Sync Status
 ```bash
@@ -271,8 +300,9 @@ python -m src.cli.main sync -t your_schema.your_table
 | **Validate Row Counts** | `python -m src.cli.main watermark-count validate-counts -t table` |
 | **View Column Mappings** | `python -m src.cli.main column-mappings show -t table` |
 | **List All Column Mappings** | `python -m src.cli.main column-mappings list` |
-| **Multi-Schema Pipeline** | `python -m src.cli.main sync -t table -p pipeline_name` (optional) |
-| **Multi-Schema Connection** | `python -m src.cli.main sync -t table -c connection_name` (optional) |
+| **Sync with Pipeline** | `python -m src.cli.main sync -t table -p pipeline_name` |
+| **Sync with Connection** | `python -m src.cli.main sync -t table -c connection_name` |
+| **List Pipeline Tables** | Check `config/pipelines/*.yml` for table configurations |
 
 ## ✅ Best Practices
 
@@ -414,23 +444,23 @@ python -m src.cli.main watermark set -t monthly_table --timestamp '2025-01-01 00
 python -m src.cli.main sync -t monthly_table
 ```
 
-### Scenario 4: Multi-Schema Operations (v1.2.0)
+### Scenario 4: Working with Pipeline Configurations (v1.2.0)
 ```bash
-# Only needed if you have multiple database configurations:
+# 1. Check available pipelines
+ls config/pipelines/
+# Example: us_dw_pipeline.yml, us_dw_hybrid_v1_2.yml, etc.
 
-# 1. Sync with specific pipeline (if config/pipelines/us_dw_pipeline.yml exists)
-python -m src.cli.main sync -t settlement.orders -p us_dw_pipeline
+# 2. Sync table using specific pipeline (if auto-detection finds multiple)
+python -m src.cli.main sync -t settlement.settle_orders -p us_dw_hybrid_v1_2
 
-# 2. Check watermark for pipeline-scoped table
-python -m src.cli.main watermark get -t settlement.orders -p us_dw_pipeline
+# 3. Check watermark for pipeline-managed table
+python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_hybrid_v1_2
 
-# 3. Clean S3 files for connection-scoped table
-python -m src.cli.main s3clean clean -t settlement.orders -c US_DW_RO_SSH --older-than 7d
+# 4. Clean S3 files with pipeline context
+python -m src.cli.main s3clean clean -t settlement.settle_orders -p us_dw_hybrid_v1_2 --older-than 7d
 
-# 4. List all column mappings to check schema compatibility
-python -m src.cli.main column-mappings list
-
-# Note: Most users don't need -p or -c flags unless running multiple pipelines
+# 5. View CDC configuration for the table
+grep -A 10 "settle_orders:" config/pipelines/us_dw_hybrid_v1_2.yml
 ```
 
 ## 🚦 Getting Started Checklist
