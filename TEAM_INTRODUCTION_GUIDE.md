@@ -182,22 +182,32 @@ pip install -r requirements.txt
 
 ### 2. Daily Sync Operations
 
-#### Basic Table Sync
+#### Basic Table Sync (v1.0.0 Compatibility)
 ```bash
-# Sync a single table (auto-detects pipeline from config/pipelines/)
+# Direct sync for v1.0.0 compatibility (uses default pipeline if configured)
 python -m src.cli.main sync -t settlement.orders
 
-# Sync multiple tables (comma-separated)
-python -m src.cli.main sync -t settlement.orders,settlement.customers
-
-# Specify pipeline explicitly (when multiple pipelines match the table)
-python -m src.cli.main sync -t settlement.settle_orders -p us_dw_hybrid_v1_2
-
-# Use connection name instead of pipeline
-python -m src.cli.main sync -t settlement.orders -c US_DW_RO_SSH
+# Multiple tables (each with -t flag)
+python -m src.cli.main sync -t settlement.orders -t settlement.customers
 ```
 
-**Pipeline Auto-Detection**: The tool checks `config/pipelines/*.yml` files to find which pipeline handles your table. If multiple pipelines match, you'll need to specify `-p pipeline_name`.
+#### Pipeline-Based Sync (v1.1.0+ Recommended)
+```bash
+# Sync using pipeline configuration
+python -m src.cli.main sync pipeline -p us_dw_pipeline -t settlement.orders
+
+# Sync multiple tables with pipeline
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settle_orders -t redelivery_orders
+
+# Dry run to preview operations
+python -m src.cli.main sync pipeline -p us_dw_pipeline -t orders --dry-run
+```
+
+#### Connection-Based Sync (Ad-hoc)
+```bash
+# Sync using explicit connections
+python -m src.cli.main sync connections -s US_DW_RO_SSH -r redshift_default -t orders
+```
 
 #### Check Sync Status
 ```bash
@@ -230,7 +240,10 @@ python -m src.cli.main watermark set -t settlement.orders --id 1000000
 # Set both timestamp and ID (for hybrid CDC)
 python -m src.cli.main watermark set -t settlement.orders --timestamp '2025-01-01 00:00:00' --id 1000000
 
-# Run sync
+# Run sync with pipeline
+python -m src.cli.main sync pipeline -p us_dw_pipeline -t settlement.orders
+
+# Or use v1.0.0 syntax (if default pipeline configured)
 python -m src.cli.main sync -t settlement.orders
 ```
 
@@ -247,11 +260,11 @@ python -m src.cli.main sync -t large_table --limit 50000 --max-chunks 10
 # Monitor memory usage
 python -m src.cli.main sync -t large_table --batch-size 5000
 
-# Run during off-peak hours
-nohup python -m src.cli.main sync -t large_table > sync.log 2>&1 &
+# Run during off-peak hours with pipeline
+nohup python -m src.cli.main sync pipeline -p us_dw_pipeline -t large_table > sync.log 2>&1 &
 
 # Dry run to estimate scope
-python -m src.cli.main sync -t large_table --dry-run
+python -m src.cli.main sync pipeline -p us_dw_pipeline -t large_table --dry-run
 ```
 
 ### 5. Schema Changes Workflow
@@ -277,8 +290,9 @@ python -m src.cli.main sync -t your_schema.your_table
 
 | Task | Command |
 |------|---------|
-| **Sync Table** | `python -m src.cli.main sync -t schema.table` |
-| **Multiple Tables** | `python -m src.cli.main sync -t table1,table2,table3` |
+| **Sync Table (v1.0.0)** | `python -m src.cli.main sync -t schema.table` |
+| **Sync with Pipeline** | `python -m src.cli.main sync pipeline -p pipeline_name -t table` |
+| **Multiple Tables** | `python -m src.cli.main sync -t table1 -t table2 -t table3` |
 | **Check Status** | `python -m src.cli.main status` |
 | **View Watermark** | `python -m src.cli.main watermark get -t table` |
 | **Reset Watermark** | `python -m src.cli.main watermark reset -t table` |
@@ -300,8 +314,10 @@ python -m src.cli.main sync -t your_schema.your_table
 | **Validate Row Counts** | `python -m src.cli.main watermark-count validate-counts -t table` |
 | **View Column Mappings** | `python -m src.cli.main column-mappings show -t table` |
 | **List All Column Mappings** | `python -m src.cli.main column-mappings list` |
-| **Sync with Pipeline** | `python -m src.cli.main sync -t table -p pipeline_name` |
-| **Sync with Connection** | `python -m src.cli.main sync -t table -c connection_name` |
+| **Pipeline Sync** | `python -m src.cli.main sync pipeline -p pipeline_name -t table` |
+| **Connection Sync** | `python -m src.cli.main sync connections -s source -r target -t table` |
+| **Dry Run** | `python -m src.cli.main sync pipeline -p pipeline_name -t table --dry-run` |
+| **Parallel Override** | `python -m src.cli.main sync pipeline -p pipeline_name -t table --parallel` |
 | **List Pipeline Tables** | Check `config/pipelines/*.yml` for table configurations |
 
 ## ✅ Best Practices
@@ -444,23 +460,29 @@ python -m src.cli.main watermark set -t monthly_table --timestamp '2025-01-01 00
 python -m src.cli.main sync -t monthly_table
 ```
 
-### Scenario 4: Working with Pipeline Configurations (v1.2.0)
+### Scenario 4: Working with Pipeline Configurations (v1.1.0+)
 ```bash
 # 1. Check available pipelines
 ls config/pipelines/
-# Example: us_dw_pipeline.yml, us_dw_hybrid_v1_2.yml, etc.
+# Example: us_dw_pipeline.yml, us_dw_hybrid_v1_2.yml, default.yml, etc.
 
-# 2. Sync table using specific pipeline (if auto-detection finds multiple)
-python -m src.cli.main sync -t settlement.settle_orders -p us_dw_hybrid_v1_2
+# 2. View pipeline configuration
+cat config/pipelines/us_dw_hybrid_v1_2.yml
 
-# 3. Check watermark for pipeline-managed table
-python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_hybrid_v1_2
+# 3. Sync table using pipeline
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settle_orders
 
-# 4. Clean S3 files with pipeline context
-python -m src.cli.main s3clean clean -t settlement.settle_orders -p us_dw_hybrid_v1_2 --older-than 7d
+# 4. Dry run to preview operations
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settle_orders --dry-run
 
-# 5. View CDC configuration for the table
-grep -A 10 "settle_orders:" config/pipelines/us_dw_hybrid_v1_2.yml
+# 5. Check watermark after sync
+python -m src.cli.main watermark get -t settle_orders
+
+# 6. Clean S3 files
+python -m src.cli.main s3clean clean -t settle_orders --older-than 7d
+
+# 7. Ad-hoc sync without pipeline
+python -m src.cli.main sync connections -s US_DW_RO_SSH -r redshift_default -t orders
 ```
 
 ## 🚦 Getting Started Checklist
