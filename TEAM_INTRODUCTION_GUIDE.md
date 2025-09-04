@@ -160,13 +160,15 @@ pip install -r requirements.txt
 # Sync a single table (incremental)
 python -m src.cli.main sync -t settlement.orders
 
-# Sync multiple tables
+# Sync multiple tables (comma-separated)
 python -m src.cli.main sync -t settlement.orders,settlement.customers
 
-# Multi-schema sync (v1.2.0)
+# Multi-schema sync (v1.2.0) - if you have pipeline configurations
 python -m src.cli.main sync -t settlement.orders -p us_dw_pipeline
 python -m src.cli.main sync -t settlement.orders -c US_DW_RO_SSH
 ```
+
+**Note**: The `-p` (pipeline) and `-c` (connection) flags are optional and only needed if you have multiple database configurations. Most users can omit these flags.
 
 #### Check Sync Status
 ```bash
@@ -240,6 +242,8 @@ python -m src.cli.main sync -t your_schema.your_table
 
 ## 📖 Quick Command Reference
 
+**Note**: Use `python -m src.cli.main` to run commands. If you've installed the tool with `pip install -e .`, you can use the shorter `s3-backup` command instead.
+
 ### Essential Commands
 
 | Task | Command |
@@ -267,8 +271,8 @@ python -m src.cli.main sync -t your_schema.your_table
 | **Validate Row Counts** | `python -m src.cli.main watermark-count validate-counts -t table` |
 | **View Column Mappings** | `python -m src.cli.main column-mappings show -t table` |
 | **List All Column Mappings** | `python -m src.cli.main column-mappings list` |
-| **Multi-Schema Pipeline** | `python -m src.cli.main sync -t table -p pipeline_name` |
-| **Multi-Schema Connection** | `python -m src.cli.main sync -t table -c connection_name` |
+| **Multi-Schema Pipeline** | `python -m src.cli.main sync -t table -p pipeline_name` (optional) |
+| **Multi-Schema Connection** | `python -m src.cli.main sync -t table -c connection_name` (optional) |
 
 ## ✅ Best Practices
 
@@ -412,7 +416,9 @@ python -m src.cli.main sync -t monthly_table
 
 ### Scenario 4: Multi-Schema Operations (v1.2.0)
 ```bash
-# 1. Sync with specific pipeline
+# Only needed if you have multiple database configurations:
+
+# 1. Sync with specific pipeline (if config/pipelines/us_dw_pipeline.yml exists)
 python -m src.cli.main sync -t settlement.orders -p us_dw_pipeline
 
 # 2. Check watermark for pipeline-scoped table
@@ -423,6 +429,8 @@ python -m src.cli.main s3clean clean -t settlement.orders -c US_DW_RO_SSH --olde
 
 # 4. List all column mappings to check schema compatibility
 python -m src.cli.main column-mappings list
+
+# Note: Most users don't need -p or -c flags unless running multiple pipelines
 ```
 
 ## 🚦 Getting Started Checklist
