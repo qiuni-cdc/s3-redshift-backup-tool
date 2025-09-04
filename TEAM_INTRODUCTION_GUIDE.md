@@ -53,11 +53,13 @@ Welcome to our production-ready MySQL → S3 → Redshift incremental backup sys
 - Support for dimension tables with `DISTSTYLE ALL`
 - Automatic table creation
 
-### 5. **Advanced Features**
-- CDC (Change Data Capture) strategies
-- S3 storage management with cleanup tools
-- Multi-database support (v1.2.0)
-- Manual watermark control for custom scenarios
+### 5. **Advanced Features (v1.2.0)**
+- **CDC (Change Data Capture) strategies**: timestamp_only, hybrid, id_only, full_sync, custom_sql
+- **Multi-Schema Support**: Pipeline-based (`-p`) and connection-based (`-c`) table handling
+- **Column Mapping System**: Automatic MySQL → Redshift column name compatibility
+- **Advanced Watermark Management**: ID-based watermarks, hybrid timestamp+ID strategies
+- **Enhanced S3 Management**: Timestamp-based cleanup, force operations, dry-run previews
+- **Row Count Validation**: Cross-system validation and discrepancy fixing
 
 ## 📚 Basic Concepts
 
@@ -160,6 +162,10 @@ python -m src.cli.main sync -t settlement.orders
 
 # Sync multiple tables
 python -m src.cli.main sync -t settlement.orders,settlement.customers
+
+# Multi-schema sync (v1.2.0)
+python -m src.cli.main sync -t settlement.orders -p us_dw_pipeline
+python -m src.cli.main sync -t settlement.orders -c US_DW_RO_SSH
 ```
 
 #### Check Sync Status
@@ -169,6 +175,12 @@ python -m src.cli.main status
 
 # Check specific table watermark
 python -m src.cli.main watermark get -t settlement.orders
+
+# Check watermark with S3 file details
+python -m src.cli.main watermark get -t settlement.orders --show-files
+
+# List all table watermarks
+python -m src.cli.main watermark list
 ```
 
 ### 3. Fresh/Full Sync
@@ -178,8 +190,14 @@ python -m src.cli.main watermark get -t settlement.orders
 # Reset watermark
 python -m src.cli.main watermark reset -t settlement.orders
 
-# Set starting point
+# Set starting timestamp
 python -m src.cli.main watermark set -t settlement.orders --timestamp '2025-01-01 00:00:00'
+
+# Set starting ID (for ID-based CDC)
+python -m src.cli.main watermark set -t settlement.orders --id 1000000
+
+# Set both timestamp and ID (for hybrid CDC)
+python -m src.cli.main watermark set -t settlement.orders --timestamp '2025-01-01 00:00:00' --id 1000000
 
 # Run sync
 python -m src.cli.main sync -t settlement.orders
@@ -192,11 +210,17 @@ python -m src.cli.main sync -t settlement.orders
 # Use row limits for testing first
 python -m src.cli.main sync -t large_table --limit 10000
 
+# Control maximum chunks processed
+python -m src.cli.main sync -t large_table --limit 50000 --max-chunks 10
+
 # Monitor memory usage
 python -m src.cli.main sync -t large_table --batch-size 5000
 
 # Run during off-peak hours
 nohup python -m src.cli.main sync -t large_table > sync.log 2>&1 &
+
+# Dry run to estimate scope
+python -m src.cli.main sync -t large_table --dry-run
 ```
 
 ### 5. Schema Changes Workflow
@@ -221,10 +245,13 @@ python -m src.cli.main sync -t your_schema.your_table
 | Task | Command |
 |------|---------|
 | **Sync Table** | `python -m src.cli.main sync -t schema.table` |
+| **Multiple Tables** | `python -m src.cli.main sync -t table1,table2,table3` |
 | **Check Status** | `python -m src.cli.main status` |
 | **View Watermark** | `python -m src.cli.main watermark get -t table` |
 | **Reset Watermark** | `python -m src.cli.main watermark reset -t table` |
 | **Set Start Date** | `python -m src.cli.main watermark set -t table --timestamp 'YYYY-MM-DD HH:MM:SS'` |
+| **Set Start ID** | `python -m src.cli.main watermark set -t table --id 1000000` |
+| **List All Watermarks** | `python -m src.cli.main watermark list` |
 | **S3 Cleanup** | `python -m src.cli.main s3clean clean -t table --older-than 7d` |
 | **Test Sync** | `python -m src.cli.main sync -t table --limit 1000` |
 
@@ -235,7 +262,13 @@ python -m src.cli.main sync -t your_schema.your_table
 | **Backup Only** | `python -m src.cli.main sync -t table --backup-only` |
 | **Load Only** | `python -m src.cli.main sync -t table --redshift-only` |
 | **List S3 Files** | `python -m src.cli.main s3clean list -t table` |
+| **List S3 with Timestamps** | `python -m src.cli.main s3clean list -t table --show-timestamps` |
 | **Fix Row Counts** | `python -m src.cli.main watermark-count set-count -t table --count N --mode absolute` |
+| **Validate Row Counts** | `python -m src.cli.main watermark-count validate-counts -t table` |
+| **View Column Mappings** | `python -m src.cli.main column-mappings show -t table` |
+| **List All Column Mappings** | `python -m src.cli.main column-mappings list` |
+| **Multi-Schema Pipeline** | `python -m src.cli.main sync -t table -p pipeline_name` |
+| **Multi-Schema Connection** | `python -m src.cli.main sync -t table -c connection_name` |
 
 ## ✅ Best Practices
 
@@ -265,20 +298,32 @@ Create `redshift_keys.json` for better query performance:
 # Clean old files weekly
 python -m src.cli.main s3clean clean -t table --older-than 7d
 
-# Check storage usage
+# Check storage usage with timestamps
 python -m src.cli.main s3clean list -t table --show-timestamps
+
+# Force cleanup without prompts (for automation)
+python -m src.cli.main s3clean clean -t table --older-than 7d --force
+
+# Dry run to preview cleanup
+python -m src.cli.main s3clean clean -t table --older-than 7d --dry-run
 ```
 
-### 4. **Error Recovery**
+### 4. **Error Recovery and Validation**
 ```bash
-# If sync fails, check watermark
-python -m src.cli.main watermark get -t table
+# If sync fails, check watermark with file details
+python -m src.cli.main watermark get -t table --show-files
+
+# Validate row count consistency
+python -m src.cli.main watermark-count validate-counts -t table
 
 # Resume from where it stopped
 python -m src.cli.main sync -t table
 
 # For stuck syncs, reset and retry
 python -m src.cli.main watermark reset -t table
+
+# Check column mappings for schema issues
+python -m src.cli.main column-mappings show -t table
 ```
 
 ## 🔧 Troubleshooting
@@ -337,13 +382,19 @@ SELECT COUNT(*) FROM settlement.small_table;
 
 ### Scenario 2: Handling Failed Sync
 ```bash
-# 1. Check what happened
-python -m src.cli.main watermark get -t problem_table
+# 1. Check what happened with detailed file info
+python -m src.cli.main watermark get -t problem_table --show-files
 
-# 2. Check S3 files
-python -m src.cli.main s3clean list -t problem_table
+# 2. Validate row count consistency
+python -m src.cli.main watermark-count validate-counts -t problem_table
 
-# 3. Resume sync
+# 3. Check column mappings for schema issues
+python -m src.cli.main column-mappings show -t problem_table
+
+# 4. Check S3 files with timestamps
+python -m src.cli.main s3clean list -t problem_table --show-timestamps
+
+# 5. Resume sync
 python -m src.cli.main sync -t problem_table
 ```
 
@@ -357,6 +408,21 @@ python -m src.cli.main watermark set -t monthly_table --timestamp '2025-01-01 00
 
 # 3. Run full sync
 python -m src.cli.main sync -t monthly_table
+```
+
+### Scenario 4: Multi-Schema Operations (v1.2.0)
+```bash
+# 1. Sync with specific pipeline
+python -m src.cli.main sync -t settlement.orders -p us_dw_pipeline
+
+# 2. Check watermark for pipeline-scoped table
+python -m src.cli.main watermark get -t settlement.orders -p us_dw_pipeline
+
+# 3. Clean S3 files for connection-scoped table
+python -m src.cli.main s3clean clean -t settlement.orders -c US_DW_RO_SSH --older-than 7d
+
+# 4. List all column mappings to check schema compatibility
+python -m src.cli.main column-mappings list
 ```
 
 ## 🚦 Getting Started Checklist
