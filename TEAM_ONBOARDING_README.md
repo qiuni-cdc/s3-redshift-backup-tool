@@ -203,6 +203,7 @@ You're ready for production when you can:
 ├── 🚀 TEAM_ONBOARDING_README.md          ← START HERE
 ├── ✅ QUICK_SETUP_CHECKLIST.md           ← Your first task  
 ├── 📖 TEAM_INTRODUCTION_GUIDE.md         ← Detailed concepts
+├── 📋 CLI_QUICK_REFERENCE.md             ← Command syntax reference
 ├── 📺 TEAM_PRESENTATION_OUTLINE.md       ← For presentations
 ├── 📊 README.md                          ← Technical reference
 ├── 🔧 REDSHIFT_OPTIMIZATION_GUIDE.md     ← Performance tuning
