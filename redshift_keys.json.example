@@ -1,0 +1,43 @@
+{
+  "settlement.dim_product": {
+    "diststyle": "ALL",
+    "sortkey": ["product_id"],
+    "table_type": "dimension",
+    "description": "Product dimension - small table replicated to all nodes for fast JOINs"
+  },
+  "settlement.dim_customer": {
+    "diststyle": "ALL",
+    "sortkey": ["customer_id", "created_date"],
+    "table_type": "dimension",
+    "description": "Customer dimension - replicated for customer lookups"
+  },
+  "settlement.dim_region": {
+    "diststyle": "ALL",
+    "sortkey": ["region_id"],
+    "table_type": "dimension"
+  },
+  "settlement.fact_orders": {
+    "distkey": "customer_id",
+    "sortkey": ["order_date", "customer_id"],
+    "table_type": "fact",
+    "description": "Orders fact table - distributed by customer_id for efficient JOINs"
+  },
+  "settlement.fact_sales": {
+    "distkey": "customer_id", 
+    "interleaved_sortkey": ["sale_date", "customer_id", "product_id", "region_id"],
+    "table_type": "fact",
+    "description": "Sales fact - interleaved sort for equal-weight multi-column queries"
+  },
+  "settlement.large_transaction_log": {
+    "diststyle": "EVEN",
+    "sortkey": ["transaction_date", "transaction_id"],
+    "table_type": "log",
+    "description": "Large log table with no clear distribution pattern"
+  },
+  "settlement.user_activity": {
+    "distkey": "user_id",
+    "compound_sortkey": ["activity_date", "user_id", "session_id"],
+    "table_type": "fact",
+    "description": "User activity - compound sort for hierarchical filtering"
+  }
+}

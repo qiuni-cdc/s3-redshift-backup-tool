@@ -319,8 +319,17 @@ class FlexibleSchemaManager:
         if custom_config:
             logger.info(f"Using custom Redshift optimizations for {mysql_table_name}")
             
-            # Apply custom DISTKEY
-            if 'distkey' in custom_config:
+            # Apply DISTSTYLE (ALL, EVEN, or KEY via distkey)
+            if 'diststyle' in custom_config:
+                diststyle = custom_config['diststyle'].upper()
+                if diststyle in ['ALL', 'EVEN']:
+                    optimization_clauses.append(f"DISTSTYLE {diststyle}")
+                    logger.info(f"Applied custom DISTSTYLE: {diststyle}")
+                else:
+                    logger.warning(f"Invalid DISTSTYLE '{diststyle}', must be 'ALL' or 'EVEN'")
+            
+            # Apply custom DISTKEY (only if no DISTSTYLE specified)
+            elif 'distkey' in custom_config:
                 distkey_column = custom_config['distkey']
                 # Verify the column exists in the table schema and sanitize name
                 column_exists = any(col['COLUMN_NAME'] == distkey_column for col in schema_info)
@@ -331,15 +340,38 @@ class FlexibleSchemaManager:
                 else:
                     logger.warning(f"Custom DISTKEY column '{distkey_column}' not found in table schema, using default")
             
-            # Apply custom SORTKEY
-            if 'sortkey' in custom_config and custom_config['sortkey']:
+            # Apply custom SORTKEY (compound or interleaved)
+            sortkey_applied = False
+            if 'interleaved_sortkey' in custom_config and custom_config['interleaved_sortkey']:
+                # Handle interleaved sort key
+                sortkey_columns = custom_config['interleaved_sortkey']
+                if isinstance(sortkey_columns, str):
+                    sortkey_columns = [sortkey_columns]
+                
+                # Verify all sortkey columns exist and sanitize
+                valid_sortkeys = []
+                for sortkey_col in sortkey_columns[:4]:  # Max 4 interleaved sort keys
+                    if any(col['COLUMN_NAME'] == sortkey_col for col in schema_info):
+                        safe_sortkey = self._sanitize_column_name_for_redshift(sortkey_col)
+                        valid_sortkeys.append(safe_sortkey)
+                    else:
+                        logger.warning(f"Custom interleaved SORTKEY column '{sortkey_col}' not found in table schema")
+                
+                if valid_sortkeys:
+                    sort_keys = ', '.join(valid_sortkeys)
+                    optimization_clauses.append(f"INTERLEAVED SORTKEY({sort_keys})")
+                    logger.info(f"Applied custom INTERLEAVED SORTKEY: {sort_keys}")
+                    sortkey_applied = True
+            
+            elif 'sortkey' in custom_config and custom_config['sortkey']:
+                # Handle compound sort key (default)
                 sortkey_columns = custom_config['sortkey']
                 if isinstance(sortkey_columns, str):
                     sortkey_columns = [sortkey_columns]
                 
                 # Verify all sortkey columns exist and sanitize
                 valid_sortkeys = []
-                for sortkey_col in sortkey_columns[:2]:  # Max 2 sort keys
+                for sortkey_col in sortkey_columns[:4]:  # Max 4 sort keys
                     if any(col['COLUMN_NAME'] == sortkey_col for col in schema_info):
                         safe_sortkey = self._sanitize_column_name_for_redshift(sortkey_col)
                         valid_sortkeys.append(safe_sortkey)
@@ -348,8 +380,13 @@ class FlexibleSchemaManager:
                 
                 if valid_sortkeys:
                     sort_keys = ', '.join(valid_sortkeys)
-                    optimization_clauses.append(f"SORTKEY({sort_keys})")
-                    logger.info(f"Applied custom SORTKEY: {sort_keys}")
+                    if len(valid_sortkeys) > 1:
+                        optimization_clauses.append(f"COMPOUND SORTKEY({sort_keys})")
+                        logger.info(f"Applied custom COMPOUND SORTKEY: {sort_keys}")
+                    else:
+                        optimization_clauses.append(f"SORTKEY({sort_keys})")
+                        logger.info(f"Applied custom SORTKEY: {sort_keys}")
+                    sortkey_applied = True
         
         else:
             # Use default optimization logic if no custom configuration
