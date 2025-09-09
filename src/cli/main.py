@@ -781,11 +781,11 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
             
             try:
                 from src.core.gemini_redshift_loader import GeminiRedshiftLoader
-                from src.core.s3_watermark_manager import S3WatermarkManager
+                from src.core.watermark_adapter import create_watermark_manager
                 
                 click.echo("   Initializing Redshift connection...")
                 redshift_loader = GeminiRedshiftLoader(config)
-                watermark_manager = S3WatermarkManager(config)
+                watermark_manager = create_watermark_manager(config.model_dump())
                 loaded_tables = 0
                 total_redshift_rows = 0
                 
@@ -1280,9 +1280,9 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
     
     try:
         # Use S3-based watermark system (same as backup operations)
-        from src.core.s3_watermark_manager import S3WatermarkManager
+        from src.core.watermark_adapter import create_watermark_manager
         
-        watermark_manager = S3WatermarkManager(config)
+        watermark_manager = create_watermark_manager(config.model_dump())
         
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
         effective_table_name = table
@@ -1645,10 +1645,10 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
     backup_logger = ctx.obj['backup_logger']
     
     try:
-        from src.core.s3_watermark_manager import S3WatermarkManager
+        from src.core.watermark_adapter import create_watermark_manager
         from src.core.gemini_redshift_loader import GeminiRedshiftLoader
         
-        watermark_manager = S3WatermarkManager(config)
+        watermark_manager = create_watermark_manager(config.model_dump())
         
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach) 
         effective_table_name = table
