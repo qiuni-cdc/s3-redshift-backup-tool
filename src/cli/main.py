@@ -785,7 +785,7 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
                 
                 click.echo("   Initializing Redshift connection...")
                 redshift_loader = GeminiRedshiftLoader(config)
-                watermark_manager = create_watermark_manager(config.model_dump())
+                watermark_manager = create_watermark_manager(config.to_dict())
                 loaded_tables = 0
                 total_redshift_rows = 0
                 
@@ -1282,7 +1282,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
         # Use S3-based watermark system (same as backup operations)
         from src.core.watermark_adapter import create_watermark_manager
         
-        watermark_manager = create_watermark_manager(config.model_dump())
+        watermark_manager = create_watermark_manager(config.to_dict())
         
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
         effective_table_name = table
@@ -1648,7 +1648,7 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
         from src.core.watermark_adapter import create_watermark_manager
         from src.core.gemini_redshift_loader import GeminiRedshiftLoader
         
-        watermark_manager = create_watermark_manager(config.model_dump())
+        watermark_manager = create_watermark_manager(config.to_dict())
         
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach) 
         effective_table_name = table
@@ -1713,14 +1713,16 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
             
             try:
                 if mode == 'absolute':
-                    # Set absolute count (replaces existing) - FIX: Update BOTH MySQL and Redshift counts
-                    success = watermark_manager._update_watermark_direct(
-                        table_name=effective_table_name,
-                        watermark_data={
-                            'mysql_rows_extracted': count,
-                            'redshift_rows_loaded': count  # FIX: Also update Redshift count
-                        }
-                    )
+                    # Set absolute count using v2.0 API (replaces existing)
+                    try:
+                        watermark_manager.simple_manager.update_redshift_count_from_external(
+                            table_name=effective_table_name,
+                            actual_count=count
+                        )
+                        success = True
+                    except Exception as e:
+                        click.echo(f"❌ Failed to update count: {e}")
+                        success = False
                     
                     if success:
                         click.echo(f"✅ Set absolute count to {count:,} rows")
@@ -1737,13 +1739,16 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
                     new_mysql_count = existing_mysql_count + count
                     new_redshift_count = existing_redshift_count + count
                     
-                    success = watermark_manager._update_watermark_direct(
-                        table_name=effective_table_name,
-                        watermark_data={
-                            'mysql_rows_extracted': new_mysql_count,
-                            'redshift_rows_loaded': new_redshift_count  # FIX: Also update Redshift count
-                        }
-                    )
+                    # Add to existing count using v2.0 API
+                    try:
+                        watermark_manager.simple_manager.update_redshift_count_from_external(
+                            table_name=effective_table_name,
+                            actual_count=new_redshift_count
+                        )
+                        success = True
+                    except Exception as e:
+                        click.echo(f"❌ Failed to update count: {e}")
+                        success = False
                     
                     if success:
                         click.echo(f"✅ Added {count:,} to existing counts:")

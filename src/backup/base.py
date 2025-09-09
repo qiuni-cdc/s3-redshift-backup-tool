@@ -337,7 +337,7 @@ class BaseBackupStrategy(ABC):
         self.config = config
         self.connection_manager = ConnectionManager(config)
         self.s3_manager = S3Manager(config)
-        self.watermark_manager = create_watermark_manager(config.model_dump())
+        self.watermark_manager = create_watermark_manager(config.to_dict())
         self.logger = get_backup_logger()
         self.metrics = BackupMetrics()
         
@@ -1358,17 +1358,15 @@ class BaseBackupStrategy(ABC):
             True if watermarks updated successfully
         """
         try:
-            success = self.watermark_manager.update_mysql_watermark(
+            # Use v2.0 direct API for better performance  
+            self.watermark_manager.simple_manager.update_mysql_state(
                 table_name=table_name,
-                extraction_time=extraction_time,
-                max_data_timestamp=max_data_timestamp,
-                last_processed_id=last_processed_id,
-                rows_extracted=rows_extracted,
+                timestamp=max_data_timestamp,
+                id=last_processed_id,
                 status=status,
-                backup_strategy=self.__class__.__name__.replace('BackupStrategy', '').lower(),
-                s3_file_count=s3_file_count,
-                error_message=error_message
+                error=error_message
             )
+            success = True
             
             if success:
                 timestamp_str = extraction_time.strftime('%Y-%m-%d %H:%M:%S')

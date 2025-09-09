@@ -26,6 +26,14 @@ from src.utils.exceptions import WatermarkError
 logger = logging.getLogger(__name__)
 
 
+class DateTimeEncoder(json.JSONEncoder):
+    """Custom JSON encoder to handle datetime objects."""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
 class SimpleWatermarkManager:
     """
     Simplified watermark manager with clean design.
@@ -354,7 +362,7 @@ class SimpleWatermarkManager:
             self.s3_client.put_object(
                 Bucket=self.bucket_name,
                 Key=key,
-                Body=json.dumps(watermark, indent=2),
+                Body=json.dumps(watermark, indent=2, cls=DateTimeEncoder),
                 ContentType='application/json'
             )
         except Exception as e:

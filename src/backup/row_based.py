@@ -408,10 +408,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     )
             
             # Final watermark update with completion status (additive session total)
+            # Handle both datetime objects and ISO format strings
+            if isinstance(last_timestamp, datetime):
+                max_data_timestamp = last_timestamp
+            else:
+                max_data_timestamp = datetime.fromisoformat(last_timestamp)
+            
             self._set_final_watermark_with_session_control(
                 table_name=table_name,
                 extraction_time=datetime.now(),
-                max_data_timestamp=datetime.fromisoformat(last_timestamp),
+                max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_id,
                 session_rows_processed=total_rows_processed,  # Session total
                 status='success'
@@ -1040,11 +1046,19 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 if hasattr(current_watermark, 's3_file_count'):
                     watermark_data['s3_file_count'] = current_watermark.s3_file_count
             
-            # Use direct update to S3 to bypass additive logic
-            success = self.watermark_manager._update_watermark_direct(
-                table_name=table_name,
-                watermark_data=watermark_data
-            )
+            # Use v2.0 direct API for better performance
+            try:
+                self.watermark_manager.simple_manager.update_mysql_state(
+                    table_name=table_name,
+                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    id=watermark_data.get('last_processed_id'),
+                    status=watermark_data.get('mysql_status', 'success'),
+                    error=watermark_data.get('last_error')
+                )
+                success = True
+            except Exception as e:
+                self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
+                success = False
             
             self.logger.logger.info(
                 "Final watermark set with absolute values",
@@ -1115,11 +1129,19 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 'last_mysql_extraction_time': datetime.now().isoformat()
             }
             
-            # Use direct update to bypass additive logic
-            success = self.watermark_manager._update_watermark_direct(
-                table_name=table_name,
-                watermark_data=watermark_data
-            )
+            # Use v2.0 direct API for better performance
+            try:
+                self.watermark_manager.simple_manager.update_mysql_state(
+                    table_name=table_name,
+                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    id=watermark_data.get('last_processed_id'),
+                    status=watermark_data.get('mysql_status', 'success'),
+                    error=watermark_data.get('last_error')
+                )
+                success = True
+            except Exception as e:
+                self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
+                success = False
             
             self.logger.logger.debug(
                 "Updated chunk watermark with resume data only",

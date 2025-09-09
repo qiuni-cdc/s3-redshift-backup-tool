@@ -41,14 +41,17 @@ class LegacyWatermarkObject:
         self.last_mysql_extraction_time = mysql_state.get('last_updated')
         self.last_processed_id = mysql_state.get('last_id')
         self.mysql_status = mysql_state.get('status', 'pending')
+        self.mysql_rows_extracted = mysql_state.get('total_rows', 0)  # Add missing field
         
         # Redshift fields (legacy names)
         self.redshift_rows_loaded = redshift_state.get('total_rows', 0)
         self.redshift_status = redshift_state.get('status', 'pending')
         self.redshift_load_time = redshift_state.get('last_updated')
+        self.last_redshift_load_time = redshift_state.get('last_updated')  # Add missing field
         
         # File management
         self.processed_s3_files = watermark_data.get('processed_files', [])
+        self.s3_file_count = len(self.processed_s3_files)  # Add missing field
         
         # Other legacy fields
         self.backup_strategy = watermark_data.get('cdc_strategy', 'hybrid')
@@ -225,6 +228,44 @@ class WatermarkAdapter:
         except Exception as e:
             logger.error(f"Failed to reset watermark for {table_name}: {e}")
             return False
+    
+    def list_all_tables(self) -> List[LegacyWatermarkObject]:
+        """List all tables with watermarks."""
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            s3_client = self.simple_manager.s3_client
+            bucket_name = self.simple_manager.bucket_name
+            prefix = self.simple_manager.watermark_prefix
+            
+            watermarks = []
+            paginator = s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+            
+            for page in pages:
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    if key.endswith('.json') and '/locks/' not in key:
+                        # Extract table name from key
+                        table_name = key.replace(prefix, '').replace('.json', '')
+                        # Convert back from cleaned name format
+                        table_name = table_name.replace('_', '.', 1)  # First underscore becomes dot
+                        
+                        # Get the actual watermark object
+                        try:
+                            watermark = self.get_table_watermark(table_name)
+                            if watermark:
+                                watermarks.append(watermark)
+                        except Exception as e:
+                            logger.warning(f"Failed to load watermark for {table_name}: {e}")
+            
+            # Sort by table name
+            return sorted(watermarks, key=lambda w: w.table_name)
+            
+        except Exception as e:
+            logger.error(f"Failed to list watermark tables: {e}")
+            return []
 
 
 def create_watermark_manager(config: Dict[str, Any]) -> WatermarkAdapter:

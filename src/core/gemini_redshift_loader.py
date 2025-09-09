@@ -38,7 +38,7 @@ class GeminiRedshiftLoader:
         self.config = config
         self.connection_manager = ConnectionManager(config)
         self.schema_manager = FlexibleSchemaManager(self.connection_manager)
-        self.watermark_manager = create_watermark_manager(config.model_dump())
+        self.watermark_manager = create_watermark_manager(config.to_dict())
         self.column_mapper = ColumnMapper()
         self.logger = logger
         
@@ -75,11 +75,12 @@ class GeminiRedshiftLoader:
         try:
             logger.info(f"Starting Gemini Redshift load for {table_name}")
             
-            # Set Redshift status to pending
-            self.watermark_manager.update_redshift_watermark(
+            # Set Redshift status to pending using v2.0 API
+            self.watermark_manager.simple_manager.update_redshift_state(
                 table_name=table_name,
-                load_time=load_start_time,
-                status='pending'
+                loaded_files=[],
+                status='pending',
+                error=None
             )
             
             # Step 1: Get dynamic schema using unified schema manager
@@ -738,27 +739,32 @@ class GeminiRedshiftLoader:
             import uuid
             session_id = f"redshift_load_{uuid.uuid4().hex[:8]}"
             
-            self.watermark_manager.update_redshift_watermark(
+            # Update with v2.0 API - track loaded files and get actual count
+            self.watermark_manager.simple_manager.update_redshift_state(
                 table_name=table_name,
-                load_time=load_time,
-                rows_loaded=rows_loaded,
+                loaded_files=processed_files or [],
                 status='success',
-                processed_files=processed_files or [],
-                mode='auto',  # Use auto mode for intelligent accumulation
-                session_id=session_id  # Track this loading session to prevent double-counting
+                error=None
             )
+            
+            # Update the actual count from Redshift for accuracy
+            if rows_loaded > 0:
+                self.watermark_manager.simple_manager.update_redshift_count_from_external(
+                    table_name=table_name,
+                    actual_count=rows_loaded
+                )
         except Exception as e:
             logger.warning(f"Failed to update success watermark for {table_name}: {e}")
     
     def _set_error_status(self, table_name: str, error_message: str):
         """Set error status in watermark"""
         try:
-            self.watermark_manager.update_redshift_watermark(
+            # Set error status using v2.0 API
+            self.watermark_manager.simple_manager.update_redshift_state(
                 table_name=table_name,
-                load_time=datetime.now(),
-                rows_loaded=0,
+                loaded_files=[],
                 status='failed',
-                error_message=error_message
+                error=error_message
             )
         except Exception as e:
             logger.warning(f"Failed to update error watermark for {table_name}: {e}")
