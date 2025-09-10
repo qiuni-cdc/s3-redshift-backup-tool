@@ -71,8 +71,14 @@ class GeminiRedshiftLoader:
             True if loading successful, False otherwise
         """
         load_start_time = datetime.now()
+        lock_id = None
         
         try:
+            # Acquire lock before loading to prevent concurrent loads
+            logger.debug(f"Acquiring lock for Redshift load of {table_name}")
+            lock_id = self.watermark_manager.simple_manager.acquire_lock(table_name)
+            logger.info(f"Lock acquired for Redshift load of {table_name}: {lock_id}")
+            
             logger.info(f"Starting Gemini Redshift load for {table_name}")
             
             # Set Redshift status to pending using v2.0 API
@@ -151,6 +157,15 @@ class GeminiRedshiftLoader:
             logger.error(f"Gemini Redshift load failed for {table_name}: {e}")
             self._set_error_status(table_name, str(e))
             return False
+        
+        finally:
+            # Always release lock, even if error occurs
+            if lock_id:
+                try:
+                    self.watermark_manager.simple_manager.release_lock(table_name, lock_id)
+                    logger.debug(f"Released lock for Redshift load of {table_name}: {lock_id}")
+                except Exception as lock_error:
+                    logger.error(f"Failed to release lock for {table_name}: {lock_error}")
     
     def _truncate_table_before_load(self, redshift_table: str) -> None:
         """
