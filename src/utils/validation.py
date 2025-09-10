@@ -82,8 +82,13 @@ class DataValidator:
         try:
             # FIXED: Use FlexibleSchemaManager for dynamic schema discovery
             from src.core.flexible_schema_manager import FlexibleSchemaManager
+            from src.core.connections import ConnectionManager
+            from src.config.settings import AppConfig
             
-            schema_manager = FlexibleSchemaManager()
+            # Initialize config, connection manager and schema manager
+            config = AppConfig()
+            connection_manager = ConnectionManager(config)
+            schema_manager = FlexibleSchemaManager(connection_manager)
             pyarrow_schema, redshift_ddl = schema_manager.get_table_schema(table_name)
             
             if pyarrow_schema:

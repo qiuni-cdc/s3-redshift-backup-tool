@@ -153,8 +153,12 @@ class SchemaDriftDetector:
             # Import here to avoid circular dependencies
             from src.config.schemas import TABLE_SCHEMAS
             from src.core.flexible_schema_manager import FlexibleSchemaManager
+            from src.core.connections import ConnectionManager
+            from src.config.settings import AppConfig
             
-            schema_manager = FlexibleSchemaManager()
+            config = AppConfig()
+            connection_manager = ConnectionManager(config)
+            schema_manager = FlexibleSchemaManager(connection_manager)
             drift_results = []
             
             logger.info(f"Checking schema drift for {len(TABLE_SCHEMAS)} hardcoded schemas...")

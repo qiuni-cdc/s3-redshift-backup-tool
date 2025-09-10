@@ -14,7 +14,11 @@ of schema drift and Parquet compatibility issues with Redshift Spectrum.
 Use FlexibleSchemaManager for dynamic schema discovery from actual database:
 
     from src.core.flexible_schema_manager import FlexibleSchemaManager
-    schema_manager = FlexibleSchemaManager()
+    from src.core.connections import ConnectionManager
+    from src.config.settings import AppConfig
+    config = AppConfig()
+    connection_manager = ConnectionManager(config)
+    schema_manager = FlexibleSchemaManager(connection_manager)
     schema_info = schema_manager.get_table_schema(table_name)
 
 📋 MIGRATION STATUS:
@@ -516,7 +520,11 @@ def get_table_schema(table_name: str) -> Optional[pa.Schema]:
     
     Use dynamic schema discovery instead:
         from src.core.flexible_schema_manager import FlexibleSchemaManager
-        schema_manager = FlexibleSchemaManager()
+        from src.core.connections import ConnectionManager
+        from src.config.settings import AppConfig
+        config = AppConfig()
+        connection_manager = ConnectionManager(config)
+        schema_manager = FlexibleSchemaManager(connection_manager)
         schema_info = schema_manager.get_table_schema(table_name)
         schema = schema_info.pyarrow_schema
     """
@@ -538,7 +546,11 @@ def validate_table_data(data: Any, table_name: str, strict: bool = True) -> pa.T
     
     Use dynamic validation instead:
         from src.core.flexible_schema_manager import FlexibleSchemaManager
-        schema_manager = FlexibleSchemaManager()
+        from src.core.connections import ConnectionManager
+        from src.config.settings import AppConfig
+        config = AppConfig()
+        connection_manager = ConnectionManager(config)
+        schema_manager = FlexibleSchemaManager(connection_manager)
         schema_info = schema_manager.get_table_schema(table_name)
         # Use schema_info.pyarrow_schema for validation
     """

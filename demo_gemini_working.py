@@ -27,8 +27,8 @@ logger = get_logger(__name__)
 class MockConnectionManager:
     """Mock connection manager to simulate successful schema discovery"""
     
-    def __init__(self):
-        pass
+    def __init__(self, config=None):
+        self.config = config
     
     def ssh_tunnel(self):
         """Mock SSH tunnel - not used in this demo"""

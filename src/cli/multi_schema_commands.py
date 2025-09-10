@@ -17,6 +17,9 @@ from src.core.configuration_manager import ConfigurationManager
 from src.utils.exceptions import ValidationError, ConnectionError
 from src.utils.logging import get_logger
 
+# Airflow Integration
+from src.cli.airflow_integration import enhance_sync_with_airflow_integration
+
 logger = get_logger(__name__)
 
 
@@ -108,8 +111,11 @@ def add_multi_schema_commands(cli):
     @click.option('--max-chunks', type=int, help='Maximum number of chunks to process (total rows = limit × max-chunks)')
     @click.option('--dry-run', is_flag=True, help='Preview operations without execution')
     @click.option('--parallel', is_flag=True, help='Override pipeline strategy to use parallel processing')
+    @click.option('--json-output', type=click.Path(), help='Output execution metadata as JSON file for Airflow monitoring')
+    @click.option('--s3-completion-bucket', type=str, help='S3 bucket for Airflow completion markers')
     def sync_pipeline(pipeline: str, table: List[str], backup_only: bool, redshift_only: bool, 
-                     limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], dry_run: bool, parallel: bool):
+                     limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], dry_run: bool, parallel: bool,
+                     json_output: Optional[str] = None, s3_completion_bucket: Optional[str] = None):
         """Sync tables using pipeline configuration (v1.1.0 enhanced syntax)"""
         
         multi_schema_ctx.ensure_initialized()
@@ -140,41 +146,103 @@ def add_multi_schema_commands(cli):
             if parallel and pipeline_config.processing.get('strategy') != 'parallel':
                 click.echo("⚡ Overriding to parallel processing")
             
-            # Process each table
-            success_count = 0
-            for table_name in table:
-                if table_name not in pipeline_config.tables:
-                    click.echo(f"⚠️  Warning: Table {table_name} not configured in pipeline")
+            # Check if Airflow integration is requested
+            if json_output or s3_completion_bucket:
+                click.echo("🚀 Using Airflow integration features")
+                
+                # Create sync executor function for Airflow integration
+                def execute_sync_tables(tracker):
+                    """Execute sync for all tables and return results"""
+                    table_results = {}
+                    success_count = 0
                     
-                    # For default pipeline, allow dynamic registration
-                    if pipeline == "default":
-                        multi_schema_ctx.config_manager.register_table_dynamically(pipeline, table_name)
-                        click.echo(f"📝 Registered {table_name} dynamically in default pipeline")
-                    else:
-                        click.echo(f"❌ Skipping unconfigured table: {table_name}")
-                        continue
+                    for table_name in table:
+                        if table_name not in pipeline_config.tables:
+                            click.echo(f"⚠️  Warning: Table {table_name} not configured in pipeline")
+                            
+                            # For default pipeline, allow dynamic registration
+                            if pipeline == "default":
+                                multi_schema_ctx.config_manager.register_table_dynamically(pipeline, table_name)
+                                click.echo(f"📝 Registered {table_name} dynamically in default pipeline")
+                            else:
+                                table_results[table_name] = {
+                                    "success": False,
+                                    "error_message": f"Table {table_name} not configured in pipeline"
+                                }
+                                continue
+                        
+                        table_config = pipeline_config.tables[table_name]
+                        
+                        if dry_run:
+                            _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
+                            table_results[table_name] = {
+                                "success": True,
+                                "rows_processed": 0,  # Dry run
+                                "files_created": 0,
+                                "duration": 0
+                            }
+                            success_count += 1
+                        else:
+                            result = _execute_table_sync(
+                                pipeline_config, table_config, 
+                                backup_only, redshift_only, limit, parallel, max_workers, max_chunks
+                            )
+                            
+                            # FIXED: Use actual metrics from _execute_table_sync instead of hardcoded values
+                            table_results[table_name] = result
+                            
+                            if result.get("success", False):
+                                success_count += 1
+                    
+                    return success_count, table_results
                 
-                table_config = pipeline_config.tables[table_name]
-                
-                if dry_run:
-                    _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
-                    success_count += 1
-                else:
-                    success = _execute_table_sync(
-                        pipeline_config, table_config, 
-                        backup_only, redshift_only, limit, parallel, max_workers, max_chunks
-                    )
-                    if success:
-                        success_count += 1
+                # Use Airflow integration
+                exit_code = enhance_sync_with_airflow_integration(
+                    pipeline=pipeline,
+                    tables=list(table),
+                    sync_executor_func=execute_sync_tables,
+                    json_output_path=json_output,
+                    s3_completion_bucket=s3_completion_bucket,
+                    completion_prefix="completion_markers"
+                )
+                sys.exit(exit_code)
             
-            # Summary
-            total_tables = len(table)
-            if success_count == total_tables:
-                click.echo(f"✅ Pipeline completed successfully: {success_count}/{total_tables} tables")
             else:
-                click.echo(f"⚠️  Pipeline completed with issues: {success_count}/{total_tables} tables successful")
-                if success_count < total_tables:
-                    sys.exit(1)
+                # Original logic for backward compatibility
+                success_count = 0
+                for table_name in table:
+                    if table_name not in pipeline_config.tables:
+                        click.echo(f"⚠️  Warning: Table {table_name} not configured in pipeline")
+                        
+                        # For default pipeline, allow dynamic registration
+                        if pipeline == "default":
+                            multi_schema_ctx.config_manager.register_table_dynamically(pipeline, table_name)
+                            click.echo(f"📝 Registered {table_name} dynamically in default pipeline")
+                        else:
+                            click.echo(f"❌ Skipping unconfigured table: {table_name}")
+                            continue
+                    
+                    table_config = pipeline_config.tables[table_name]
+                    
+                    if dry_run:
+                        _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
+                        success_count += 1
+                    else:
+                        success = _execute_table_sync(
+                            pipeline_config, table_config, 
+                            backup_only, redshift_only, limit, parallel, max_workers, max_chunks
+                        )
+                        if success:
+                            success_count += 1
+                
+                # Summary
+                total_tables = len(table)
+                if success_count == total_tables:
+                    click.echo(f"✅ Pipeline completed successfully: {success_count}/{total_tables} tables")
+                else:
+                    click.echo(f"⚠️  Pipeline completed with issues: {success_count}/{total_tables} tables successful")
+                    if success_count < total_tables:
+                        sys.exit(1)
         
         except Exception as e:
             logger.error(f"Pipeline sync failed: {e}")
@@ -881,7 +949,7 @@ def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshi
 
 
 def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool, 
-                       limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None) -> bool:
+                       limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None) -> Dict[str, Any]:
     """Execute actual table sync with multi-schema configuration"""
     
     click.echo(f"🚀 Syncing: {table_config.full_name}")
@@ -982,12 +1050,12 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                 # Stage 2: S3 → Redshift Loading (using v1.0.0 working pattern)
                 try:
                     from src.core.gemini_redshift_loader import GeminiRedshiftLoader
-                    from src.core.s3_watermark_manager import S3WatermarkManager
+                    from src.core.watermark_adapter import create_watermark_manager
                     from src.core.cdc_configuration_manager import CDCConfigurationManager
                     
-                    # Use the proven v1.0.0 pattern for Redshift loading
+                    # Use the watermark v2.0 system for Redshift loading
                     redshift_loader = GeminiRedshiftLoader(config)
-                    watermark_manager = S3WatermarkManager(config)
+                    watermark_manager = create_watermark_manager(config.to_dict())
                     
                     # Create CDC strategy for full_sync replace mode support
                     cdc_strategy = None
@@ -1025,27 +1093,89 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             # Overall result
             result = backup_success and redshift_success
             
+            # FIXED: Get actual metrics from watermark system instead of hardcoded values
+            actual_rows = 0
+            actual_files = 0
+            
+            if result:
+                try:
+                    # Get actual metrics from watermark
+                    from src.core.watermark_adapter import create_watermark_manager
+                    watermark_manager = create_watermark_manager(config.to_dict())
+                    watermark = watermark_manager.get_table_watermark(scoped_table_name)
+                    
+                    if watermark:
+                        # Get actual rows processed from watermark
+                        backup_rows = getattr(watermark, 'mysql_rows_extracted', 0) or 0
+                        redshift_rows = getattr(watermark, 'redshift_rows_loaded', 0) or 0
+                        
+                        # Use the most relevant metric based on operation type
+                        if redshift_only:
+                            actual_rows = redshift_rows
+                        elif backup_only:
+                            actual_rows = backup_rows
+                        else:
+                            # Full sync - use redshift rows (final loaded count)
+                            actual_rows = redshift_rows
+                        
+                        # Get file count from processed S3 files list
+                        processed_files = getattr(watermark, 'processed_s3_files', []) or []
+                        actual_files = len(processed_files)
+                        
+                        logger.info(f"METRICS: {scoped_table_name} - {actual_rows} rows, {actual_files} files")
+                    
+                except Exception as metrics_error:
+                    logger.warning(f"Failed to get actual metrics for {scoped_table_name}: {metrics_error}")
+                    # Fall back to estimated values based on chunk processing
+                    actual_rows = max_total_rows if max_total_rows else 0
+                    actual_files = 1
+            
+            result_dict = {
+                "success": result,
+                "rows_processed": actual_rows,
+                "files_created": actual_files,
+                "duration": 30.0  # TODO: Add actual duration tracking
+            }
+            
+            if result:
+                click.echo(f"  ✅ {table_config.full_name} synced successfully")
+            else:
+                click.echo(f"  ❌ {table_config.full_name} sync failed")
+                
+            return result_dict
+            
         except Exception as config_error:
             logger.error(f"Failed to execute table sync with v1.0.0 compatibility: {config_error}")
             click.echo(f"  ❌ Configuration error: {config_error}")
-            return False
-        
-        if result:
-            click.echo(f"  ✅ {table_config.full_name} synced successfully")
-            return True
-        else:
-            click.echo(f"  ❌ {table_config.full_name} sync failed")
-            return False
+            return {
+                "success": False,
+                "error_message": str(config_error),
+                "rows_processed": 0,
+                "files_created": 0,
+                "duration": 0
+            }
             
     except ImportError as e:
         # Fall back to v1.0.0 style sync
         logger.warning(f"Multi-schema backup strategies not available, falling back to v1.0.0 mode: {e}")
-        return _fallback_to_legacy_sync(table_config.full_name, backup_only, redshift_only, limit)
+        legacy_result = _fallback_to_legacy_sync(table_config.full_name, backup_only, redshift_only, limit)
+        return {
+            "success": legacy_result,
+            "rows_processed": 0,  # Legacy mode doesn't provide metrics
+            "files_created": 0,
+            "duration": 0
+        }
         
     except Exception as e:
         click.echo(f"  ❌ {table_config.full_name} failed: {e}")
         logger.error(f"Table sync failed for {table_config.full_name}: {e}")
-        return False
+        return {
+            "success": False,
+            "error_message": str(e),
+            "rows_processed": 0,
+            "files_created": 0,
+            "duration": 0
+        }
 
 
 def _create_adhoc_pipeline_config(source: str, target: str, tables: List[str], batch_size: int):

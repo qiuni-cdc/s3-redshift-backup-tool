@@ -1191,26 +1191,23 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         error_message: Optional[str] = None
     ):
         """
-        CRITICAL FIX: Set final watermark using session-controlled mode.
+        Set final watermark using absolute row count.
         
-        Uses the new watermark mode system to handle session vs cross-session updates correctly.
-        This replaces the old additive logic that caused double-counting bugs.
+        SIMPLIFIED: Always uses the provided row count as absolute value.
+        No accumulation, no modes, no complexity.
         
         Args:
             table_name: Name of the table
             extraction_time: Time of extraction
             max_data_timestamp: Latest data timestamp processed
             last_processed_id: Last processed ID
-            session_rows_processed: Rows processed in this session only
+            session_rows_processed: Rows processed in this session (absolute count)
             status: Final status ('success' or 'failed')
             error_message: Optional error message for failed status
         """
         try:
-            # CRITICAL FIX: Generate unique session ID
-            import uuid
-            session_id = f"row_based_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             
-            # CRITICAL FIX: Get actual S3 file count from S3 directly (not in-memory stats)
+            # Get actual S3 file count from S3 directly (not in-memory stats)
             actual_s3_files = self._count_actual_s3_files(table_name)
             
             self.logger.logger.info(
@@ -1218,10 +1215,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 table_name=table_name,
                 s3_files_created=actual_s3_files,
                 session_rows=session_rows_processed,
-                fix_applied="s3_count_tracking"
+                s3_files_tracked=True
             )
             
-            # Use the NEW mode-controlled watermark update with REAL S3 count
+            # Use simplified watermark update with absolute count
             success = self.watermark_manager.update_mysql_watermark(
                 table_name=table_name,
                 extraction_time=extraction_time,
@@ -1230,19 +1227,15 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 rows_extracted=session_rows_processed,
                 status=status,
                 backup_strategy='row_based',
-                s3_file_count=actual_s3_files,  # ✅ FIXED: Real S3 count instead of 0
-                error_message=error_message,
-                mode='auto',  # Let the system decide absolute vs additive
-                session_id=session_id
+                s3_file_count=actual_s3_files,
+                error_message=error_message
             )
             
             self.logger.logger.info(
-                "Final watermark updated with session control",
+                "Final watermark updated with absolute count",
                 table_name=table_name,
                 session_rows=session_rows_processed,
-                status=status,
-                session_id=session_id,
-                mode_system="auto_detection"
+                status=status
             )
             
             return success

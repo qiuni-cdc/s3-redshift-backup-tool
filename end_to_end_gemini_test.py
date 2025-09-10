@@ -29,7 +29,8 @@ logger = get_logger(__name__)
 class ProductionMockConnectionManager:
     """Production-ready mock connection manager with realistic schema discovery"""
     
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config
         self.connection_count = 0
     
     def ssh_tunnel(self):

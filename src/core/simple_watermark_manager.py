@@ -99,41 +99,36 @@ class SimpleWatermarkManager:
         """
         Update MySQL extraction state.
         
+        SIMPLIFIED: Always use the provided row count as absolute value.
+        No accumulation, no modes, no complexity.
+        
         Args:
             table_name: Table identifier
             timestamp: Last processed timestamp (ISO format)
             id: Last processed ID
             status: One of: success, failed, pending
             error: Error message if status is failed
-            rows_extracted: Number of rows extracted in this operation
+            rows_extracted: Number of rows extracted in this operation (absolute count)
         """
         watermark = self.get_watermark(table_name)
         
-        # Handle row count accumulation if provided
-        current_rows = watermark['mysql_state'].get('total_rows', 0)
+        # Simple rule: if rows_extracted provided, use it; otherwise keep existing
         if rows_extracted is not None:
-            # For final updates, use absolute count; for incremental, add to existing
-            if status == 'success' and timestamp:
-                # This is a final successful update - use absolute count
-                new_total = rows_extracted
-            else:
-                # Incremental update - add to existing
-                new_total = current_rows + rows_extracted
+            total_rows = rows_extracted
         else:
-            # No row count provided, keep existing
-            new_total = current_rows
+            total_rows = watermark['mysql_state'].get('total_rows', 0)
         
         watermark['mysql_state'].update({
             'last_timestamp': timestamp,
             'last_id': id,
             'status': status,
             'error': error,
-            'total_rows': new_total,
+            'total_rows': total_rows,  # Always absolute
             'last_updated': datetime.now(timezone.utc).isoformat()
         })
         
         self._save_watermark(table_name, watermark)
-        logger.info(f"Updated MySQL state for {table_name}: status={status}")
+        logger.info(f"Updated MySQL state for {table_name}: status={status}, rows={total_rows}")
     
     def update_redshift_state(self, table_name: str,
                              loaded_files: List[str],
@@ -341,7 +336,7 @@ class SimpleWatermarkManager:
             logger.warning(f"Could not release lock: {e}")
     
     def _create_default_watermark(self, table_name: str) -> Dict[str, Any]:
-        """Create a default v2.0 watermark."""
+        """Create a default v2.0 watermark with ZERO counts."""
         return {
             'version': '2.0',
             'table_name': table_name,
@@ -352,11 +347,12 @@ class SimpleWatermarkManager:
                 'last_id': None,
                 'status': 'pending',
                 'error': None,
+                'total_rows': 0,  # ALWAYS 0 on reset
                 'last_updated': None
             },
             
             'redshift_state': {
-                'total_rows': 0,
+                'total_rows': 0,  # ALWAYS 0 on reset
                 'last_updated': None,
                 'status': 'pending',
                 'error': None,
