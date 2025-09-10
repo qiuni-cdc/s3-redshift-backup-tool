@@ -94,7 +94,8 @@ class SimpleWatermarkManager:
                           timestamp: Optional[str] = None,
                           id: Optional[int] = None,
                           status: str = "success",
-                          error: Optional[str] = None) -> None:
+                          error: Optional[str] = None,
+                          rows_extracted: Optional[int] = None) -> None:
         """
         Update MySQL extraction state.
         
@@ -104,14 +105,30 @@ class SimpleWatermarkManager:
             id: Last processed ID
             status: One of: success, failed, pending
             error: Error message if status is failed
+            rows_extracted: Number of rows extracted in this operation
         """
         watermark = self.get_watermark(table_name)
+        
+        # Handle row count accumulation if provided
+        current_rows = watermark['mysql_state'].get('total_rows', 0)
+        if rows_extracted is not None:
+            # For final updates, use absolute count; for incremental, add to existing
+            if status == 'success' and timestamp:
+                # This is a final successful update - use absolute count
+                new_total = rows_extracted
+            else:
+                # Incremental update - add to existing
+                new_total = current_rows + rows_extracted
+        else:
+            # No row count provided, keep existing
+            new_total = current_rows
         
         watermark['mysql_state'].update({
             'last_timestamp': timestamp,
             'last_id': id,
             'status': status,
             'error': error,
+            'total_rows': new_total,
             'last_updated': datetime.now(timezone.utc).isoformat()
         })
         

@@ -1364,7 +1364,8 @@ class BaseBackupStrategy(ABC):
                 timestamp=max_data_timestamp,
                 id=last_processed_id,
                 status=status,
-                error=error_message
+                error=error_message,
+                rows_extracted=rows_extracted
             )
             success = True
             

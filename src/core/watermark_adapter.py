@@ -229,6 +229,10 @@ class WatermarkAdapter:
             logger.error(f"Failed to reset watermark for {table_name}: {e}")
             return False
     
+    def force_reset_watermark(self, table_name: str) -> bool:
+        """Force reset watermark to initial state (alias for reset_table_watermark)."""
+        return self.reset_table_watermark(table_name)
+    
     def list_all_tables(self) -> List[LegacyWatermarkObject]:
         """List all tables with watermarks."""
         try:

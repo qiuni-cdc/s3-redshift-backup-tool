@@ -1,6 +1,6 @@
 from pydantic import SecretStr, Field, validator
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, Dict, Any
 import os
 from pathlib import Path
 
@@ -271,6 +271,70 @@ class AppConfig(BaseSettings):
         if config_file and Path(config_file).exists():
             return cls(_env_file=config_file)
         return cls()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert AppConfig to dictionary with all nested configurations.
+        
+        This method properly serializes all configuration sections including
+        nested objects that are accessed via properties. Unlike model_dump(),
+        this includes all the actual configuration data needed by components.
+        """
+        return {
+            'log_level': self.log_level,
+            'debug': self.debug,
+            's3': {
+                'bucket_name': self.s3.bucket_name,
+                'region': self.s3.region,
+                'access_key_id': self.s3.access_key,  # Map access_key to access_key_id
+                'secret_access_key': self.s3.secret_key.get_secret_value(),  # Extract secret value
+                'watermark_prefix': getattr(self.s3, 'watermark_prefix', 'watermarks/v2/'),
+                'multipart_threshold': self.s3.multipart_threshold,
+                'multipart_chunksize': self.s3.multipart_chunksize,
+                'max_concurrency': self.s3.max_concurrency,
+                'max_pool_connections': self.s3.max_pool_connections,
+                'retry_max_attempts': self.s3.retry_max_attempts,
+                'retry_mode': self.s3.retry_mode,
+            },
+            'database': {
+                'host': self.database.host,
+                'port': self.database.port,
+                'user': self.database.user,
+                'password': self.database.password,
+                'database': self.database.database,
+            },
+            'redshift': {
+                'host': self.redshift.host,
+                'port': self.redshift.port,
+                'user': self.redshift.user,
+                'password': self.redshift.password,
+                'database': self.redshift.database,
+                'schema': self.redshift.schema,
+            },
+            'backup': {
+                'batch_size': self.backup.batch_size,
+                'max_workers': self.backup.max_workers,
+                'retry_attempts': self.backup.retry_attempts,
+                'timeout_seconds': self.backup.timeout_seconds,
+                'memory_limit_mb': self.backup.memory_limit_mb,
+                'gc_threshold': self.backup.gc_threshold,
+                'memory_check_interval': self.backup.memory_check_interval,
+                'enable_compression': self.backup.enable_compression,
+                'compression_level': self.backup.compression_level,
+            },
+            'ssh': {
+                'bastion_host': self.ssh.bastion_host,
+                'bastion_user': self.ssh.bastion_user,
+                'bastion_key_path': self.ssh.bastion_key_path,
+                'local_port': self.ssh.local_port,
+            },
+            'redshift_ssh': {
+                'bastion_host': self.redshift_ssh.bastion_host,
+                'bastion_user': self.redshift_ssh.bastion_user,
+                'bastion_key_path': self.redshift_ssh.bastion_key_path,
+                'local_port': self.redshift_ssh.local_port,
+            }
+        }
     
     def validate_all(self) -> list:
         """Validate all configuration and return list of errors"""

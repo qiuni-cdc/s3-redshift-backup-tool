@@ -47,9 +47,11 @@ class S3TableWatermark:
         # Ensure metadata is not None
         if result['metadata'] is None:
             result['metadata'] = {}
-        # Ensure None values are properly handled
+        # Handle datetime objects for JSON serialization
         for key, value in result.items():
-            if value is None:
+            if isinstance(value, datetime):
+                result[key] = value.isoformat() + 'Z' if value.tzinfo is None else value.isoformat()
+            elif value is None:
                 result[key] = None  # Explicitly set None for JSON serialization
         return result
     

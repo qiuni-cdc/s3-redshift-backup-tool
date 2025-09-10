@@ -1053,7 +1053,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     timestamp=watermark_data.get('last_mysql_data_timestamp'),
                     id=watermark_data.get('last_processed_id'),
                     status=watermark_data.get('mysql_status', 'success'),
-                    error=watermark_data.get('last_error')
+                    error=watermark_data.get('last_error'),
+                    rows_extracted=total_rows_processed
                 )
                 success = True
             except Exception as e:
@@ -1136,7 +1137,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     timestamp=watermark_data.get('last_mysql_data_timestamp'),
                     id=watermark_data.get('last_processed_id'),
                     status=watermark_data.get('mysql_status', 'success'),
-                    error=watermark_data.get('last_error')
+                    error=watermark_data.get('last_error'),
+                    rows_extracted=total_rows_processed  # Track incremental progress
                 )
                 success = True
             except Exception as e:

@@ -230,76 +230,18 @@ class GeminiRedshiftLoader:
             return False
     
     def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None) -> List[str]:
-        """Get list of S3 parquet files for the table"""
+        """Get list of S3 parquet files for the table using pure blacklist deduplication (no timestamp filtering)"""
         try:
-            # Get watermark to determine what data needs to be loaded
+            # Get watermark for processed files blacklist
             watermark = self.watermark_manager.get_table_watermark(table_name)
             
             if not watermark or watermark.mysql_status != 'success':
                 logger.warning(f"No successful MySQL backup found for {table_name}")
                 return []
-                
-            # Determine cutoff time for incremental loading using MySQL extraction time
-            # This is more reliable than Redshift status which may timeout
-            cutoff_time = None
-            logger.debug(f"Watermark check: redshift_status='{watermark.redshift_status}', mysql_extraction_time='{watermark.last_mysql_extraction_time}'")
             
-            # Determine cutoff time for incremental loading
-            cutoff_time = None
-            session_start = None
-            session_end = None
-            
-            # Debug watermark detection
-            logger.info(f"DEBUG: Watermark detection:")
-            logger.info(f"DEBUG:   backup_strategy = '{watermark.backup_strategy}'")
-            logger.info(f"DEBUG:   has_mysql_data_timestamp = {bool(watermark.last_mysql_data_timestamp)}")
-            logger.info(f"DEBUG:   has_mysql_extraction_time = {bool(watermark.last_mysql_extraction_time)}")
-            
-            # Check for manual watermark first (priority over extraction time for CLI operations)
-            if (watermark.last_mysql_data_timestamp and 
-                watermark.backup_strategy == 'manual_cli' and 
-                not watermark.last_mysql_extraction_time):
-                # Pure manual watermark - use data timestamp for filtering
-                from datetime import datetime, timezone
-                data_timestamp_dt = datetime.fromisoformat(watermark.last_mysql_data_timestamp.replace('Z', '+00:00'))
-                cutoff_time = data_timestamp_dt
-                logger.info(f"Using manual watermark-based incremental Redshift loading: files after {cutoff_time}")
-                logger.info(f"CUTOFF DEBUG: Manual cutoff set to {cutoff_time}")
-            elif watermark.last_mysql_extraction_time:
-                # Session-based filtering for actual backup operations
-                from datetime import datetime, timezone, timedelta
-                mysql_extraction_dt = datetime.fromisoformat(watermark.last_mysql_extraction_time.replace('Z', '+00:00'))
-                
-                # CRITICAL FIX: For full_sync replace mode, use a much narrower time window
-                # to avoid loading accumulated files from previous test runs
-                if (cdc_strategy and hasattr(cdc_strategy, 'strategy_name') and 
-                    cdc_strategy.strategy_name == 'full_sync' and
-                    hasattr(cdc_strategy, 'sync_mode') and 
-                    cdc_strategy.sync_mode == 'replace'):
-                    
-                    # Very narrow window for full_sync replace: only files from this exact session
-                    session_start = mysql_extraction_dt - timedelta(minutes=30)
-                    session_end = mysql_extraction_dt + timedelta(hours=1)
-                    logger.info(f"Using NARROW session window for full_sync replace mode: files from {session_start} to {session_end}")
-                else:
-                    # Standard wide window for incremental operations
-                    session_start = mysql_extraction_dt - timedelta(hours=2)
-                    session_end = mysql_extraction_dt + timedelta(hours=10)
-                    logger.info(f"Using standard session-based incremental Redshift loading: files from {session_start} to {session_end}")
-                
-                # Ensure both times have timezone info
-                if session_start.tzinfo is None:
-                    session_start = session_start.replace(tzinfo=timezone.utc)
-                if session_end.tzinfo is None:
-                    session_end = session_end.replace(tzinfo=timezone.utc)
-            elif watermark.last_mysql_data_timestamp:
-                # Fallback: use data timestamp if no extraction time
-                from datetime import datetime, timezone
-                data_timestamp_dt = datetime.fromisoformat(watermark.last_mysql_data_timestamp.replace('Z', '+00:00'))
-                cutoff_time = data_timestamp_dt
-                logger.info(f"Using fallback watermark-based incremental Redshift loading: files after {cutoff_time}")
-            else:
-                logger.info(f"Full Redshift loading: no watermark or extraction time found")
+            # PURE BLACKLIST APPROACH: Only use processed files list for deduplication
+            # No timestamp filtering - eliminates all timing bugs
+            logger.info(f"Using pure blacklist approach for file filtering (no timestamp cutoff)")
             
             # Get S3 client
             s3_client = self.connection_manager.get_s3_client()
@@ -332,51 +274,7 @@ class GeminiRedshiftLoader:
                 logger.warning(f"Failed to check table partition: {e}")
                 has_table_partition = False
             
-            # OPTIMIZATION: For session-based loading, try date-specific prefixes first
-            # This helps find recent files without scanning thousands of old files
-            if session_start and not has_table_partition:
-                try:
-                    # Get dates to scan from session window
-                    from datetime import timedelta
-                    current_date = session_start.date()
-                    end_date = session_end.date() + timedelta(days=1)  # Include end date
-                    
-                    date_prefixes = []
-                    while current_date <= end_date:
-                        year = current_date.year
-                        month = current_date.month
-                        day = current_date.day
-                        date_prefix = f"{base_prefix}year={year}/month={month:02d}/day={day:02d}/"
-                        date_prefixes.append(date_prefix)
-                        current_date += timedelta(days=1)
-                    
-                    logger.info(f"Optimizing S3 scan with {len(date_prefixes)} date-specific prefixes for session window")
-                    
-                    # Try date-specific prefixes first (much more efficient)
-                    all_date_objects = []
-                    for date_prefix in date_prefixes:
-                        try:
-                            date_response = s3_client.list_objects_v2(
-                                Bucket=self.config.s3.bucket_name,
-                                Prefix=date_prefix,
-                                MaxKeys=1000
-                            )
-                            date_objects = date_response.get('Contents', [])
-                            if date_objects:
-                                logger.debug(f"Found {len(date_objects)} objects in {date_prefix}")
-                                all_date_objects.extend(date_objects)
-                        except Exception as e:
-                            logger.warning(f"Failed to scan date prefix {date_prefix}: {e}")
-                    
-                    if all_date_objects:
-                        # Use date-specific results instead of general scan
-                        response = {'Contents': all_date_objects}
-                        logger.info(f"Date-optimized scan found {len(all_date_objects)} objects in session window")
-                        # Skip the general pagination scan
-                        prefix = None  # Signal to skip general scan
-                        
-                except Exception as e:
-                    logger.warning(f"Date-based optimization failed, falling back to general scan: {e}")
+            # Simple strategy selection based on partition discovery
             
             # Strategy selection based on partition discovery
             if has_table_partition:
@@ -390,65 +288,59 @@ class GeminiRedshiftLoader:
                 prefix = base_prefix
                 max_keys = 2000  # Limit scan size to avoid performance issues
             
-            # Skip general scan if we already have date-optimized results
-            if prefix is None and 'Contents' in locals() and response.get('Contents'):
-                logger.info(f"Using date-optimized results, skipping general S3 scan")
-                all_objects = response.get('Contents', [])
+            logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
+            
+            # Execute S3 listing with chosen strategy
+            try:
+                all_objects = []
+                continuation_token = None
+                total_scanned = 0
+                
+                # FIXED: Implement proper pagination to find ALL files, not just first 1000
+                while True:
+                    list_params = {
+                        'Bucket': self.config.s3.bucket_name,
+                        'Prefix': prefix
+                    }
+                    
+                    # Add pagination token if we have one
+                    if continuation_token:
+                        list_params['ContinuationToken'] = continuation_token
+                    
+                    # For general prefix, limit each page size
+                    if not has_table_partition:
+                        list_params['MaxKeys'] = 1000  # Page size, not total limit
+                    
+                    response = s3_client.list_objects_v2(**list_params)
+                    
+                    # Add objects from this page
+                    page_objects = response.get('Contents', [])
+                    all_objects.extend(page_objects)
+                    total_scanned += len(page_objects)
+                    
+                    # Check if we have more pages
+                    if response.get('IsTruncated', False) and total_scanned < max_keys:
+                        continuation_token = response.get('NextContinuationToken')
+                        logger.debug(f"S3 listing paginating... scanned {total_scanned} objects so far")
+                    else:
+                        break
+                
+                # Trim to max_keys if needed
+                if not has_table_partition and len(all_objects) > max_keys:
+                    # Sort by LastModified descending to prioritize newer files
+                    all_objects.sort(key=lambda x: x.get('LastModified', ''), reverse=True)
+                    all_objects = all_objects[:max_keys]
+                    logger.info(f"S3 scan found {total_scanned} objects, limited to newest {max_keys}")
+                
                 total_objects = len(all_objects)
-            else:
-                logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
+                logger.info(f"S3 prefix scan returned {total_objects} total objects")
                 
-                # Execute S3 listing with chosen strategy
-                try:
-                    all_objects = []
-                    continuation_token = None
-                    total_scanned = 0
+                # Replace response Contents with our paginated results
+                response['Contents'] = all_objects
                 
-                    # FIXED: Implement proper pagination to find ALL files, not just first 1000
-                    while True:
-                        list_params = {
-                            'Bucket': self.config.s3.bucket_name,
-                            'Prefix': prefix
-                        }
-                        
-                        # Add pagination token if we have one
-                        if continuation_token:
-                            list_params['ContinuationToken'] = continuation_token
-                        
-                        # For general prefix, limit each page size
-                        if not has_table_partition:
-                            list_params['MaxKeys'] = 1000  # Page size, not total limit
-                        
-                        response = s3_client.list_objects_v2(**list_params)
-                        
-                        # Add objects from this page
-                        page_objects = response.get('Contents', [])
-                        all_objects.extend(page_objects)
-                        total_scanned += len(page_objects)
-                        
-                        # Check if we have more pages
-                        if response.get('IsTruncated', False) and total_scanned < max_keys:
-                            continuation_token = response.get('NextContinuationToken')
-                            logger.debug(f"S3 listing paginating... scanned {total_scanned} objects so far")
-                        else:
-                            break
-                    
-                    # Trim to max_keys if needed
-                    if not has_table_partition and len(all_objects) > max_keys:
-                        # Sort by LastModified descending to prioritize newer files
-                        all_objects.sort(key=lambda x: x.get('LastModified', ''), reverse=True)
-                        all_objects = all_objects[:max_keys]
-                        logger.info(f"S3 scan found {total_scanned} objects, limited to newest {max_keys}")
-                    
-                    total_objects = len(all_objects)
-                    logger.info(f"S3 prefix scan returned {total_objects} total objects")
-                    
-                    # Replace response Contents with our paginated results
-                    response['Contents'] = all_objects
-                    
-                except Exception as e:
-                    logger.error(f"S3 listing failed: {e}")
-                    return []
+            except Exception as e:
+                logger.error(f"S3 listing failed: {e}")
+                return []
             
             parquet_files = []
             filtered_files = []
@@ -460,6 +352,9 @@ class GeminiRedshiftLoader:
                 logger.info(f"Found {len(processed_files)} previously processed files to exclude")
             else:
                 logger.info(f"No previously processed files to exclude")
+            
+            # Convert to set for O(1) lookup performance
+            processed_files_set = set(processed_files) if processed_files else set()
             
             for obj in response.get('Contents', []):
                 key = obj['Key']
@@ -477,155 +372,35 @@ class GeminiRedshiftLoader:
                 s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
                 logger.debug(f"S3 URI: {s3_uri}")
                 
-                # CRITICAL: Skip files that were already processed
-                if s3_uri in processed_files:
-                    logger.debug(f"Skipping file (already processed): {key}")
+                # PURE BLACKLIST APPROACH: Only check if file was already processed
+                if s3_uri in processed_files_set:
+                    logger.debug(f"❌ EXCLUDING file (already processed): {key}")
                     continue
                 
-                logger.debug(f"File not in processed list, checking time filters...")
-                
-                # Apply timestamp filtering for incremental loading
-                file_modified_time = obj['LastModified']
-                if file_modified_time.tzinfo is None:
-                    file_modified_time = file_modified_time.replace(tzinfo=timezone.utc)
-                
-                # CRITICAL FIX: Extract timestamp from filename as primary source
-                # S3 LastModified can be significantly delayed due to processing
-                filename_timestamp = None
-                try:
-                    import re
-                    # Extract timestamp from filename pattern: *_YYYYMMDD_HHMMSS_*
-                    timestamp_match = re.search(r'_(\d{8}_\d{6})_', key)
-                    if timestamp_match:
-                        timestamp_str = timestamp_match.group(1)
-                        filename_timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
-                        filename_timestamp = filename_timestamp.replace(tzinfo=timezone.utc)
-                        logger.debug(f"Extracted filename timestamp: {filename_timestamp} from {key}")
-                except Exception as e:
-                    logger.debug(f"Could not extract filename timestamp from {key}: {e}")
-                
-                # Use filename timestamp if available, fallback to LastModified
-                effective_timestamp = filename_timestamp if filename_timestamp else file_modified_time
-                
-                if session_start and session_end:
-                    # Session-based filtering: use effective timestamp (filename preferred)
-                    if session_start <= effective_timestamp <= session_end:
-                        filtered_files.append(s3_uri)
-                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
-                        logger.debug(f"Including file (current session): {key} - {timestamp_source} {effective_timestamp}")
-                    else:
-                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified" 
-                        logger.debug(f"Skipping file (different session): {key} - {timestamp_source} {effective_timestamp}")
-                elif cutoff_time:
-                    # CRITICAL FIX: Watermark-based filtering with proper logic
-                    # Files should be included if they are AFTER the cutoff time
-                    is_after_cutoff = effective_timestamp > cutoff_time
-                    timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
-                    
-                    if is_after_cutoff:
-                        filtered_files.append(s3_uri)
-                        logger.info(f"✅ INCLUDING file: {key}")
-                        logger.info(f"   Timestamp ({timestamp_source}): {effective_timestamp}")
-                        logger.info(f"   Cutoff time: {cutoff_time}")
-                        logger.info(f"   After cutoff: {is_after_cutoff}")
-                    else:
-                        logger.info(f"❌ EXCLUDING file: {key}")
-                        logger.info(f"   Timestamp ({timestamp_source}): {effective_timestamp}")
-                        logger.info(f"   Cutoff time: {cutoff_time}")
-                        logger.info(f"   After cutoff: {is_after_cutoff}")
-                else:
-                    # No cutoff - include all files (full load)
-                    filtered_files.append(s3_uri)
-                    logger.debug(f"Including file (full load): {key}")
+                # PURE BLACKLIST: Include all files not in blacklist
+                filtered_files.append(s3_uri)
+                logger.info(f"✅ INCLUDING file (not in processed list): {key}")
+                logger.debug(f"   File URI: {s3_uri}")
+                logger.debug(f"   File in blacklist: False")
             
             logger.info(f"FILTERING SUMMARY: Found {len(parquet_files)} total files, filtered to {len(filtered_files)} files for loading")
             
-            # ENHANCED DEBUG: Always show filtering details
-            logger.info(f"FILTERING CRITERIA:")
-            if session_start and session_end:
-                logger.info(f"  Session window: {session_start} to {session_end}")
-            elif cutoff_time:
-                logger.info(f"  Cutoff time: {cutoff_time} (files must be AFTER this time)")
-            else:
-                logger.info(f"  No filtering (full load)")
+            # PURE BLACKLIST DEBUG: Show filtering criteria
+            logger.info(f"FILTERING CRITERIA (Pure Blacklist Approach):")
+            logger.info(f"  Total parquet files found: {len(parquet_files)}")
+            logger.info(f"  Previously processed files (blacklist): {len(processed_files)}")
+            logger.info(f"  Files eligible for loading: {len(filtered_files)}")
             
-            # ENHANCED DEBUG: Always show why files were filtered (not just when zero)
+            # DEBUG: Show filtering results
             if len(parquet_files) > 0:
                 if len(filtered_files) == 0:
-                    logger.error(f"❌ ALL {len(parquet_files)} FILES WERE FILTERED OUT - INVESTIGATING...")
-                    logger.info(f"WATERMARK DEBUG:")
-                    logger.info(f"  last_mysql_extraction_time = {watermark.last_mysql_extraction_time}")
-                    logger.info(f"  last_mysql_data_timestamp = {watermark.last_mysql_data_timestamp}")
-                    logger.info(f"  backup_strategy = {watermark.backup_strategy}")
-                    logger.info(f"  Calculated cutoff_time = {cutoff_time}")
+                    logger.warning(f"⚠️ ALL {len(parquet_files)} FILES WERE EXCLUDED (already processed)")
+                    logger.info(f"BLACKLIST DEBUG:")
+                    logger.info(f"  Found {len(processed_files)} files in blacklist")
+                    logger.info(f"  All discovered files are already processed")
+                    logger.info(f"  This may be expected if no new data since last sync")
                 else:
-                    logger.info(f"✅ FILTERING SUCCESS: {len(filtered_files)}/{len(parquet_files)} files passed filtering")
-                
-                # P2 FIX: Show first few files that were rejected, prioritizing recent ones
-                # Use dynamic date detection instead of hardcoded dates
-                from datetime import datetime, timedelta
-                
-                # Look for files from the last 7 days instead of hardcoded dates
-                recent_date_patterns = []
-                for days_back in range(7):
-                    date = datetime.now() - timedelta(days=days_back)
-                    recent_date_patterns.append(date.strftime('%Y%m%d'))
-                
-                recent_files = []
-                for f in parquet_files:
-                    if any(pattern in f for pattern in recent_date_patterns):
-                        recent_files.append(f)
-                        if len(recent_files) >= 5:
-                            break
-                
-                all_files = parquet_files[:3] if not recent_files else recent_files
-                
-                for i, obj_key in enumerate(all_files):
-                    # Need to get the object info again for debugging
-                    try:
-                        obj_response = s3_client.list_objects_v2(
-                            Bucket=self.config.s3.bucket_name,
-                            Prefix=obj_key,
-                            MaxKeys=1
-                        )
-                        if obj_response.get('Contents'):
-                            obj = obj_response['Contents'][0]
-                            file_time = obj['LastModified']
-                            if file_time.tzinfo is None:
-                                file_time = file_time.replace(tzinfo=timezone.utc)
-                            
-                            # Also extract filename timestamp for debugging
-                            filename_timestamp = None
-                            try:
-                                import re
-                                timestamp_match = re.search(r'_(\d{8}_\d{6})_', obj_key)
-                                if timestamp_match:
-                                    timestamp_str = timestamp_match.group(1)
-                                    filename_timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
-                                    filename_timestamp = filename_timestamp.replace(tzinfo=timezone.utc)
-                            except:
-                                pass
-                            
-                            effective_timestamp = filename_timestamp if filename_timestamp else file_time
-                            
-                            logger.info(f"DEBUG: File {i+1}: {obj_key}")
-                            logger.info(f"DEBUG:   S3 LastModified: {file_time}")
-                            if filename_timestamp:
-                                logger.info(f"DEBUG:   Filename timestamp: {filename_timestamp}")
-                                logger.info(f"DEBUG:   Using timestamp: FILENAME (more reliable)")
-                            else:
-                                logger.info(f"DEBUG:   Using timestamp: S3 LASTMODIFIED (fallback)")
-                            logger.info(f"DEBUG:   Effective timestamp: {effective_timestamp}")
-                            logger.info(f"DEBUG:   Cutoff time:  {cutoff_time}")
-                            
-                            # Check session window if applicable
-                            if session_start and session_end:
-                                logger.info(f"DEBUG:   Session window: {session_start} to {session_end}")
-                                logger.info(f"DEBUG:   In session: {session_start <= effective_timestamp <= session_end}")
-                            elif cutoff_time:
-                                logger.info(f"DEBUG:   After cutoff: {effective_timestamp > cutoff_time}")
-                    except Exception as e:
-                        logger.warning(f"DEBUG: Failed to get file info for {obj_key}: {e}")
+                    logger.info(f"✅ BLACKLIST FILTERING SUCCESS: {len(filtered_files)}/{len(parquet_files)} files are new (not processed before)")
             
             return filtered_files
             
