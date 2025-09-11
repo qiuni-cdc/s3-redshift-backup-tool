@@ -9,16 +9,16 @@ connections:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
       database: unidw
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"  # References .env variable for security
       description: "Default v1.0.0 compatibility MySQL connection (US-WEST-2 unidw)"
       
       # SSH tunnel configuration (your current setup)
       ssh_tunnel:
         enabled: true
-        host: 35.83.114.196  # Correct US-WEST-2 bastion host
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        host: "${SSH_BASTION_HOST}"  # Correct US-WEST-2 bastion host
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
 
     # Canada Data Warehouse Read-Only with SSH 
@@ -26,15 +26,15 @@ connections:
       host: us-east-1.ro.db.analysis.uniuni.ca.internal
       port: 3306
       database: unidw
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "Canada Data Warehouse Read-Only MySQL (US-EAST-1) via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 44.209.128.227
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
 
     # US Production Read-Only with SSH
@@ -42,15 +42,15 @@ connections:
       host: us-west-2.ro.db.uniuni.com.internal
       port: 3306
       database: kuaisong
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Production Read-Only MySQL (US-WEST-2) via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 35.83.114.196
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
     
     # US Data Warehouse Read-Only with SSH - Settlement Schema
@@ -58,15 +58,15 @@ connections:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
       database: settlement
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Settlement Schema via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 35.83.114.196
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
 
     # US Data Warehouse Read-Only with SSH - Unidw Schema  
@@ -74,15 +74,15 @@ connections:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
       database: unidw
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Unidw Schema via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 35.83.114.196
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
 
     # US Data Warehouse Read-Only with SSH - Uniods Schema
@@ -90,15 +90,15 @@ connections:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
       database: uniods
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Uniods Schema via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 35.83.114.196
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
     
     # US QA with SSH
@@ -106,15 +106,15 @@ connections:
       host: us-west-2.ro.db.qa.uniuni.com.internal
       port: 3306
       database: unidw
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US QA MySQL (US-WEST-2) via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 35.82.216.244
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
     
     # US Production Read-Only Direct (no SSH)
@@ -122,7 +122,7 @@ connections:
       host: us-west-2.ro.db.uniuni.com.internal
       port: 3306
       database: kuaisong
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Production Read-Only MySQL (US-WEST-2) direct connection"
       
@@ -135,7 +135,7 @@ connections:
       host: us-east-1.ro.db.analysis.uniuni.ca.internal
       port: 3306
       database: settlement
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL direct connection (same as mysql_default)"
       
@@ -148,7 +148,7 @@ connections:
       host: us-west-2.ro.db.qa.uniuni.com.internal
       port: 3306
       database: unidw
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US QA MySQL (US-WEST-2) direct connection"
       
@@ -161,7 +161,7 @@ connections:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
       database: settlement
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) direct connection"
       
@@ -174,15 +174,15 @@ connections:
       host: us-west-2.ro.db2.uniuni.com.internal
       port: 3306
       database: settlement
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US DB2 Read-Only MySQL (US-WEST-2) via SSH tunnel"
       
       ssh_tunnel:
         enabled: true
         host: 35.83.114.196
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
     
     # US DB2 Read-Only Direct (no SSH)
@@ -190,7 +190,7 @@ connections:
       host: us-west-2.ro.db2.uniuni.com.internal
       port: 3306
       database: settlement
-      username: chenqi
+      username: "${DB_USER}"
       password: "${DB_PASSWORD}"
       description: "US DB2 Read-Only MySQL (US-WEST-2) direct connection"
       
@@ -204,7 +204,7 @@ connections:
       host: redshift-dw.qa.uniuni.com
       port: 5439
       database: dw
-      username: chenqi
+      username: "${REDSHIFT_USER}"
       password: "${REDSHIFT_PASSWORD}"  # References .env variable
       schema: public
       
@@ -212,8 +212,8 @@ connections:
       ssh_tunnel:
         enabled: true
         host: 35.82.216.244
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${REDSHIFT_SSH_BASTION_USER}"
+        private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
 
 # S3 configuration (inherited from .env)

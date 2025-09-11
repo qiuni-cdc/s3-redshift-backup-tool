@@ -140,6 +140,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 fix_applied="s3_stats_reset_per_table"
             )
             
+            
             # Create cursor with dictionary output
             cursor = db_conn.cursor(dictionary=True, buffered=False)
             
@@ -234,6 +235,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Determine chunk size
             effective_chunk_size = chunk_size or self.config.backup.target_rows_per_chunk
             
+            # Use original limit logic - apply limit to database query regardless of existing S3 files
+            adjusted_max_total_rows = max_total_rows
+            
             # Get column information from CDC strategy
             table_config = self._get_table_config(table_name)
             if table_config:
@@ -266,7 +270,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         max_total_rows=max_total_rows,
                         total_rows_processed=total_rows_processed,
                         chunks_completed=chunk_number - 1,
-                        limit_enforcement="STRICT_LIMIT_REACHED"
+                        limit_enforcement="MAX_ROWS_REACHED"
                     )
                     break
                 
@@ -375,9 +379,13 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 chunk_duration = time.time() - chunk_start_time
                 
                 # Update watermark after successful chunk (absolute progress tracking)
-                self._update_chunk_watermark_absolute(
+                # ENHANCED: Track S3 files created in this chunk
+                chunk_s3_files = self._get_chunk_s3_files(table_name, current_timestamp)
+                
+                self._update_chunk_watermark_with_files(
                     table_name, chunk_last_timestamp, chunk_last_id, 
-                    total_rows_processed  # Use absolute total, not incremental
+                    total_rows_processed,  # Use absolute total, not incremental
+                    chunk_s3_files  # Track files created in this chunk
                 )
                 
                 self.logger.logger.info(
@@ -408,10 +416,22 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     )
             
             # Final watermark update with completion status (additive session total)
+            # Handle last_timestamp which could be string or datetime
+            if isinstance(last_timestamp, str):
+                max_timestamp = datetime.fromisoformat(last_timestamp)
+            elif isinstance(last_timestamp, datetime):
+                max_timestamp = last_timestamp
+            else:
+                # Fallback to current time if timestamp is invalid
+                max_timestamp = datetime.now()
+                self.logger.logger.warning(
+                    f"Invalid last_timestamp type: {type(last_timestamp)}, using current time"
+                )
+            
             self._set_final_watermark_with_session_control(
                 table_name=table_name,
                 extraction_time=datetime.now(),
-                max_data_timestamp=datetime.fromisoformat(last_timestamp),
+                max_data_timestamp=max_timestamp,
                 last_processed_id=last_id,
                 session_rows_processed=total_rows_processed,  # Session total
                 status='success'
@@ -1074,6 +1094,234 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 error_message=error_message
             )
     
+    def _get_chunk_s3_files(self, table_name: str, timestamp: str) -> List[str]:
+        """Get S3 files that were uploaded in this chunk based on timestamp"""
+        try:
+            import boto3
+            from datetime import datetime, timedelta
+            
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.config.s3.access_key,
+                aws_secret_access_key=self.config.s3.secret_key.get_secret_value(),
+                region_name=self.config.s3.region
+            )
+            
+            # Build search pattern for this table
+            safe_table_name = table_name.split(':')[-1].replace('.', '_').lower()
+            prefix = f"incremental/"
+            
+            # Look for files created in the last few minutes (chunk processing time)
+            cutoff_time = datetime.now() - timedelta(minutes=5)
+            
+            paginator = s3_client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(
+                Bucket=self.config.s3.bucket_name,
+                Prefix=prefix
+            )
+            
+            recent_files = []
+            for page in page_iterator:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        # Check if this file matches our table and is recent
+                        if (key.endswith('.parquet') and 
+                            safe_table_name in key and 
+                            obj['LastModified'].replace(tzinfo=None) > cutoff_time):
+                            s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
+                            recent_files.append(s3_uri)
+            
+            self.logger.logger.debug(
+                f"Found {len(recent_files)} recent S3 files for chunk tracking",
+                table_name=table_name,
+                files=recent_files[:3]  # Log first 3 for debugging
+            )
+            
+            return recent_files
+            
+        except Exception as e:
+            self.logger.logger.warning(
+                f"Failed to get chunk S3 files: {e}",
+                table_name=table_name
+            )
+            return []
+
+    def _count_rows_in_s3_files(self, s3_file_list: List[str]) -> int:
+        """Count total rows in a list of S3 files"""
+        if not s3_file_list:
+            return 0
+            
+        try:
+            import boto3
+            import pyarrow.parquet as pq
+            from io import BytesIO
+            
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.config.s3.access_key,
+                aws_secret_access_key=self.config.s3.secret_key.get_secret_value(),
+                region_name=self.config.s3.region
+            )
+            
+            total_rows = 0
+            bucket = self.config.s3.bucket_name
+            
+            for s3_uri in s3_file_list:
+                try:
+                    key = s3_uri.replace(f"s3://{bucket}/", "")
+                    response = s3_client.get_object(Bucket=bucket, Key=key)
+                    parquet_data = response['Body'].read()
+                    parquet_file = pq.ParquetFile(BytesIO(parquet_data))
+                    total_rows += parquet_file.metadata.num_rows
+                except Exception as e:
+                    self.logger.logger.warning(f"Failed to count rows in {s3_uri}: {e}")
+                    
+            return total_rows
+            
+        except Exception as e:
+            self.logger.logger.error(f"Failed to count rows in S3 files: {e}")
+            return 0
+
+    def _count_rows_in_backup_s3_files(self, table_name: str) -> int:
+        """Count total rows in existing backup S3 files (diagnostic utility)"""
+        try:
+            # Get existing backup files from watermark
+            watermark = self.watermark_manager.get_table_watermark(table_name)
+            if not watermark or not hasattr(watermark, 'backup_s3_files') or not watermark.backup_s3_files:
+                return 0
+            
+            return self._count_rows_in_s3_files(watermark.backup_s3_files)
+            
+        except Exception as e:
+            self.logger.logger.warning(
+                f"Failed to count backup S3 rows: {e}",
+                table_name=table_name
+            )
+            return 0
+
+    def _update_chunk_watermark_with_files(
+        self, 
+        table_name: str, 
+        last_timestamp: str, 
+        last_id: int, 
+        total_rows_processed: int,
+        chunk_s3_files: List[str]
+    ):
+        """
+        Update watermark with resume data AND S3 files created in chunk.
+        
+        This method updates both resume position AND tracks S3 files to prevent
+        data loss when sync is interrupted.
+        
+        Args:
+            table_name: Name of the table
+            last_timestamp: Last processed timestamp
+            last_id: Last processed ID
+            total_rows_processed: Session progress
+            chunk_s3_files: S3 files created in this chunk
+        """
+        try:
+            # Get existing watermark to preserve backup stage files
+            watermark = self.watermark_manager.get_table_watermark(table_name)
+            existing_backup_files = []
+            if watermark and hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
+                existing_backup_files = watermark.backup_s3_files.copy()
+            
+            # DEBUG: Print file lists to debug duplication issue
+            print(f"DEBUG BACKUP FILES:")
+            print(f"  existing_backup_files ({len(existing_backup_files)}):")
+            for i, f in enumerate(existing_backup_files):
+                file_name = f.split('/')[-1] if f else "None"
+                print(f"    {i}. {file_name}")
+            
+            print(f"  chunk_s3_files ({len(chunk_s3_files)}):")
+            for i, f in enumerate(chunk_s3_files):
+                file_name = f.split('/')[-1] if f else "None"
+                print(f"    {i}. {file_name}")
+            
+            if watermark and hasattr(watermark, 'processed_s3_files') and watermark.processed_s3_files:
+                print(f"  processed_s3_files ({len(watermark.processed_s3_files)}):")
+                for i, f in enumerate(watermark.processed_s3_files[:3]):  # Show first 3
+                    file_name = f.split('/')[-1] if f else "None"
+                    print(f"    {i}. {file_name}")
+                if len(watermark.processed_s3_files) > 3:
+                    print(f"    ... and {len(watermark.processed_s3_files) - 3} more")
+            else:
+                print(f"  processed_s3_files: None or empty")
+            
+            # Get processed files to avoid re-adding them
+            processed_files = []
+            if watermark and hasattr(watermark, 'processed_s3_files') and watermark.processed_s3_files:
+                processed_files = watermark.processed_s3_files
+            
+            # Add new chunk files to backup stage files (NOT processed_s3_files)
+            # CRITICAL FIX: Exclude files that are already processed
+            all_backup_files = existing_backup_files.copy()
+            for file_uri in chunk_s3_files:
+                if file_uri in processed_files:
+                    file_name = file_uri.split('/')[-1] if file_uri else "None"
+                    print(f"  Skipped (already processed): {file_name}")
+                elif file_uri not in all_backup_files:
+                    all_backup_files.append(file_uri)
+                    file_name = file_uri.split('/')[-1] if file_uri else "None"
+                    print(f"  Added to backup: {file_name}")
+                else:
+                    file_name = file_uri.split('/')[-1] if file_uri else "None"
+                    print(f"  Skipped (already in backup): {file_name}")
+            
+            print(f"  final all_backup_files ({len(all_backup_files)})")
+            print(f"DEBUG END")
+            
+            # Calculate cumulative totals
+            # Get existing watermark to calculate cumulative values
+            existing_extracted = 0
+            if watermark and hasattr(watermark, 'mysql_rows_extracted') and watermark.mysql_rows_extracted:
+                existing_extracted = watermark.mysql_rows_extracted
+            
+            # For rows: add session progress to existing total for cumulative count
+            cumulative_rows_extracted = existing_extracted + total_rows_processed
+            
+            # Build watermark update data
+            # CRITICAL FIX: Don't update processed_s3_files during backup!
+            # processed_s3_files should only be updated by Redshift loader
+            watermark_data = {
+                'last_mysql_data_timestamp': last_timestamp,
+                'last_processed_id': last_id,
+                'mysql_rows_extracted': cumulative_rows_extracted,    # Cumulative total across all sessions
+                'mysql_status': 'in_progress',
+                'backup_strategy': 'row_based',
+                'last_mysql_extraction_time': datetime.now().isoformat(),
+                's3_file_count': len(all_backup_files),               # Will be updated to total in watermark manager
+                'backup_s3_files': all_backup_files                   # Track backup files separately
+                # ❌ DON'T update processed_s3_files here - that's for Redshift loading!
+            }
+            
+            # Use direct update to set all data
+            success = self.watermark_manager._update_watermark_direct(
+                table_name=table_name,
+                watermark_data=watermark_data
+            )
+            
+            self.logger.logger.info(
+                "Updated chunk watermark with S3 file tracking",
+                table_name=table_name,
+                last_timestamp=last_timestamp,
+                last_id=last_id,
+                session_progress_rows=total_rows_processed,
+                chunk_files=len(chunk_s3_files),
+                total_backup_files=len(all_backup_files)
+            )
+            
+            return success
+            
+        except Exception as e:
+            self.logger.logger.warning(
+                f"Failed to update chunk watermark with files: {e}",
+                table_name=table_name
+            )
+            return False
+
     def _update_chunk_watermark_absolute(
         self, 
         table_name: str, 
@@ -1174,28 +1422,58 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # CRITICAL FIX: Get actual S3 file count from S3 directly (not in-memory stats)
             actual_s3_files = self._count_actual_s3_files(table_name)
             
+            # ENHANCED: Get the backup_s3_files list and count ACTUAL rows from files
+            watermark = self.watermark_manager.get_table_watermark(table_name)
+            existing_backup_files = []
+            if watermark and hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
+                existing_backup_files = watermark.backup_s3_files
+            
+            # SIMPLIFIED WATERMARK LOGIC: Count all existing S3 files
+            watermark = self.watermark_manager.get_table_watermark(table_name)
+            all_s3_files = set()
+            
+            # Add all backup files
+            if existing_backup_files:
+                all_s3_files.update(existing_backup_files)
+                
+            # Add all processed files  
+            if watermark and hasattr(watermark, 'processed_s3_files') and watermark.processed_s3_files:
+                all_s3_files.update(watermark.processed_s3_files)
+            
+            # Count total existing files and rows
+            total_existing_files = len(all_s3_files)
+            try:
+                total_existing_rows = self._count_rows_in_s3_files(list(all_s3_files))
+            except Exception as e:
+                self.logger.logger.warning(f"Failed to count rows in existing S3 files: {e}")
+                total_existing_rows = session_rows_processed  # Fallback to current session
+            
             self.logger.logger.info(
-                "S3 file count tracking for watermark update",
+                "Simplified watermark calculation - count all existing S3 files",
                 table_name=table_name,
-                s3_files_created=actual_s3_files,
+                existing_backup_files=len(existing_backup_files),
+                existing_processed_files=len(watermark.processed_s3_files) if watermark and watermark.processed_s3_files else 0,
+                total_existing_files=total_existing_files,
+                total_existing_rows=total_existing_rows,
                 session_rows=session_rows_processed,
-                fix_applied="s3_count_tracking"
+                fix_applied="simplified_existing_files_count"
             )
             
-            # Use the NEW mode-controlled watermark update with REAL S3 count
+            # Use ABSOLUTE mode with TOTAL cumulative count
             success = self.watermark_manager.update_mysql_watermark(
                 table_name=table_name,
                 extraction_time=extraction_time,
                 max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_processed_id,
-                rows_extracted=session_rows_processed,
+                rows_extracted=total_existing_rows,  # SIMPLIFIED: Total rows in all existing S3 files
                 status=status,
                 backup_strategy='row_based',
-                s3_file_count=actual_s3_files,  # ✅ FIXED: Real S3 count instead of 0
+                s3_file_count=total_existing_files,  # SIMPLIFIED: Total existing S3 files count
                 error_message=error_message,
-                mode='auto',  # Let the system decide absolute vs additive
+                mode='absolute',  # Use absolute with correct total
                 session_id=session_id
             )
+            
             
             self.logger.logger.info(
                 "Final watermark updated with session control",

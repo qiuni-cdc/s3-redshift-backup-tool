@@ -1,0 +1,9 @@
+{
+  "table_name": "unidw.dw_parcel_detail_tool",
+  "created_at": "2025-09-04T15:17:19.076820",
+  "mappings": {
+    "190_time": "col_190_time"
+  },
+  "total_columns": 60,
+  "mapped_columns": 1
+}

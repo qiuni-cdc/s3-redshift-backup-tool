@@ -302,44 +302,124 @@ class GeminiRedshiftLoader:
             return False
     
     def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None) -> List[str]:
-        """SIMPLIFIED: Get all S3 files, exclude processed files, load remaining"""
+        """Get list of S3 parquet files for the table"""
         try:
-            # Get watermark to check for processed files
+            # Get watermark to determine what data needs to be loaded
             watermark = self.watermark_manager.get_table_watermark(table_name)
             
             if not watermark or watermark.mysql_status != 'success':
                 logger.warning(f"No successful MySQL backup found for {table_name}")
                 return []
             
-            logger.info(f"SIMPLIFIED LOGIC: Finding all S3 files for {table_name}, excluding processed files")
+            
+                
+            # Determine cutoff time for incremental loading using MySQL extraction time
+            # This is more reliable than Redshift status which may timeout
+            cutoff_time = None
+            logger.debug(f"Watermark check: redshift_status='{watermark.redshift_status}', mysql_extraction_time='{watermark.last_mysql_extraction_time}'")
+            
+            # Determine cutoff time for incremental loading
+            cutoff_time = None
+            session_start = None
+            session_end = None
+            
+            # Debug watermark detection
+            logger.info(f"DEBUG: Watermark detection:")
+            logger.info(f"DEBUG:   backup_strategy = '{watermark.backup_strategy}'")
+            logger.info(f"DEBUG:   has_mysql_data_timestamp = {bool(watermark.last_mysql_data_timestamp)}")
+            logger.info(f"DEBUG:   has_mysql_extraction_time = {bool(watermark.last_mysql_extraction_time)}")
+            
+            # Check for manual watermark first (priority over extraction time for CLI operations)
+            if (watermark.last_mysql_data_timestamp and 
+                watermark.backup_strategy == 'manual_cli' and 
+                not watermark.last_mysql_extraction_time):
+                # Pure manual watermark - use data timestamp for filtering
+                from datetime import datetime, timezone
+                data_timestamp_dt = datetime.fromisoformat(watermark.last_mysql_data_timestamp.replace('Z', '+00:00'))
+                cutoff_time = data_timestamp_dt
+                logger.info(f"Using manual watermark-based incremental Redshift loading: files after {cutoff_time}")
+            elif watermark.last_mysql_extraction_time:
+                # Session-based filtering for actual backup operations
+                from datetime import datetime, timezone, timedelta
+                mysql_extraction_dt = datetime.fromisoformat(watermark.last_mysql_extraction_time.replace('Z', '+00:00'))
+                
+                # CRITICAL FIX: For full_sync replace mode, use a much narrower time window
+                # to avoid loading accumulated files from previous test runs
+                if (cdc_strategy and hasattr(cdc_strategy, 'strategy_name') and 
+                    cdc_strategy.strategy_name == 'full_sync' and
+                    hasattr(cdc_strategy, 'sync_mode') and 
+                    cdc_strategy.sync_mode == 'replace'):
+                    
+                    # Very narrow window for full_sync replace: only files from this exact session
+                    session_start = mysql_extraction_dt - timedelta(minutes=30)
+                    session_end = mysql_extraction_dt + timedelta(hours=1)
+                    logger.info(f"Using NARROW session window for full_sync replace mode: files from {session_start} to {session_end}")
+                else:
+                    # Standard wide window for incremental operations
+                    session_start = mysql_extraction_dt - timedelta(hours=2)
+                    session_end = mysql_extraction_dt + timedelta(hours=10)
+                    logger.info(f"Using standard session-based incremental Redshift loading: files from {session_start} to {session_end}")
+                
+                # Ensure both times have timezone info
+                if session_start.tzinfo is None:
+                    session_start = session_start.replace(tzinfo=timezone.utc)
+                if session_end.tzinfo is None:
+                    session_end = session_end.replace(tzinfo=timezone.utc)
+            elif watermark.last_mysql_data_timestamp:
+                # Fallback: use data timestamp if no extraction time
+                from datetime import datetime, timezone
+                data_timestamp_dt = datetime.fromisoformat(watermark.last_mysql_data_timestamp.replace('Z', '+00:00'))
+                cutoff_time = data_timestamp_dt
+                logger.info(f"Using fallback watermark-based incremental Redshift loading: files after {cutoff_time}")
+            else:
+                logger.info(f"Full Redshift loading: no watermark or extraction time found")
             
             # Get S3 client
             s3_client = self.connection_manager.get_s3_client()
             
-            # Build S3 prefix for this table's data
+            # Build S3 prefix for this table's data using same logic as S3Manager
+            # FIXED: Use table-specific prefix to avoid scanning all files
             clean_table_name = self._clean_table_name_with_scope(table_name)
+            
+            # ENHANCED: Use more efficient prefix strategies to minimize file scanning
+            # Strategy 1: Try to find table-specific partition directories first
             base_prefix = f"{self.config.s3.incremental_path.strip('/')}/"
             
-            # Try table-specific partition first, then general prefix
+            # Check if table partition strategy is used (most efficient)
             table_partition_prefix = f"{base_prefix}table={clean_table_name}/"
             
-            # Check if table partition exists
+            logger.debug(f"Trying table-specific partition prefix: {table_partition_prefix}")
+            
+            # First try the most specific prefix (table partition)
             try:
                 table_partition_response = s3_client.list_objects_v2(
                     Bucket=self.config.s3.bucket_name,
                     Prefix=table_partition_prefix,
-                    MaxKeys=1
+                    MaxKeys=1  # Just check if this partition exists
                 )
+                
                 has_table_partition = len(table_partition_response.get('Contents', [])) > 0
+                logger.debug(f"Table partition exists: {has_table_partition}")
+                
             except Exception as e:
                 logger.warning(f"Failed to check table partition: {e}")
                 has_table_partition = False
             
-            # Use appropriate prefix
-            prefix = table_partition_prefix if has_table_partition else base_prefix
-            logger.info(f"Scanning S3 prefix: {prefix}")
+            # Strategy selection based on partition discovery
+            if has_table_partition:
+                # Use table-specific prefix for maximum efficiency
+                logger.info(f"Using table partition strategy for efficient file discovery")
+                prefix = table_partition_prefix
+                max_keys = 1000  # Reasonable limit for table-specific files
+            else:
+                # Fallback to general prefix but with stricter filtering
+                logger.info(f"Using general prefix with enhanced filtering")
+                prefix = base_prefix
+                max_keys = 2000  # Limit scan size to avoid performance issues
             
-            # Get all S3 objects
+            logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
+            
+            # Execute S3 listing with pagination to find ALL files
             try:
                 paginator = s3_client.get_paginator('list_objects_v2')
                 page_iterator = paginator.paginate(
@@ -348,55 +428,180 @@ class GeminiRedshiftLoader:
                 )
                 
                 all_objects = []
+                total_objects = 0
                 for page in page_iterator:
                     if 'Contents' in page:
                         all_objects.extend(page['Contents'])
+                        total_objects += len(page['Contents'])
                 
+                logger.info(f"S3 prefix scan returned {total_objects} total objects (paginated)")
                 
             except Exception as e:
                 logger.error(f"S3 listing failed: {e}")
                 return []
             
-            # Get processed files to exclude
-            processed_files = set()
-            if watermark and watermark.processed_s3_files:
-                processed_files = set(watermark.processed_s3_files)
-                logger.info(f"Will exclude {len(processed_files)} already processed files")
+            parquet_files = []
+            filtered_files = []
             
-            # Find all parquet files for this table, excluding processed ones
-            files_to_load = []
+            # Get list of already processed files to prevent duplicates
+            processed_files = []
+            if watermark and watermark.processed_s3_files:
+                processed_files = watermark.processed_s3_files
+                logger.info(f"Found {len(processed_files)} previously processed files to exclude")
+            else:
+                logger.info(f"No previously processed files to exclude")
             
             for obj in all_objects:
                 key = obj['Key']
                 
-                # Must be parquet file
+                # ENHANCED: More efficient filtering - check parquet first, then table name
                 if not key.endswith('.parquet'):
                     continue
-                
-                # Must match table name (if using general prefix)
+                    
+                # For table partition strategy, we already know files match
+                # For general prefix, we need to filter by table name
                 if not has_table_partition and clean_table_name not in key:
                     continue
                 
-                # Build S3 URI
+                parquet_files.append(key)
                 s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
+                logger.debug(f"S3 URI: {s3_uri}")
                 
-                # Skip if already processed
+                # CRITICAL: Skip files that were already processed
                 if s3_uri in processed_files:
-                    logger.debug(f"Skipping processed file: {key}")
+                    logger.info(f"Skipping file (already processed): {key}")
                     continue
                 
-                # Include this file
-                files_to_load.append(s3_uri)
-                logger.debug(f"Will load file: {key}")
+                # DEBUG: Log processed files exclusion check for troubleshooting
+                if len(processed_files) > 0:
+                    logger.debug(f"File {s3_uri} not in processed list of {len(processed_files)} files")
+                    for proc_file in processed_files[:3]:  # Show first 3 for comparison
+                        logger.debug(f"  Processed file sample: {proc_file}")
+                
+                logger.debug(f"File not in processed list, checking time filters...")
+                
+                # Apply timestamp filtering for incremental loading
+                file_modified_time = obj['LastModified']
+                if file_modified_time.tzinfo is None:
+                    file_modified_time = file_modified_time.replace(tzinfo=timezone.utc)
+                
+                # CRITICAL FIX: Extract timestamp from filename as primary source
+                # S3 LastModified can be significantly delayed due to processing
+                filename_timestamp = None
+                try:
+                    import re
+                    # Extract timestamp from filename pattern: *_YYYYMMDD_HHMMSS_*
+                    timestamp_match = re.search(r'_(\d{8}_\d{6})_', key)
+                    if timestamp_match:
+                        timestamp_str = timestamp_match.group(1)
+                        filename_timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+                        filename_timestamp = filename_timestamp.replace(tzinfo=timezone.utc)
+                        logger.debug(f"Extracted filename timestamp: {filename_timestamp} from {key}")
+                except Exception as e:
+                    logger.debug(f"Could not extract filename timestamp from {key}: {e}")
+                
+                # Use filename timestamp if available, fallback to LastModified
+                effective_timestamp = filename_timestamp if filename_timestamp else file_modified_time
+                
+                if session_start and session_end:
+                    # Session-based filtering: use effective timestamp (filename preferred)
+                    if session_start <= effective_timestamp <= session_end:
+                        filtered_files.append(s3_uri)
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
+                        logger.debug(f"Including file (current session): {key} - {timestamp_source} {effective_timestamp}")
+                    else:
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified" 
+                        logger.debug(f"Skipping file (different session): {key} - {timestamp_source} {effective_timestamp}")
+                elif cutoff_time:
+                    # Watermark-based filtering: use effective timestamp
+                    if effective_timestamp > cutoff_time:
+                        filtered_files.append(s3_uri)
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
+                        logger.debug(f"Including file (after watermark): {key} - {timestamp_source} {effective_timestamp}")
+                    else:
+                        timestamp_source = "filename" if filename_timestamp else "S3_LastModified"
+                        logger.debug(f"Skipping file (before watermark): {key} - {timestamp_source} {effective_timestamp}")
+                else:
+                    # No cutoff - include all files (full load)
+                    filtered_files.append(s3_uri)
+                    logger.debug(f"Including file (full load): {key}")
             
-            logger.info(f"SIMPLIFIED RESULT: {len(files_to_load)} files to load (excluded {len(processed_files)} processed files)")
+            logger.info(f"Found {len(parquet_files)} total files, filtered to {len(filtered_files)} files for loading")
             
-            # Show files to load
-            for i, file_uri in enumerate(files_to_load, 1):
-                file_name = file_uri.split('/')[-1]
-                logger.info(f"  {i}. {file_name}")
+            # Debug logging to understand filtering
+            if len(parquet_files) > 0 and len(filtered_files) == 0:
+                logger.info("DEBUG: No files passed filtering - investigating...")
+                logger.info(f"DEBUG: watermark.last_mysql_extraction_time = {watermark.last_mysql_extraction_time}")
+                logger.info(f"DEBUG: watermark.last_mysql_data_timestamp = {watermark.last_mysql_data_timestamp}")
+                logger.info(f"DEBUG: cutoff_time = {cutoff_time}")
+                
+                # P2 FIX: Show first few files that were rejected, prioritizing recent ones
+                # Use dynamic date detection instead of hardcoded dates
+                from datetime import datetime, timedelta
+                
+                # Look for files from the last 7 days instead of hardcoded dates
+                recent_date_patterns = []
+                for days_back in range(7):
+                    date = datetime.now() - timedelta(days=days_back)
+                    recent_date_patterns.append(date.strftime('%Y%m%d'))
+                
+                recent_files = []
+                for f in parquet_files:
+                    if any(pattern in f for pattern in recent_date_patterns):
+                        recent_files.append(f)
+                        if len(recent_files) >= 5:
+                            break
+                
+                all_files = parquet_files[:3] if not recent_files else recent_files
+                
+                for i, obj_key in enumerate(all_files):
+                    # Need to get the object info again for debugging
+                    try:
+                        obj_response = s3_client.list_objects_v2(
+                            Bucket=self.config.s3.bucket_name,
+                            Prefix=obj_key,
+                            MaxKeys=1
+                        )
+                        if obj_response.get('Contents'):
+                            obj = obj_response['Contents'][0]
+                            file_time = obj['LastModified']
+                            if file_time.tzinfo is None:
+                                file_time = file_time.replace(tzinfo=timezone.utc)
+                            
+                            # Also extract filename timestamp for debugging
+                            filename_timestamp = None
+                            try:
+                                import re
+                                timestamp_match = re.search(r'_(\d{8}_\d{6})_', obj_key)
+                                if timestamp_match:
+                                    timestamp_str = timestamp_match.group(1)
+                                    filename_timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+                                    filename_timestamp = filename_timestamp.replace(tzinfo=timezone.utc)
+                            except:
+                                pass
+                            
+                            effective_timestamp = filename_timestamp if filename_timestamp else file_time
+                            
+                            logger.info(f"DEBUG: File {i+1}: {obj_key}")
+                            logger.info(f"DEBUG:   S3 LastModified: {file_time}")
+                            if filename_timestamp:
+                                logger.info(f"DEBUG:   Filename timestamp: {filename_timestamp}")
+                                logger.info(f"DEBUG:   Using timestamp: FILENAME (more reliable)")
+                            else:
+                                logger.info(f"DEBUG:   Using timestamp: S3 LASTMODIFIED (fallback)")
+                            logger.info(f"DEBUG:   Effective timestamp: {effective_timestamp}")
+                            logger.info(f"DEBUG:   Cutoff time:  {cutoff_time}")
+                            
+                            # Check session window if applicable
+                            if session_start and session_end:
+                                logger.info(f"DEBUG:   Session window: {session_start} to {session_end}")
+                                logger.info(f"DEBUG:   In session: {session_start <= effective_timestamp <= session_end}")
+                            elif cutoff_time:
+                                logger.info(f"DEBUG:   After cutoff: {effective_timestamp > cutoff_time}")
+                    except Exception as e:
+                        logger.warning(f"DEBUG: Failed to get file info for {obj_key}: {e}")
             
-            return files_to_load
+            return filtered_files
             
         except Exception as e:
             logger.error(f"Failed to get S3 parquet files for {table_name}: {e}")

@@ -316,31 +316,51 @@ class FlexibleSchemaManager:
         # Check for custom optimizations in redshift_keys.json
         custom_config = self._redshift_optimizations.get(mysql_table_name)
         
+        # Default to AUTO optimization
+        dist_clause = "DISTSTYLE AUTO"
+        sort_clause = "SORTKEY AUTO"
+        
         if custom_config:
             logger.info(f"Using custom Redshift optimizations for {mysql_table_name}")
             
-            # Apply custom DISTKEY
+            # Apply custom DISTKEY or default to DISTSTYLE AUTO
             if 'distkey' in custom_config:
                 distkey_column = custom_config['distkey']
                 # Verify the column exists in the table schema and sanitize name
                 column_exists = any(col['COLUMN_NAME'] == distkey_column for col in schema_info)
                 if column_exists:
                     safe_distkey = self._sanitize_column_name_for_redshift(distkey_column)
-                    optimization_clauses.append(f"DISTKEY({safe_distkey})")
+                    dist_clause = f"DISTKEY({safe_distkey})"
                     logger.info(f"Applied custom DISTKEY: {safe_distkey}")
                 else:
-                    logger.warning(f"Custom DISTKEY column '{distkey_column}' not found in table schema, using default")
+                    logger.warning(f"Custom DISTKEY column '{distkey_column}' not found in table schema, using DISTSTYLE AUTO")
+            # If no distkey specified, use DISTSTYLE AUTO (already set above)
             
-            # Apply custom SORTKEY
+            # Apply custom SORTKEY or default to SORTKEY AUTO
             if 'sortkey' in custom_config and custom_config['sortkey']:
-                sortkey_columns = custom_config['sortkey']
-                if isinstance(sortkey_columns, str):
-                    sortkey_columns = [sortkey_columns]
+                sortkey_config = custom_config['sortkey']
+                
+                # Handle different sortkey configurations
+                if isinstance(sortkey_config, dict):
+                    # New format: {"type": "compound|interleaved", "columns": [...]}
+                    sortkey_type = sortkey_config.get('type', 'compound').upper()
+                    sortkey_columns = sortkey_config.get('columns', [])
+                elif isinstance(sortkey_config, list):
+                    # Legacy format: ["col1", "col2"] (defaults to compound)
+                    sortkey_type = 'COMPOUND'
+                    sortkey_columns = sortkey_config
+                elif isinstance(sortkey_config, str):
+                    # Single column
+                    sortkey_type = 'COMPOUND'
+                    sortkey_columns = [sortkey_config]
+                else:
+                    sortkey_type = 'COMPOUND'
+                    sortkey_columns = []
                 
                 # Verify all sortkey columns exist and sanitize
                 valid_sortkeys = []
-                for sortkey_col in sortkey_columns[:2]:  # Max 2 sort keys
-                    if any(col['COLUMN_NAME'] == sortkey_col for col in schema_info):
+                for sortkey_col in sortkey_columns:
+                    if isinstance(sortkey_col, str) and any(col['COLUMN_NAME'] == sortkey_col for col in schema_info):
                         safe_sortkey = self._sanitize_column_name_for_redshift(sortkey_col)
                         valid_sortkeys.append(safe_sortkey)
                     else:
@@ -348,53 +368,18 @@ class FlexibleSchemaManager:
                 
                 if valid_sortkeys:
                     sort_keys = ', '.join(valid_sortkeys)
-                    optimization_clauses.append(f"SORTKEY({sort_keys})")
-                    logger.info(f"Applied custom SORTKEY: {sort_keys}")
+                    sort_clause = f"{sortkey_type} SORTKEY({sort_keys})"
+                    logger.info(f"Applied custom {sortkey_type} SORTKEY: {sort_keys}")
+            # If no sortkey specified, use SORTKEY AUTO (already set above)
         
         else:
-            # Use default optimization logic if no custom configuration
-            logger.debug(f"No custom optimizations found for {mysql_table_name}, using defaults")
-            
-            # Add DISTKEY for even distribution - prioritize tracking_number for settle_orders
-            dist_key_set = False
-            
-            # For settle_orders table, prefer tracking_number as DISTKEY
-            if 'settle_orders' in clean_table_name.lower():
-                for col in schema_info:
-                    if col['COLUMN_NAME'].lower() == 'tracking_number':
-                        safe_col_name = self._sanitize_column_name_for_redshift(col['COLUMN_NAME'])
-                        optimization_clauses.append(f"DISTKEY({safe_col_name})")
-                        dist_key_set = True
-                        break
-            
-            # Fallback to primary key or parcel columns if tracking_number not found
-            if not dist_key_set:
-                if primary_key_candidates:
-                    optimization_clauses.append(f"DISTKEY({primary_key_candidates[0]})")
-                elif 'parcel' in clean_table_name.lower():
-                    # Look for parcel-related columns
-                    for col in schema_info:
-                        if 'parcel' in col['COLUMN_NAME'].lower():
-                            optimization_clauses.append(f"DISTKEY({col['COLUMN_NAME']})")
-                            break
-            
-            # Add SORTKEY for query performance - enhanced for settle_orders
-            if 'settle_orders' in clean_table_name.lower():
-                # For settle_orders, prioritize tracking_number and timestamps
-                settle_sort_keys = []
-                for col in schema_info:
-                    col_name_lower = col['COLUMN_NAME'].lower()
-                    if col_name_lower == 'tracking_number':
-                        settle_sort_keys.insert(0, col['COLUMN_NAME'])  # First priority
-                    elif col_name_lower in ['create_at', 'update_at', 'created_at', 'updated_at']:
-                        settle_sort_keys.append(col['COLUMN_NAME'])
-                
-                if settle_sort_keys:
-                    sort_keys = ', '.join(settle_sort_keys[:2])  # Max 2 sort keys
-                    optimization_clauses.append(f"SORTKEY({sort_keys})")
-            elif sort_key_candidates:
-                sort_keys = ', '.join(sort_key_candidates[:2])  # Max 2 sort keys
-                optimization_clauses.append(f"SORTKEY({sort_keys})")
+            # No custom configuration found - use AUTO optimization
+            logger.info(f"No custom optimizations found for {mysql_table_name}, using AUTO optimization")
+        
+        # Apply optimization clauses
+        optimization_clauses = []
+        optimization_clauses.append(dist_clause)
+        optimization_clauses.append(sort_clause)
         
         if optimization_clauses:
             ddl_lines.append("\n" + "\n".join(optimization_clauses))

@@ -33,7 +33,18 @@ tables:
     cdc_id_column: "id"
     description: "Parcel detail tool data with ID-only strategy"
     processing:
-      batch_size: 10000
+      batch_size: 100000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0 
+
+  unidw.dw_parcel_pricing_temp:
+    cdc_strategy: "hybrid"
+    cdc_timestamp_column: "create_at"
+    cdc_id_column: "id"
+    description: "Parcel pricing temp data with hybrid strategy"
+    processing:
+      batch_size: 100
     validation:
       enable_data_quality_checks: true
       max_null_percentage: 5.0

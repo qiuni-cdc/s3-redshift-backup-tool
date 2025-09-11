@@ -32,7 +32,8 @@ class S3TableWatermark:
     redshift_status: str = 'pending'  # pending, success, failed, in_progress
     backup_strategy: str = 'sequential'
     s3_file_count: int = 0
-    processed_s3_files: Optional[List[str]] = None  # Track loaded S3 files to prevent duplicates
+    backup_s3_files: Optional[List[str]] = None     # Track S3 files created during backup
+    processed_s3_files: Optional[List[str]] = None  # Track S3 files loaded to Redshift
     last_error: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -43,21 +44,54 @@ class S3TableWatermark:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
+        from datetime import datetime
+        
         result = asdict(self)
         # Ensure metadata is not None
         if result['metadata'] is None:
             result['metadata'] = {}
-        # Ensure None values are properly handled
+        
+        # Handle datetime serialization and None values
         for key, value in result.items():
             if value is None:
                 result[key] = None  # Explicitly set None for JSON serialization
+            elif isinstance(value, datetime):
+                # Convert datetime to ISO format string for JSON serialization
+                result[key] = value.isoformat() + 'Z' if value.tzinfo is None else value.isoformat()
+        
         return result
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'S3TableWatermark':
         """Create from dictionary (JSON deserialization)"""
-        # Handle missing fields gracefully
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        from datetime import datetime
+        
+        # Handle missing fields and datetime deserialization
+        processed_data = {}
+        for k, v in data.items():
+            if k in cls.__dataclass_fields__:
+                # Handle datetime deserialization
+                if v is not None and isinstance(v, str):
+                    # Check if it's a datetime field that needs conversion
+                    field_type = cls.__dataclass_fields__[k].type
+                    if hasattr(field_type, '__origin__') and field_type.__origin__ is type(Optional[datetime]):
+                        # Optional[datetime] field
+                        try:
+                            processed_data[k] = datetime.fromisoformat(v.replace('Z', '+00:00'))
+                        except (ValueError, AttributeError):
+                            processed_data[k] = v
+                    elif field_type == datetime:
+                        # Direct datetime field
+                        try:
+                            processed_data[k] = datetime.fromisoformat(v.replace('Z', '+00:00'))
+                        except (ValueError, AttributeError):
+                            processed_data[k] = v
+                    else:
+                        processed_data[k] = v
+                else:
+                    processed_data[k] = v
+        
+        return cls(**processed_data)
 
 
 class S3WatermarkManager:
@@ -531,7 +565,15 @@ class S3WatermarkManager:
             
             watermark.mysql_status = status
             watermark.backup_strategy = backup_strategy
-            watermark.s3_file_count = s3_file_count
+            
+            # CRITICAL FIX: Preserve backup_s3_files and sync s3_file_count
+            # If backup_s3_files exists, use its length for s3_file_count
+            if hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
+                watermark.s3_file_count = len(watermark.backup_s3_files)
+                logger.debug(f"Syncing s3_file_count from backup_s3_files: {watermark.s3_file_count}")
+            else:
+                watermark.s3_file_count = s3_file_count
+            
             watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
             
             # Merge metadata if provided (for full_sync_mode and other CDC strategy metadata)
@@ -618,16 +660,38 @@ class S3WatermarkManager:
                 if session_id:
                     watermark.last_redshift_session_id = session_id
             
-            # Track processed S3 files to prevent re-loading
-            # MEMORY LEAK FIX: Implement sliding window to prevent unlimited growth
-            if processed_files:
+            # SIMPLIFIED FILE MOVEMENT LOGIC
+            if processed_files is not None and status == 'success':
+                # Initialize lists if needed
                 if not watermark.processed_s3_files:
                     watermark.processed_s3_files = []
+                if not hasattr(watermark, 'backup_s3_files') or not watermark.backup_s3_files:
+                    watermark.backup_s3_files = []
                 
-                # Add new files to the list (avoid duplicates)
+                # For each successfully loaded file:
+                # 1. Add to processed_s3_files (if not already there)
+                # 2. Remove from backup_s3_files (if present)
                 for file_path in processed_files:
+                    # Add to processed files
                     if file_path not in watermark.processed_s3_files:
                         watermark.processed_s3_files.append(file_path)
+                        logger.info(f"Added to processed files: {file_path.split('/')[-1]}")
+                    
+                    # Remove from backup files
+                    if file_path in watermark.backup_s3_files:
+                        watermark.backup_s3_files.remove(file_path)
+                        logger.info(f"Removed from backup files: {file_path.split('/')[-1]}")
+                
+                # Update file count
+                backup_count = len(watermark.backup_s3_files)
+                processed_count = len(watermark.processed_s3_files)
+                watermark.s3_file_count = backup_count + processed_count
+                
+                logger.info(f"File movement complete: {backup_count} backup, {processed_count} processed files")
+                
+            elif processed_files is not None and status != 'success':
+                logger.warning(f"Redshift status is '{status}', not moving {len(processed_files)} files")
+            # If processed_files is None, preserve existing lists unchanged
                 
                 # MEMORY LEAK FIX: Implement file list rotation to prevent memory exhaustion
                 max_tracked_files = 5000  # Reasonable limit for production

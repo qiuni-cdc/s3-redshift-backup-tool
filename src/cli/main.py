@@ -1364,6 +1364,8 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 click.echo(f"      Status: {watermark.mysql_status}")
                 click.echo(f"      Rows Extracted: {watermark.mysql_rows_extracted:,}")
                 click.echo(f"      S3 Files Created: {watermark.s3_file_count}")
+                
+                
                 click.echo(f"      Last Data Timestamp: {watermark.last_mysql_data_timestamp}")
                 click.echo(f"      Last Extraction Time: {watermark.last_mysql_extraction_time}")
                 
@@ -1423,9 +1425,19 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 
                 click.echo()
                 
-                # Show processed S3 files if requested
+                # Show backup stage S3 files
+                if show_files and hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
+                    click.echo("   📦 Backup S3 Files (awaiting Redshift load):")
+                    for file_path in watermark.backup_s3_files[-5:]:  # Show last 5
+                        filename = file_path.split('/')[-1]
+                        click.echo(f"        • {filename}")
+                    if len(watermark.backup_s3_files) > 5:
+                        click.echo(f"      ... and {len(watermark.backup_s3_files) - 5} more files")
+                    click.echo()
+                
+                # Show processed S3 files (loaded to Redshift)
                 if show_files and watermark.processed_s3_files:
-                    click.echo("   📁 Processed S3 Files:")
+                    click.echo("   ✅ Processed S3 Files (loaded to Redshift):")
                     if len(watermark.processed_s3_files) > 10:
                         click.echo(f"      Total: {len(watermark.processed_s3_files)} files")
                         click.echo("      Recent files (last 10):")
@@ -1439,7 +1451,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                             click.echo(f"        • {filename}")
                     click.echo()
                 elif show_files and not watermark.processed_s3_files:
-                    click.echo("   📁 Processed S3 Files: None")
+                    click.echo("   ✅ Processed S3 Files (loaded to Redshift): None")
                     click.echo()
                 
                 # Errors and Storage Info
@@ -1869,7 +1881,7 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
     
     Examples:
         # List files for specific table (default scope)
-        s3-backup s3clean list -t settlement.settlement_return_detail
+        s3-backup  list -t settlement.settlement_return_detail
         
         # List files for connection-scoped table (v1.2.0 multi-schema)
         s3-backup s3clean list -t settlement.settle_orders -c US_DW_RO_SSH

@@ -62,7 +62,8 @@ class DataValidator:
     and performance optimized validation for large datasets.
     """
     
-    def __init__(self):
+    def __init__(self, connection_manager=None):
+        self.connection_manager = connection_manager
         self.validation_rules = {}
         self.custom_validators = {}
         
@@ -80,10 +81,14 @@ class DataValidator:
             PyArrow schema from actual database structure
         """
         try:
-            # FIXED: Use FlexibleSchemaManager for dynamic schema discovery
+            # FIXED: Use FlexibleSchemaManager for dynamic schema discovery  
             from src.core.flexible_schema_manager import FlexibleSchemaManager
             
-            schema_manager = FlexibleSchemaManager()
+            if not self.connection_manager:
+                logger.warning(f"No connection manager available for {table_name}, cannot get dynamic schema")
+                return None
+                
+            schema_manager = FlexibleSchemaManager(connection_manager=self.connection_manager)
             pyarrow_schema, redshift_ddl = schema_manager.get_table_schema(table_name)
             
             if pyarrow_schema:
@@ -626,11 +631,17 @@ class DataValidator:
         logger.info("Updated validation rules")
 
 
-# Global validator instance
-_data_validator = DataValidator()
+# Global validator instance (lazy initialization)
+_data_validator = None
 
-def get_data_validator() -> DataValidator:
+def get_data_validator(connection_manager=None) -> DataValidator:
     """Get the global data validator instance"""
+    global _data_validator
+    if _data_validator is None:
+        _data_validator = DataValidator(connection_manager)
+    elif connection_manager is not None and _data_validator.connection_manager is None:
+        # Update connection manager if it wasn't available during first initialization
+        _data_validator.connection_manager = connection_manager
     return _data_validator
 
 def validate_data(
