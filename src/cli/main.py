@@ -1252,10 +1252,12 @@ def config(ctx, output: str):
 @click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
 @click.option('--id', type=int, help='Starting ID for set operation (for ID-based CDC)')
 @click.option('--show-files', is_flag=True, help='Show processed S3 files list (for get operation)')
+@click.option('--preserve-files', is_flag=True, help='Keep processed S3 files list during reset')
+@click.option('--yes', '-y', is_flag=True, help='Bypass confirmation prompts (for automation)')
 @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_files: bool, pipeline: str, connection: str):
+def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_files: bool, preserve_files: bool, yes: bool, pipeline: str, connection: str):
     """
     Manage table-specific watermark timestamps and IDs for incremental backups.
     
@@ -1273,6 +1275,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
         s3-backup watermark set -t unidw.dw_parcel_detail_tool --id 41471788
         s3-backup watermark set -t hybrid_table --timestamp "2024-01-01 00:00:00" --id 1000000
         s3-backup watermark reset -t settlement.settlement_claim_detail
+        s3-backup watermark reset -t settlement.settlement_claim_detail --preserve-files
         s3-backup watermark list
     """
     config = ctx.obj['config']
@@ -1522,22 +1525,41 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
             
-            # Confirm deletion
-            click.echo(f"⚠️  This will completely delete the watermark for {table}")
-            click.echo("   The next backup will start from the default timestamp")
-            if not click.confirm("   Continue?"):
-                click.echo("   Operation cancelled")
-                return
+            # Confirm deletion with preserve_files information (unless --yes flag is used)
+            if not yes:
+                if preserve_files:
+                    click.echo(f"⚠️  This will reset the watermark for {table} but preserve processed S3 files")
+                    click.echo("   The next backup will start from the default timestamp")
+                    click.echo("   Existing S3 files will NOT be reprocessed")
+                else:
+                    click.echo(f"⚠️  This will completely delete the watermark for {table}")
+                    click.echo("   The next backup will start from the default timestamp")
+                    click.echo("   All S3 file tracking will be cleared")
+                if not click.confirm("   Continue?"):
+                    click.echo("   Operation cancelled")
+                    return
             
             try:
-                # FIXED: Use force_reset_watermark instead of delete for proper cleanup
-                success = watermark_manager.force_reset_watermark(effective_table_name)
+                # Use SimpleWatermarkManager directly if preserve_files is requested
+                if preserve_files and hasattr(watermark_manager, 'simple_manager'):
+                    # Direct call to SimpleWatermarkManager with preserve_files parameter
+                    watermark_manager.simple_manager.reset_watermark(effective_table_name, preserve_files=True)
+                    success = True
+                else:
+                    # Standard reset operation (clears everything)
+                    success = watermark_manager.force_reset_watermark(effective_table_name)
                 
                 if success:
-                    click.echo(f"✅ Watermark reset for {table}")
-                    click.echo("   Watermark reset to epoch start (1970-01-01)")
-                    click.echo("   All resume points and processed IDs cleared")
-                    click.echo("   Next sync will start fresh from beginning")
+                    if preserve_files:
+                        click.echo(f"✅ Watermark reset for {table} (S3 files preserved)")
+                        click.echo("   Watermark reset to epoch start (1970-01-01)")
+                        click.echo("   Resume points and processed IDs cleared")
+                        click.echo("   Processed S3 files list preserved to prevent re-processing")
+                    else:
+                        click.echo(f"✅ Watermark reset for {table}")
+                        click.echo("   Watermark reset to epoch start (1970-01-01)")
+                        click.echo("   All resume points and processed IDs cleared")
+                        click.echo("   Next sync will start fresh from beginning")
                 else:
                     click.echo("❌ Failed to reset watermark", err=True)
                     sys.exit(1)
@@ -1552,13 +1574,14 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
             
-            # Confirm force reset
-            click.echo(f"⚠️  FORCE RESET will overwrite the watermark for {table}")
-            click.echo("   This bypasses all backup/recovery mechanisms")
-            click.echo("   Watermark will be set to epoch start (1970-01-01)")
-            if not click.confirm("   Continue with force reset?"):
-                click.echo("   Operation cancelled")
-                return
+            # Confirm force reset (unless --yes flag is used)
+            if not yes:
+                click.echo(f"⚠️  FORCE RESET will overwrite the watermark for {table}")
+                click.echo("   This bypasses all backup/recovery mechanisms")
+                click.echo("   Watermark will be set to epoch start (1970-01-01)")
+                if not click.confirm("   Continue with force reset?"):
+                    click.echo("   Operation cancelled")
+                    return
             
             try:
                 success = watermark_manager.force_reset_watermark(effective_table_name)
