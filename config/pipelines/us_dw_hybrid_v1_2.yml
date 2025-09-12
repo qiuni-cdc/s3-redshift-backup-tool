@@ -39,7 +39,7 @@ tables:
     
     # Processing optimization for hybrid strategy
     processing:
-      batch_size: 75000                       # Larger batches for efficiency
+      batch_size: 100000                       # Larger batches for efficiency
       enable_parallel_processing: false      # Sequential for data integrity
       
     # Enhanced validation for production data
