@@ -570,9 +570,10 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
               help='Maximum number of chunks to process (total rows = limit × max-chunks)')
 @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
+@click.option('--json-output', is_flag=True, help='Output sync results in JSON format for automation')
 @click.pass_context
 def sync(ctx, tables: List[str], strategy: str, max_workers: int, 
-         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int, pipeline: str, connection: str):
+         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int, pipeline: str, connection: str, json_output: bool):
     """
     Complete MySQL → S3 → Redshift synchronization with flexible schema discovery.
     
@@ -882,6 +883,39 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
         
         # Final summary
         duration = time.time() - start_time
+        
+        # Prepare summary data for JSON output
+        sync_result = {
+            "success": overall_success,
+            "duration_seconds": duration,
+            "tables_processed": len(tables),
+            "strategy": strategy,
+            "stages": {
+                "backup": {
+                    "executed": not redshift_only,
+                    "success": backup_success if not redshift_only else None,
+                    "summary": backup_summary if not redshift_only else None
+                },
+                "redshift": {
+                    "executed": not backup_only,
+                    "success": redshift_success if not backup_only else None,
+                    "summary": redshift_summary if not backup_only else None
+                }
+            },
+            "options": {
+                "backup_only": backup_only,
+                "redshift_only": redshift_only,
+                "chunk_size": chunk_size,
+                "max_total_rows": max_total_rows,
+                "verify_data": verify_data
+            }
+        }
+        
+        if json_output:
+            # Output structured JSON for automation
+            import json
+            print(json.dumps(sync_result, indent=2))
+            sys.exit(0 if overall_success else 1)
         
         if overall_success:
             click.echo("✅ Sync completed successfully!")
