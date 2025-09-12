@@ -282,58 +282,26 @@ class SimpleWatermarkManager:
         """
         Acquire exclusive lock for table operations.
         
+        TEAM-ONLY BYPASS: Locks disabled for simplified team usage.
+        Returns mock lock ID without creating actual locks.
+        
         Args:
             table_name: Table identifier
             
         Returns:
-            Lock ID for release
-            
-        Raises:
-            WatermarkError if table is already locked
+            Mock lock ID for compatibility
         """
-        lock_key = f"{self.watermark_prefix}locks/{self._clean_table_name(table_name)}.lock"
-        lock_id = str(uuid.uuid4())
-        
-        try:
-            # Check if lock exists
-            self.s3_client.head_object(Bucket=self.bucket_name, Key=lock_key)
-            raise WatermarkError(f"Table {table_name} is locked by another process")
-        except ClientError as e:
-            if e.response['Error']['Code'] == '404':
-                # Create lock
-                lock_data = {
-                    'lock_id': lock_id,
-                    'locked_at': datetime.now(timezone.utc).isoformat(),
-                    'pid': os.getpid(),
-                    'hostname': os.uname().nodename
-                }
-                self.s3_client.put_object(
-                    Bucket=self.bucket_name,
-                    Key=lock_key,
-                    Body=json.dumps(lock_data)
-                )
-                logger.debug(f"Acquired lock for {table_name}: {lock_id}")
-                return lock_id
-            else:
-                raise WatermarkError(f"Failed to acquire lock: {e}")
+        mock_lock_id = str(uuid.uuid4())
+        logger.debug(f"Lock bypass: Mock lock acquired for {table_name}: {mock_lock_id}")
+        return mock_lock_id
     
     def release_lock(self, table_name: str, lock_id: str) -> None:
-        """Release table lock."""
-        lock_key = f"{self.watermark_prefix}locks/{self._clean_table_name(table_name)}.lock"
+        """
+        Release table lock.
         
-        try:
-            # Verify lock ownership
-            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=lock_key)
-            lock_data = json.loads(response['Body'].read())
-            
-            if lock_data['lock_id'] == lock_id:
-                self.s3_client.delete_object(Bucket=self.bucket_name, Key=lock_key)
-                logger.debug(f"Released lock for {table_name}: {lock_id}")
-            else:
-                logger.warning(f"Lock ID mismatch for {table_name}, not releasing")
-                
-        except ClientError as e:
-            logger.warning(f"Could not release lock: {e}")
+        TEAM-ONLY BYPASS: No-op since locks are disabled.
+        """
+        logger.debug(f"Lock bypass: Mock lock released for {table_name}: {lock_id}")
     
     def _create_default_watermark(self, table_name: str) -> Dict[str, Any]:
         """Create a default v2.0 watermark with ZERO counts."""
