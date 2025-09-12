@@ -59,13 +59,14 @@ class GeminiRedshiftLoader:
             self.logger.error(f"Redshift connection test failed: {e}")
             return False
         
-    def load_table_data(self, table_name: str, cdc_strategy=None) -> bool:
+    def load_table_data(self, table_name: str, cdc_strategy=None, table_config=None) -> bool:
         """
         Load S3 parquet data to Redshift using Gemini direct COPY approach.
         
         Args:
             table_name: Name of the table to load
             cdc_strategy: CDC strategy instance (optional, for full_sync replace mode)
+            table_config: Table configuration with target_name mapping (optional)
             
         Returns:
             True if loading successful, False otherwise
@@ -94,8 +95,11 @@ class GeminiRedshiftLoader:
             pyarrow_schema, redshift_ddl = self.schema_manager.get_table_schema(table_name)
             
             # Step 2: Create or update Redshift table
-            redshift_table_name = self._get_redshift_table_name(table_name)
-            table_created = self._ensure_redshift_table(redshift_table_name, redshift_ddl)
+            redshift_table_name = self._get_redshift_table_name(table_name, table_config)
+            
+            # FIXED: Update DDL to use correct target table name if custom mapping is used
+            corrected_ddl = self._fix_ddl_table_name(redshift_ddl, redshift_table_name, table_name)
+            table_created = self._ensure_redshift_table(redshift_table_name, corrected_ddl)
             
             if not table_created:
                 logger.error(f"Failed to create/verify Redshift table: {redshift_table_name}")
@@ -191,9 +195,16 @@ class GeminiRedshiftLoader:
             logger.error(error_msg)
             raise Exception(error_msg) from e
     
-    def _get_redshift_table_name(self, mysql_table_name: str) -> str:
-        """Convert MySQL table name to Redshift table name with v1.2.0 scoped support"""
-        # FIXED: Extract actual table name without scope prefix for Redshift
+    def _get_redshift_table_name(self, mysql_table_name: str, table_config=None) -> str:
+        """Convert MySQL table name to Redshift table name with v1.2.0 scoped support and target name mapping"""
+        
+        # NEW FEATURE: Check if table_config specifies a target_name
+        if table_config and hasattr(table_config, 'target_name') and table_config.target_name:
+            target_name = table_config.target_name
+            logger.info(f"✅ Table mapping: {mysql_table_name} → {target_name} (custom mapping)")
+            return target_name
+        
+        # EXISTING LOGIC: Extract actual table name without scope prefix for Redshift
         # Redshift tables don't include the scope prefix, just the table name
         
         # Handle scoped table names (v1.2.0 multi-schema)
@@ -210,9 +221,51 @@ class GeminiRedshiftLoader:
         # Example: 'settlement.settle_orders' → 'settle_orders'
         if '.' in table_name:
             _, table_only = table_name.rsplit('.', 1)
-            return table_only
+            final_name = table_only
         else:
-            return table_name
+            final_name = table_name
+        
+        logger.info(f"✅ Table mapping: {mysql_table_name} → {final_name} (default mapping)")
+        return final_name
+    
+    def _fix_ddl_table_name(self, ddl: str, target_table_name: str, source_table_name: str) -> str:
+        """Fix DDL to use the correct target table name for custom table name mappings"""
+        import re
+        
+        # Extract source table name parts for DDL matching
+        if ':' in source_table_name:
+            _, clean_source = source_table_name.split(':', 1)
+        else:
+            clean_source = source_table_name
+            
+        if '.' in clean_source:
+            _, source_table_only = clean_source.rsplit('.', 1)
+        else:
+            source_table_only = clean_source
+        
+        # Pattern to match CREATE TABLE statements
+        # Handles both "CREATE TABLE table_name" and "CREATE TABLE IF NOT EXISTS table_name"
+        pattern = r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:public\.)?(\w+)'
+        
+        # Find the current table name in DDL
+        match = re.search(pattern, ddl, re.IGNORECASE)
+        if match:
+            current_table_in_ddl = match.group(1)
+            
+            # Only replace if the current table name matches our source (avoid incorrect replacements)
+            if current_table_in_ddl == source_table_only or current_table_in_ddl == clean_source.replace('.', '_'):
+                # Replace with target table name, preserving schema
+                corrected_ddl = re.sub(
+                    r'(CREATE TABLE(?:\s+IF NOT EXISTS)?\s+)(?:public\.)?(\w+)',
+                    rf'\1public.{target_table_name}',
+                    ddl,
+                    flags=re.IGNORECASE
+                )
+                logger.debug(f"DDL table name corrected: {current_table_in_ddl} → {target_table_name}")
+                return corrected_ddl
+        
+        # If no replacement needed or pattern not found, return original DDL
+        return ddl
     
     def _ensure_redshift_table(self, table_name: str, ddl: str) -> bool:
         """Create or verify Redshift table exists with correct schema"""
@@ -568,7 +621,7 @@ class GeminiRedshiftLoader:
                 cursor = conn.cursor()
                 
                 for table_name in tables:
-                    redshift_table_name = self._get_redshift_table_name(table_name)
+                    redshift_table_name = self._get_redshift_table_name(table_name, None)
                     
                     # Get Redshift row count
                     cursor.execute(f"SELECT COUNT(*) FROM {self.config.redshift.schema}.{redshift_table_name}")

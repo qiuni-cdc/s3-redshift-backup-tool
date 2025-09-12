@@ -936,13 +936,25 @@ def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshi
     
     if not redshift_only:
         click.echo(f"  📤 MySQL extraction: {pipeline_config.source}")
+        click.echo(f"    Source table: {table_config.full_name}")
         click.echo(f"    Timestamp column: {table_config.cdc_timestamp_column}")
         if table_config.cdc_strategy in ['hybrid', 'id_only']:
             click.echo(f"    ID column: {table_config.cdc_id_column}")
     
     if not backup_only:
         click.echo(f"  📥 Redshift loading: {pipeline_config.target}")
-        click.echo(f"    Target table: {table_config.target_name}")
+        # Show if it's a custom mapping or default
+        if table_config.target_name != table_config.full_name:
+            # Extract the default table name for comparison
+            default_name = table_config.full_name
+            if '.' in default_name:
+                _, default_name = default_name.rsplit('.', 1)
+            if table_config.target_name != default_name:
+                click.echo(f"    Target table: {table_config.target_name} (custom mapping)")
+            else:
+                click.echo(f"    Target table: {table_config.target_name}")
+        else:
+            click.echo(f"    Target table: {table_config.target_name}")
     
     if table_config.depends_on:
         click.echo(f"  📋 Dependencies: {', '.join(table_config.depends_on)}")
@@ -1083,8 +1095,8 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                         raise Exception("Redshift connection test failed")
                     
                     # Load table data to Redshift using the scoped name for S3 file discovery
-                    # Pass CDC strategy for full_sync replace mode TRUNCATE support
-                    redshift_success = redshift_loader.load_table_data(scoped_table_name, cdc_strategy)
+                    # Pass CDC strategy for full_sync replace mode TRUNCATE support and table_config for target name mapping
+                    redshift_success = redshift_loader.load_table_data(scoped_table_name, cdc_strategy, table_config)
                     
                 except Exception as redshift_error:
                     logger.error(f"Redshift loading failed for {scoped_table_name}: {redshift_error}")
