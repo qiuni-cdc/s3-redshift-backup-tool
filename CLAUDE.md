@@ -2,6 +2,26 @@
 
 🎉 **PRODUCTION READY** - A fully operational Python application for incremental data backup from MySQL to S3 and Redshift, successfully migrated from Google Colab prototype with enterprise architecture, comprehensive testing, and verified deployment capabilities.
 
+## 🆕 Latest Features (September 2025)
+
+### ⭐ Target Table Name Mapping
+- **Custom Table Names**: Map MySQL source tables to different Redshift target table names
+- **Flexible Architecture**: Support data lake naming conventions and legacy system integration
+- **Configuration**: Simple `target_name` field in pipeline YAML
+- **Production Tested**: Verified with 10k+ row datasets
+
+### ⭐ JSON Output Support
+- **Automation Ready**: Machine-readable JSON output with `--json-output` flag
+- **CI/CD Integration**: Perfect for Jenkins, GitHub Actions, GitLab CI
+- **Comprehensive Data**: Complete execution metadata, metrics, and status
+- **Monitoring Friendly**: Easy integration with Prometheus, Datadog, CloudWatch
+
+### ⭐ S3 Completion Markers  
+- **Workflow Orchestration**: S3-based completion tracking for Airflow DAGs
+- **Audit Trail**: Permanent record of sync operations and metrics
+- **Multi-file Structure**: execution_metadata.json, completion_marker.txt, table_metrics.json
+- **Enterprise Grade**: Lifecycle policies and security considerations included
+
 ## ⚠️ **CRITICAL TESTING RULES - NEVER VIOLATE**
 
 ### 🚨 **MANDATORY VERIFICATION PROTOCOLS**
@@ -51,6 +71,9 @@ This system implements two backup strategies:
 - **Dynamic Schema**: Automatic schema discovery for any table structure
 - **Direct Parquet Loading**: Uses `FORMAT AS PARQUET` for efficient Redshift loading
 - **Comprehensive Logging**: Detailed progress tracking and error reporting
+- **🆕 Target Table Mapping**: Custom source → target table name mapping
+- **🆕 JSON Output**: `--json-output` for automation and monitoring integration
+- **🆕 Completion Markers**: `--s3-completion-bucket` for Airflow workflow orchestration
 
 ### Precise Row Count Control
 
