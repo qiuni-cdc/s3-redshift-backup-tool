@@ -10,6 +10,7 @@ import sys
 import json
 import warnings
 import fnmatch
+import yaml
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import time
@@ -90,13 +91,25 @@ def _create_cdc_strategy_for_table(pipeline_name: str, table_name: str):
         strategy_type = strategy_mapping[cdc_strategy_name]
         
         # Build CDC configuration
+        # Get batch_size from processing config or use pipeline default
+        processing_config = table_config.get('processing', {})
+        batch_size = processing_config.get('batch_size')
+        if batch_size is None:
+            # Fall back to cdc_batch_size for backward compatibility
+            batch_size = table_config.get('cdc_batch_size')
+        if batch_size is None:
+            # Use pipeline default if available
+            pipeline_config = config.get('pipeline', {})
+            pipeline_processing = pipeline_config.get('processing', {})
+            batch_size = pipeline_processing.get('batch_size', 50000)
+        
         cdc_config = CDCConfig(
             strategy=strategy_type,
             timestamp_column=table_config.get('cdc_timestamp_column'),
             id_column=table_config.get('cdc_id_column'),
             ordering_columns=table_config.get('cdc_ordering_columns'),
             custom_query=table_config.get('cdc_custom_query'),
-            batch_size=table_config.get('cdc_batch_size', 50000)
+            batch_size=batch_size
         )
         
         # For full_sync strategy, add metadata for mode
@@ -201,6 +214,32 @@ def _auto_detect_pipeline_for_table(table_name: str) -> Tuple[Optional[str], Lis
     except Exception as e:
         # Graceful fallback
         return None, [], False
+
+
+def _load_pipeline_config(pipeline_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Load pipeline configuration from YAML file.
+    
+    Args:
+        pipeline_name: Name of the pipeline to load
+        
+    Returns:
+        Pipeline configuration dictionary, or None if not found
+    """
+    try:
+        config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
+        if not config_path.exists():
+            # Try with _pipeline suffix
+            config_path = Path("config/pipelines") / f"{pipeline_name}_pipeline.yml"
+        
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+    except Exception as e:
+        # Log error but don't fail
+        pass
+    
+    return None
 
 
 def _get_canonical_connection_for_pipeline(pipeline_name: str) -> Optional[str]:
@@ -731,8 +770,34 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
             # Create and execute backup strategy
             backup_strategy = STRATEGIES[strategy](config)
             
+            # Get batch_size with proper fallback hierarchy
+            # 3. System default (final fallback)
+            pipeline_batch_size = config.backup.target_rows_per_chunk
+            
+            # Try to get batch_size from pipeline configuration if available
+            if pipeline:
+                pipeline_config = _load_pipeline_config(pipeline)
+                if pipeline_config:
+                    # 2. Pipeline default (middle priority)
+                    pipeline_processing = pipeline_config.get('pipeline', {}).get('processing', {})
+                    if 'batch_size' in pipeline_processing:
+                        pipeline_batch_size = pipeline_processing['batch_size']
+                        click.echo(f"   Using pipeline default batch_size: {pipeline_batch_size}")
+                    
+                    # 1. Table-specific (highest priority)
+                    if 'tables' in pipeline_config:
+                        for table_name in tables:
+                            base_table_name = table_name.split(':')[-1] if ':' in table_name else table_name
+                            for table_key, table_config in pipeline_config['tables'].items():
+                                if base_table_name in table_key or table_key in base_table_name:
+                                    processing = table_config.get('processing', {})
+                                    if 'batch_size' in processing:
+                                        pipeline_batch_size = processing['batch_size']
+                                        click.echo(f"   Using table-specific batch_size: {pipeline_batch_size}")
+                                        break
+            
             # Calculate parameters based on limit and max_chunks
-            chunk_size = limit if limit else config.backup.target_rows_per_chunk
+            chunk_size = limit if limit else pipeline_batch_size
             max_total_rows = None
             
             if limit and max_chunks:
@@ -743,7 +808,7 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
             elif limit and not max_chunks:
                 # limit = total row limit (user expectation for --limit 100)
                 max_total_rows = limit
-                chunk_size = min(limit, config.backup.target_rows_per_chunk)
+                chunk_size = min(limit, pipeline_batch_size)
                 click.echo(f"   📏 Total row limit: {max_total_rows} rows (chunk size: {chunk_size})")
             elif max_chunks and not limit:
                 # max_chunks specified but no limit - use default chunk size

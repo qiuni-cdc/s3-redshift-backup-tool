@@ -994,12 +994,23 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     try:
                         cdc_config_manager = CDCConfigurationManager()
                         # Convert table_config to dict for CDC parsing
+                        # Get batch_size with proper fallback hierarchy
+                        # 1. Table-specific processing.batch_size (highest priority)
+                        batch_size = table_config.processing.get('batch_size')
+                        if batch_size is None:
+                            # 2. Pipeline processing.batch_size (fallback)
+                            pipeline_processing = config.pipeline.processing if hasattr(config.pipeline, 'processing') else {}
+                            batch_size = pipeline_processing.get('batch_size')
+                        if batch_size is None:
+                            # 3. System default from AppConfig (final fallback)
+                            batch_size = config.backup.target_rows_per_chunk
+                        
                         table_config_dict = {
                             'cdc_strategy': table_config.cdc_strategy,
                             'cdc_timestamp_column': table_config.cdc_timestamp_column,
                             'cdc_id_column': table_config.cdc_id_column,
                             'full_sync_mode': table_config.full_sync_mode,
-                            'batch_size': table_config.processing.get('batch_size', 50000)
+                            'batch_size': batch_size
                         }
                         cdc_strategy = cdc_config_manager.create_cdc_strategy(table_config_dict, base_table_name)
                         if cdc_strategy:

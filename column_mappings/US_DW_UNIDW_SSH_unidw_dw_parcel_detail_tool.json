@@ -1,6 +1,6 @@
 {
   "table_name": "US_DW_UNIDW_SSH:unidw.dw_parcel_detail_tool",
-  "created_at": "2025-09-05T15:02:53.557852",
+  "created_at": "2025-09-12T16:14:11.565638",
   "mappings": {
     "190_time": "col_190_time"
   },

@@ -647,7 +647,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 return 0
             
             # Get table-specific file pattern
-            safe_table_name = table_name.replace('.', '_')
+            # Convert table name to match S3 file naming pattern (lowercase, : and . become _)
+            safe_table_name = table_name.lower().replace(':', '_').replace('.', '_')
             
             # Search for all parquet files for this table
             response = self.s3_manager.s3_client.list_objects_v2(
@@ -1228,27 +1229,6 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if watermark and hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
                 existing_backup_files = watermark.backup_s3_files.copy()
             
-            # DEBUG: Print file lists to debug duplication issue
-            print(f"DEBUG BACKUP FILES:")
-            print(f"  existing_backup_files ({len(existing_backup_files)}):")
-            for i, f in enumerate(existing_backup_files):
-                file_name = f.split('/')[-1] if f else "None"
-                print(f"    {i}. {file_name}")
-            
-            print(f"  chunk_s3_files ({len(chunk_s3_files)}):")
-            for i, f in enumerate(chunk_s3_files):
-                file_name = f.split('/')[-1] if f else "None"
-                print(f"    {i}. {file_name}")
-            
-            if watermark and hasattr(watermark, 'processed_s3_files') and watermark.processed_s3_files:
-                print(f"  processed_s3_files ({len(watermark.processed_s3_files)}):")
-                for i, f in enumerate(watermark.processed_s3_files[:3]):  # Show first 3
-                    file_name = f.split('/')[-1] if f else "None"
-                    print(f"    {i}. {file_name}")
-                if len(watermark.processed_s3_files) > 3:
-                    print(f"    ... and {len(watermark.processed_s3_files) - 3} more")
-            else:
-                print(f"  processed_s3_files: None or empty")
             
             # Get processed files to avoid re-adding them
             processed_files = []
@@ -1260,18 +1240,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             all_backup_files = existing_backup_files.copy()
             for file_uri in chunk_s3_files:
                 if file_uri in processed_files:
-                    file_name = file_uri.split('/')[-1] if file_uri else "None"
-                    print(f"  Skipped (already processed): {file_name}")
+                    # Skip files that are already processed
+                    continue
                 elif file_uri not in all_backup_files:
                     all_backup_files.append(file_uri)
-                    file_name = file_uri.split('/')[-1] if file_uri else "None"
-                    print(f"  Added to backup: {file_name}")
-                else:
-                    file_name = file_uri.split('/')[-1] if file_uri else "None"
-                    print(f"  Skipped (already in backup): {file_name}")
-            
-            print(f"  final all_backup_files ({len(all_backup_files)})")
-            print(f"DEBUG END")
             
             # Calculate cumulative totals
             # Get existing watermark to calculate cumulative values
@@ -1279,8 +1251,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if watermark and hasattr(watermark, 'mysql_rows_extracted') and watermark.mysql_rows_extracted:
                 existing_extracted = watermark.mysql_rows_extracted
             
-            # For rows: add session progress to existing total for cumulative count
-            cumulative_rows_extracted = existing_extracted + total_rows_processed
+            # For rows: use session progress for incremental tracking
+            # This is the session total, not cumulative across all sessions
+            cumulative_rows_extracted = total_rows_processed
             
             # Build watermark update data
             # CRITICAL FIX: Don't update processed_s3_files during backup!
@@ -1288,7 +1261,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             watermark_data = {
                 'last_mysql_data_timestamp': last_timestamp,
                 'last_processed_id': last_id,
-                'mysql_rows_extracted': cumulative_rows_extracted,    # Cumulative total across all sessions
+                'mysql_rows_extracted': cumulative_rows_extracted,    # Session progress only
                 'mysql_status': 'in_progress',
                 'backup_strategy': 'row_based',
                 'last_mysql_extraction_time': datetime.now().isoformat(),

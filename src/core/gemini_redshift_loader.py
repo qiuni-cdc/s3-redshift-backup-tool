@@ -307,9 +307,17 @@ class GeminiRedshiftLoader:
             # Get watermark to check for processed files
             watermark = self.watermark_manager.get_table_watermark(table_name)
             
-            if not watermark or watermark.mysql_status != 'success':
-                logger.warning(f"No successful MySQL backup found for {table_name}")
+            if not watermark:
+                logger.warning(f"No watermark found for {table_name}")
                 return []
+            
+            # Allow loading with in_progress or success status (files may exist from interrupted backup)
+            if watermark.mysql_status not in ['success', 'in_progress']:
+                logger.warning(f"MySQL backup status is {watermark.mysql_status} for {table_name}, skipping")
+                return []
+            
+            if watermark.mysql_status == 'in_progress':
+                logger.info(f"MySQL backup is in_progress for {table_name}, checking for existing S3 files")
             
             logger.info(f"SIMPLIFIED LOGIC: Finding all S3 files for {table_name}, excluding processed files")
             
@@ -598,10 +606,10 @@ class GeminiRedshiftLoader:
             scope, actual_table = table_name.split(':', 1)
             # Clean scope: lowercase, replace special chars with underscores
             clean_scope = scope.lower().replace('-', '_').replace('.', '_')
-            # Clean table: replace dots with underscores
-            clean_table = actual_table.replace('.', '_').replace('-', '_')
+            # Clean table: lowercase and replace dots with underscores
+            clean_table = actual_table.lower().replace('.', '_').replace('-', '_')
             # Combine: scope_table_name
             return f"{clean_scope}_{clean_table}"
         else:
             # Unscoped table (v1.0.0 compatibility)
-            return table_name.replace('.', '_').replace('-', '_')
+            return table_name.lower().replace('.', '_').replace('-', '_')

@@ -128,5 +128,5 @@ def inspect_s3_parquet_files(table_name: str):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    table_name = "dw_parcel_pricing_temp"
+    table_name = "dw_parcel_detail_tool"
     inspect_s3_parquet_files(table_name)

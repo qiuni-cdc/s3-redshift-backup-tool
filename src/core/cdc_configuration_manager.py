@@ -56,7 +56,8 @@ class CDCConfigurationManager:
                 id_column=table_config.get('cdc_id_column'),
                 ordering_columns=table_config.get('cdc_ordering'),
                 custom_query=table_config.get('custom_query'),
-                batch_size=table_config.get('batch_size', 50000)
+                batch_size=table_config.get('batch_size', table_config.get('cdc_batch_size', 
+                    table_config.get('system_default_batch_size', 100000)))
             )
             
             # Handle full_sync strategy metadata
@@ -97,7 +98,7 @@ class CDCConfigurationManager:
             return CDCConfig(
                 strategy=CDCStrategyType.TIMESTAMP_ONLY,
                 timestamp_column='updated_at',
-                batch_size=50000
+                batch_size=table_config.get('batch_size', 100000)
             )
     
     def _validate_cdc_config(self, config: CDCConfig, table_name: str) -> None:
@@ -229,7 +230,7 @@ class CDCConfigurationManager:
                         ORDER BY process_date, id
                         LIMIT {limit}
                     """,
-                    'batch_size': 50000
+                    'batch_size': 100000
                 }
             }
         }

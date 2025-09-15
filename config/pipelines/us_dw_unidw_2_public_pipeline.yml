@@ -10,7 +10,7 @@ pipeline:
   
   processing:
     strategy: "sequential"
-    batch_size: 50000
+    batch_size: 100000
     timeout_minutes: 300
     max_parallel_tables: 4
   
@@ -33,7 +33,7 @@ tables:
     cdc_id_column: "id"
     description: "Parcel detail tool data with ID-only strategy"
     processing:
-      batch_size: 100000
+      batch_size: 1000000
     validation:
       enable_data_quality_checks: true
       max_null_percentage: 5.0 
