@@ -1,0 +1,42 @@
+name: "US DW UNIDW Parcel POC Pipeline"
+description: "Enhanced parcel detail sync with target table mapping for POC"
+
+# Connection configuration
+connections:
+  mysql: "US_DW_UNIDW_SSH"
+  redshift: "US_DW_RO_SSH" 
+
+# Default sync settings optimized for POC
+defaults:
+  backup:
+    strategy: "sequential"
+    chunk_size: 75000
+    max_chunks: 50
+  cdc:
+    strategy: "id_only"
+    batch_size: 100000
+
+# Enhanced table configuration with target mapping
+tables:
+  unidw.dw_parcel_detail_tool:
+    cdc_strategy: "id_only" 
+    cdc_id_column: "id"
+    target_name: "dw_parcel_detail_tool_raw"  # Map to different target table name
+    backup:
+      chunk_size: 50000  # Smaller chunks for POC testing
+      max_chunks: 10     # Limit data volume for initial POC
+    description: "Parcel detail records with deduplication POC mapping"
+
+# POC-specific settings
+metadata:
+  version: "1.2.0"
+  created_date: "2025-09-13"
+  poc_phase: "parcel_detail_deduplication"
+  target_environment: "development"
+  
+# Monitoring and alerting for POC
+monitoring:
+  enable_completion_markers: true
+  json_output_required: true
+  max_execution_time_minutes: 60
+  alert_on_failure: true

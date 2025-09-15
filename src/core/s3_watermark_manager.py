@@ -53,7 +53,9 @@ class S3TableWatermark:
         
         # Handle datetime serialization and None values
         for key, value in result.items():
-            if value is None:
+            if isinstance(value, datetime):
+                result[key] = value.isoformat() + 'Z' if value.tzinfo is None else value.isoformat()
+            elif value is None:
                 result[key] = None  # Explicitly set None for JSON serialization
             elif isinstance(value, datetime):
                 # Convert datetime to ISO format string for JSON serialization
@@ -496,17 +498,13 @@ class S3WatermarkManager:
         backup_strategy: str = 'sequential',
         s3_file_count: int = 0,
         error_message: Optional[str] = None,
-        mode: str = 'auto',
-        session_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Update MySQL extraction watermark with mode control.
+        Update MySQL extraction watermark.
         
-        Args:
-            mode: 'auto' (smart detection), 'absolute' (replace count), 'additive' (add to existing)
-            session_id: Session identifier for auto mode detection
-            metadata: Optional metadata dictionary to merge with existing watermark metadata
+        SIMPLIFIED: Always use the provided row count as absolute value.
+        No accumulation, no modes, no complexity.
         """
         try:
             # Get existing watermark or create new
@@ -528,40 +526,10 @@ class S3WatermarkManager:
             if last_processed_id is not None:
                 watermark.last_processed_id = last_processed_id
             
-            # CRITICAL FIX: Mode-controlled row count update logic
+            # SIMPLIFIED: Always use absolute count
             if rows_extracted > 0:
-                effective_mode = mode
-                
-                # Auto mode detection
-                if mode == 'auto':
-                    # Same session = absolute (replace), different session = additive (accumulate)
-                    last_session = getattr(watermark, 'last_session_id', None)
-                    if session_id and last_session == session_id:
-                        effective_mode = 'absolute'  # Same session - replace count
-                        logger.debug(f"Auto mode detected: same session '{session_id}', using absolute")
-                    else:
-                        effective_mode = 'additive'  # Different session - add to total
-                        logger.debug(f"Auto mode detected: different session (last='{last_session}', current='{session_id}'), using additive")
-                
-                # Apply the determined mode
-                if effective_mode == 'absolute':
-                    # Replace existing count (for same session updates)
-                    previous_count = watermark.mysql_rows_extracted or 0
-                    watermark.mysql_rows_extracted = rows_extracted
-                    logger.info(f"Absolute watermark update: replaced {previous_count} with {rows_extracted}")
-                    
-                elif effective_mode == 'additive':
-                    # Add to existing count (for cross-session accumulation)
-                    current_rows = watermark.mysql_rows_extracted or 0
-                    watermark.mysql_rows_extracted = current_rows + rows_extracted
-                    logger.info(f"Additive watermark update: {current_rows} + {rows_extracted} = {watermark.mysql_rows_extracted}")
-                
-                else:
-                    raise ValueError(f"Invalid watermark mode: {effective_mode}")
-                
-                # Store session ID for future auto mode detection
-                if session_id:
-                    watermark.last_session_id = session_id
+                watermark.mysql_rows_extracted = rows_extracted
+                logger.info(f"Updated watermark with absolute count: {rows_extracted}")
             
             watermark.mysql_status = status
             watermark.backup_strategy = backup_strategy

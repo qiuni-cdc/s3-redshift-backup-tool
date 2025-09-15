@@ -32,6 +32,7 @@ tables:
     cdc_strategy: "id_only"
     cdc_id_column: "id"
     description: "Parcel detail tool data with ID-only strategy"
+    target_name: "dw_parcel_detail_tool_new"  # Map to different target table name
     processing:
       batch_size: 1000000
     validation:
@@ -48,6 +49,9 @@ tables:
     validation:
       enable_data_quality_checks: true
       max_null_percentage: 5.0
+
+  # Removed duplicate - keeping only the original dw_parcel_detail_tool
+
 
   # Add more unidw tables here as needed
   # other_unidw_table:

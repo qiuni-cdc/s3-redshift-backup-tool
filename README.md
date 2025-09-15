@@ -34,16 +34,18 @@ cp .env .env.local
 # (All files starting with .env are gitignored for security)
 ```
 
-### **3. Run Your First Backup**
+### **3. Run Your First Sync**
 ```bash
-# Test connection (dry run)
-python -m src.cli.main backup -t your_database.your_table -s sequential --dry-run
-
-# Execute backup
-python -m src.cli.main backup -t your_database.your_table -s sequential
-
 # Check system status
 python -m src.cli.main status
+
+# Sync with pipeline (v1.1.0+ recommended)
+python -m src.cli.main sync pipeline -p default -t schema.table
+
+# Or use direct sync (v1.0.0 compatibility)
+python -m src.cli.main sync -t schema.table
+
+# See CLI_QUICK_REFERENCE.md for complete command syntax
 ```
 
 ## 🛡️ **Security Features**

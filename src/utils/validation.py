@@ -83,6 +83,8 @@ class DataValidator:
         try:
             # FIXED: Use FlexibleSchemaManager for dynamic schema discovery  
             from src.core.flexible_schema_manager import FlexibleSchemaManager
+            from src.core.connections import ConnectionManager
+            from src.config.settings import AppConfig
             
             if not self.connection_manager:
                 logger.warning(f"No connection manager available for {table_name}, cannot get dynamic schema")

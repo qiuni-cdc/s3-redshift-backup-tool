@@ -323,8 +323,17 @@ class FlexibleSchemaManager:
         if custom_config:
             logger.info(f"Using custom Redshift optimizations for {mysql_table_name}")
             
-            # Apply custom DISTKEY or default to DISTSTYLE AUTO
-            if 'distkey' in custom_config:
+            # Apply DISTSTYLE (ALL, EVEN, or KEY via distkey)
+            if 'diststyle' in custom_config:
+                diststyle = custom_config['diststyle'].upper()
+                if diststyle in ['ALL', 'EVEN']:
+                    optimization_clauses.append(f"DISTSTYLE {diststyle}")
+                    logger.info(f"Applied custom DISTSTYLE: {diststyle}")
+                else:
+                    logger.warning(f"Invalid DISTSTYLE '{diststyle}', must be 'ALL' or 'EVEN'")
+            
+            # Apply custom DISTKEY (only if no DISTSTYLE specified)
+            elif 'distkey' in custom_config:
                 distkey_column = custom_config['distkey']
                 # Verify the column exists in the table schema and sanitize name
                 column_exists = any(col['COLUMN_NAME'] == distkey_column for col in schema_info)

@@ -28,18 +28,18 @@ pipeline:
 
 # Table configuration for settlement.settle_orders
 tables:
-  settle_orders:
+  settlement.settle_orders:
     # v1.2.0 Hybrid CDC Configuration
     cdc_strategy: "hybrid"                    # Use timestamp + ID for robust CDC
-    cdc_timestamp_column: "updated_at"        # Primary timestamp column
+    cdc_timestamp_column: "created_at"        # Primary timestamp column
     cdc_id_column: "id"                       # Primary ID column for ordering
-    cdc_ordering: ["updated_at", "id"]        # Explicit ordering for consistency
+    cdc_ordering: ["created_at", "id"]        # Explicit ordering for consistency
     
     description: "Settlement orders data with hybrid CDC (timestamp + ID)"
     
     # Processing optimization for hybrid strategy
     processing:
-      batch_size: 75000                       # Larger batches for efficiency
+      batch_size: 100000                       # Larger batches for efficiency
       enable_parallel_processing: false      # Sequential for data integrity
       
     # Enhanced validation for production data

@@ -1,0 +1,18 @@
+# Schema definitions for marts
+version: 2
+
+models:
+  - name: parcel_detail_deduplicated
+    description: "Deduplicated parcel detail data - one record per order_id"
+    columns:
+      - name: order_id
+        description: "Unique order identifier after deduplication"
+        tests:
+          - unique
+          - not_null
+      - name: id
+        description: "Record ID of the selected (most recent) record"
+        tests:
+          - not_null
+      - name: row_rank
+        description: "Ranking field used for deduplication (should always be 1 in final output)"

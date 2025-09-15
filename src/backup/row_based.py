@@ -60,6 +60,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         with self.database_session(source_connection) as db_conn:
             for i, table_name in enumerate(tables):
                 table_start_time = time.time()
+                lock_id = None
                 
                 self.logger.logger.info(
                     f"Processing table {i+1}/{len(tables)} with row-based chunking",
@@ -71,6 +72,11 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 effective_chunk_size = chunk_size or limit
                 
                 try:
+                    # Acquire lock before processing table to prevent concurrent operations
+                    self.logger.logger.debug(f"Acquiring lock for table {table_name}")
+                    lock_id = self.watermark_manager.simple_manager.acquire_lock(table_name)
+                    self.logger.logger.info(f"Lock acquired for {table_name}: {lock_id}")
+                    
                     success = self._process_single_table_row_based(
                         db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows, source_connection
                     )
@@ -87,6 +93,15 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     failed_tables.append(table_name)
                     self.logger.table_failed(table_name, error=e)
                     self.logger.error_occurred(e, f"table_backup_{table_name}")
+                    
+                finally:
+                    # Always release lock, even if error occurs
+                    if lock_id:
+                        try:
+                            self.watermark_manager.simple_manager.release_lock(table_name, lock_id)
+                            self.logger.logger.debug(f"Released lock for {table_name}: {lock_id}")
+                        except Exception as lock_error:
+                            self.logger.logger.error(f"Failed to release lock for {table_name}: {lock_error}")
         
         # Update final metrics and watermarks
         duration = time.time() - start_time
@@ -1061,11 +1076,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 if hasattr(current_watermark, 's3_file_count'):
                     watermark_data['s3_file_count'] = current_watermark.s3_file_count
             
-            # Use direct update to S3 to bypass additive logic
-            success = self.watermark_manager._update_watermark_direct(
-                table_name=table_name,
-                watermark_data=watermark_data
-            )
+            # Use v2.0 direct API for better performance
+            try:
+                self.watermark_manager.simple_manager.update_mysql_state(
+                    table_name=table_name,
+                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    id=watermark_data.get('last_processed_id'),
+                    status=watermark_data.get('mysql_status', 'success'),
+                    error=watermark_data.get('last_error'),
+                    rows_extracted=total_rows_processed
+                )
+                success = True
+            except Exception as e:
+                self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
+                success = False
             
             self.logger.logger.info(
                 "Final watermark set with absolute values",
@@ -1336,11 +1360,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 'last_mysql_extraction_time': datetime.now().isoformat()
             }
             
-            # Use direct update to bypass additive logic
-            success = self.watermark_manager._update_watermark_direct(
-                table_name=table_name,
-                watermark_data=watermark_data
-            )
+            # Use v2.0 direct API for better performance
+            try:
+                self.watermark_manager.simple_manager.update_mysql_state(
+                    table_name=table_name,
+                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    id=watermark_data.get('last_processed_id'),
+                    status=watermark_data.get('mysql_status', 'success'),
+                    error=watermark_data.get('last_error'),
+                    rows_extracted=total_rows_processed  # Track incremental progress
+                )
+                success = True
+            except Exception as e:
+                self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
+                success = False
             
             self.logger.logger.debug(
                 "Updated chunk watermark with resume data only",
@@ -1373,26 +1406,23 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         error_message: Optional[str] = None
     ):
         """
-        CRITICAL FIX: Set final watermark using session-controlled mode.
+        Set final watermark using absolute row count.
         
-        Uses the new watermark mode system to handle session vs cross-session updates correctly.
-        This replaces the old additive logic that caused double-counting bugs.
+        SIMPLIFIED: Always uses the provided row count as absolute value.
+        No accumulation, no modes, no complexity.
         
         Args:
             table_name: Name of the table
             extraction_time: Time of extraction
             max_data_timestamp: Latest data timestamp processed
             last_processed_id: Last processed ID
-            session_rows_processed: Rows processed in this session only
+            session_rows_processed: Rows processed in this session (absolute count)
             status: Final status ('success' or 'failed')
             error_message: Optional error message for failed status
         """
         try:
-            # CRITICAL FIX: Generate unique session ID
-            import uuid
-            session_id = f"row_based_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             
-            # CRITICAL FIX: Get actual S3 file count from S3 directly (not in-memory stats)
+            # Get actual S3 file count from S3 directly (not in-memory stats)
             actual_s3_files = self._count_actual_s3_files(table_name)
             
             # ENHANCED: Get the backup_s3_files list and count ACTUAL rows from files
@@ -1449,12 +1479,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             
             self.logger.logger.info(
-                "Final watermark updated with session control",
+                "Final watermark updated with absolute count",
                 table_name=table_name,
                 session_rows=session_rows_processed,
-                status=status,
-                session_id=session_id,
-                mode_system="auto_detection"
+                status=status
             )
             
             return success

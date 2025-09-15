@@ -1,8 +1,31 @@
-# Redshift Table Optimization Guide
+# Redshift Table Optimization Configuration Guide
 
-## Custom Redshift DISTKEY and SORTKEY Configuration
+This guide shows how to configure Redshift table optimizations (DISTSTYLE, DISTKEY, SORTKEY) for maximum query performance, including dimension tables with `DISTSTYLE ALL`.
 
-You can customize Redshift table optimizations using the `redshift_keys.json` file in the project root directory.
+## Quick Start: Dimension Table Configuration
+
+Create `redshift_keys.json` in your project root:
+
+```json
+{
+  "settlement.dim_product": {
+    "diststyle": "ALL",
+    "sortkey": ["product_id"],
+    "table_type": "dimension"
+  }
+}
+```
+
+The tool automatically generates optimized DDL:
+```sql
+CREATE TABLE settlement.dim_product (
+    product_id BIGINT,
+    product_name VARCHAR(510),
+    category VARCHAR(200)
+)
+DISTSTYLE ALL              -- Replicated to all nodes
+SORTKEY(product_id);       -- Fast primary key lookups
+```
 
 ## Configuration File: `redshift_keys.json`
 

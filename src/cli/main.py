@@ -609,9 +609,10 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
               help='Maximum number of chunks to process (total rows = limit × max-chunks)')
 @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
+@click.option('--json-output', is_flag=True, help='Output sync results in JSON format for automation')
 @click.pass_context
 def sync(ctx, tables: List[str], strategy: str, max_workers: int, 
-         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int, pipeline: str, connection: str):
+         batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int, pipeline: str, connection: str, json_output: bool):
     """
     Complete MySQL → S3 → Redshift synchronization with flexible schema discovery.
     
@@ -846,11 +847,11 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
             
             try:
                 from src.core.gemini_redshift_loader import GeminiRedshiftLoader
-                from src.core.s3_watermark_manager import S3WatermarkManager
+                from src.core.watermark_adapter import create_watermark_manager
                 
                 click.echo("   Initializing Redshift connection...")
                 redshift_loader = GeminiRedshiftLoader(config)
-                watermark_manager = S3WatermarkManager(config)
+                watermark_manager = create_watermark_manager(config.to_dict())
                 loaded_tables = 0
                 total_redshift_rows = 0
                 
@@ -947,6 +948,39 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
         
         # Final summary
         duration = time.time() - start_time
+        
+        # Prepare summary data for JSON output
+        sync_result = {
+            "success": overall_success,
+            "duration_seconds": duration,
+            "tables_processed": len(tables),
+            "strategy": strategy,
+            "stages": {
+                "backup": {
+                    "executed": not redshift_only,
+                    "success": backup_success if not redshift_only else None,
+                    "summary": backup_summary if not redshift_only else None
+                },
+                "redshift": {
+                    "executed": not backup_only,
+                    "success": redshift_success if not backup_only else None,
+                    "summary": redshift_summary if not backup_only else None
+                }
+            },
+            "options": {
+                "backup_only": backup_only,
+                "redshift_only": redshift_only,
+                "chunk_size": chunk_size,
+                "max_total_rows": max_total_rows,
+                "verify_data": verify_data
+            }
+        }
+        
+        if json_output:
+            # Output structured JSON for automation
+            import json
+            print(json.dumps(sync_result, indent=2))
+            sys.exit(0 if overall_success else 1)
         
         if overall_success:
             click.echo("✅ Sync completed successfully!")
@@ -1317,10 +1351,12 @@ def config(ctx, output: str):
 @click.option('--timestamp', help='Timestamp for set operation (YYYY-MM-DD HH:MM:SS)')
 @click.option('--id', type=int, help='Starting ID for set operation (for ID-based CDC)')
 @click.option('--show-files', is_flag=True, help='Show processed S3 files list (for get operation)')
+@click.option('--preserve-files', is_flag=True, help='Keep processed S3 files list during reset')
+@click.option('--yes', '-y', is_flag=True, help='Bypass confirmation prompts (for automation)')
 @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_files: bool, pipeline: str, connection: str):
+def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_files: bool, preserve_files: bool, yes: bool, pipeline: str, connection: str):
     """
     Manage table-specific watermark timestamps and IDs for incremental backups.
     
@@ -1338,6 +1374,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
         s3-backup watermark set -t unidw.dw_parcel_detail_tool --id 41471788
         s3-backup watermark set -t hybrid_table --timestamp "2024-01-01 00:00:00" --id 1000000
         s3-backup watermark reset -t settlement.settlement_claim_detail
+        s3-backup watermark reset -t settlement.settlement_claim_detail --preserve-files
         s3-backup watermark list
     """
     config = ctx.obj['config']
@@ -1345,9 +1382,9 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
     
     try:
         # Use S3-based watermark system (same as backup operations)
-        from src.core.s3_watermark_manager import S3WatermarkManager
+        from src.core.watermark_adapter import create_watermark_manager
         
-        watermark_manager = S3WatermarkManager(config)
+        watermark_manager = create_watermark_manager(config.to_dict())
         
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
         effective_table_name = table
@@ -1599,22 +1636,41 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
             
-            # Confirm deletion
-            click.echo(f"⚠️  This will completely delete the watermark for {table}")
-            click.echo("   The next backup will start from the default timestamp")
-            if not click.confirm("   Continue?"):
-                click.echo("   Operation cancelled")
-                return
+            # Confirm deletion with preserve_files information (unless --yes flag is used)
+            if not yes:
+                if preserve_files:
+                    click.echo(f"⚠️  This will reset the watermark for {table} but preserve processed S3 files")
+                    click.echo("   The next backup will start from the default timestamp")
+                    click.echo("   Existing S3 files will NOT be reprocessed")
+                else:
+                    click.echo(f"⚠️  This will completely delete the watermark for {table}")
+                    click.echo("   The next backup will start from the default timestamp")
+                    click.echo("   All S3 file tracking will be cleared")
+                if not click.confirm("   Continue?"):
+                    click.echo("   Operation cancelled")
+                    return
             
             try:
-                # FIXED: Use force_reset_watermark instead of delete for proper cleanup
-                success = watermark_manager.force_reset_watermark(effective_table_name)
+                # Use SimpleWatermarkManager directly if preserve_files is requested
+                if preserve_files and hasattr(watermark_manager, 'simple_manager'):
+                    # Direct call to SimpleWatermarkManager with preserve_files parameter
+                    watermark_manager.simple_manager.reset_watermark(effective_table_name, preserve_files=True)
+                    success = True
+                else:
+                    # Standard reset operation (clears everything)
+                    success = watermark_manager.force_reset_watermark(effective_table_name)
                 
                 if success:
-                    click.echo(f"✅ Watermark reset for {table}")
-                    click.echo("   Watermark reset to epoch start (1970-01-01)")
-                    click.echo("   All resume points and processed IDs cleared")
-                    click.echo("   Next sync will start fresh from beginning")
+                    if preserve_files:
+                        click.echo(f"✅ Watermark reset for {table} (S3 files preserved)")
+                        click.echo("   Watermark reset to epoch start (1970-01-01)")
+                        click.echo("   Resume points and processed IDs cleared")
+                        click.echo("   Processed S3 files list preserved to prevent re-processing")
+                    else:
+                        click.echo(f"✅ Watermark reset for {table}")
+                        click.echo("   Watermark reset to epoch start (1970-01-01)")
+                        click.echo("   All resume points and processed IDs cleared")
+                        click.echo("   Next sync will start fresh from beginning")
                 else:
                     click.echo("❌ Failed to reset watermark", err=True)
                     sys.exit(1)
@@ -1629,13 +1685,14 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 click.echo("   Use -t settlement.table_name")
                 sys.exit(1)
             
-            # Confirm force reset
-            click.echo(f"⚠️  FORCE RESET will overwrite the watermark for {table}")
-            click.echo("   This bypasses all backup/recovery mechanisms")
-            click.echo("   Watermark will be set to epoch start (1970-01-01)")
-            if not click.confirm("   Continue with force reset?"):
-                click.echo("   Operation cancelled")
-                return
+            # Confirm force reset (unless --yes flag is used)
+            if not yes:
+                click.echo(f"⚠️  FORCE RESET will overwrite the watermark for {table}")
+                click.echo("   This bypasses all backup/recovery mechanisms")
+                click.echo("   Watermark will be set to epoch start (1970-01-01)")
+                if not click.confirm("   Continue with force reset?"):
+                    click.echo("   Operation cancelled")
+                    return
             
             try:
                 success = watermark_manager.force_reset_watermark(effective_table_name)
@@ -1722,10 +1779,10 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
     backup_logger = ctx.obj['backup_logger']
     
     try:
-        from src.core.s3_watermark_manager import S3WatermarkManager
+        from src.core.watermark_adapter import create_watermark_manager
         from src.core.gemini_redshift_loader import GeminiRedshiftLoader
         
-        watermark_manager = S3WatermarkManager(config)
+        watermark_manager = create_watermark_manager(config.to_dict())
         
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach) 
         effective_table_name = table
@@ -1790,14 +1847,16 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
             
             try:
                 if mode == 'absolute':
-                    # Set absolute count (replaces existing) - FIX: Update BOTH MySQL and Redshift counts
-                    success = watermark_manager._update_watermark_direct(
-                        table_name=effective_table_name,
-                        watermark_data={
-                            'mysql_rows_extracted': count,
-                            'redshift_rows_loaded': count  # FIX: Also update Redshift count
-                        }
-                    )
+                    # Set absolute count using v2.0 API (replaces existing)
+                    try:
+                        watermark_manager.simple_manager.update_redshift_count_from_external(
+                            table_name=effective_table_name,
+                            actual_count=count
+                        )
+                        success = True
+                    except Exception as e:
+                        click.echo(f"❌ Failed to update count: {e}")
+                        success = False
                     
                     if success:
                         click.echo(f"✅ Set absolute count to {count:,} rows")
@@ -1814,13 +1873,16 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
                     new_mysql_count = existing_mysql_count + count
                     new_redshift_count = existing_redshift_count + count
                     
-                    success = watermark_manager._update_watermark_direct(
-                        table_name=effective_table_name,
-                        watermark_data={
-                            'mysql_rows_extracted': new_mysql_count,
-                            'redshift_rows_loaded': new_redshift_count  # FIX: Also update Redshift count
-                        }
-                    )
+                    # Add to existing count using v2.0 API
+                    try:
+                        watermark_manager.simple_manager.update_redshift_count_from_external(
+                            table_name=effective_table_name,
+                            actual_count=new_redshift_count
+                        )
+                        success = True
+                    except Exception as e:
+                        click.echo(f"❌ Failed to update count: {e}")
+                        success = False
                     
                     if success:
                         click.echo(f"✅ Added {count:,} to existing counts:")

@@ -2,6 +2,26 @@
 
 🎉 **PRODUCTION READY** - A fully operational Python application for incremental data backup from MySQL to S3 and Redshift, successfully migrated from Google Colab prototype with enterprise architecture, comprehensive testing, and verified deployment capabilities.
 
+## 🆕 Latest Features (September 2025)
+
+### ⭐ Target Table Name Mapping
+- **Custom Table Names**: Map MySQL source tables to different Redshift target table names
+- **Flexible Architecture**: Support data lake naming conventions and legacy system integration
+- **Configuration**: Simple `target_name` field in pipeline YAML
+- **Production Tested**: Verified with 10k+ row datasets
+
+### ⭐ JSON Output Support
+- **Automation Ready**: Machine-readable JSON output with `--json-output` flag
+- **CI/CD Integration**: Perfect for Jenkins, GitHub Actions, GitLab CI
+- **Comprehensive Data**: Complete execution metadata, metrics, and status
+- **Monitoring Friendly**: Easy integration with Prometheus, Datadog, CloudWatch
+
+### ⭐ S3 Completion Markers  
+- **Workflow Orchestration**: S3-based completion tracking for Airflow DAGs
+- **Audit Trail**: Permanent record of sync operations and metrics
+- **Multi-file Structure**: execution_metadata.json, completion_marker.txt, table_metrics.json
+- **Enterprise Grade**: Lifecycle policies and security considerations included
+
 ## ⚠️ **CRITICAL TESTING RULES - NEVER VIOLATE**
 
 ### 🚨 **MANDATORY VERIFICATION PROTOCOLS**
@@ -44,31 +64,52 @@ This system implements two backup strategies:
 **PRODUCTION CAPABILITY**: Full end-to-end sync with dynamic schema discovery
 
 ### Sync Command Features
-- **Full Pipeline**: `python -m src.cli.main sync -t table_name` (MySQL → S3 → Redshift)
+- **Full Pipeline**: `python -m src.cli.main sync pipeline -p pipeline -t table` (MySQL → S3 → Redshift)
 - **Backup Only**: `--backup-only` flag (MySQL → S3)  
 - **Redshift Only**: `--redshift-only` flag (S3 → Redshift)
-- **Testing Control**: `--limit N` flag to limit rows per query (for development/testing)
+- **Row Control**: `--limit N --max-chunks M` for precise row count control (N × M total rows)
 - **Dynamic Schema**: Automatic schema discovery for any table structure
 - **Direct Parquet Loading**: Uses `FORMAT AS PARQUET` for efficient Redshift loading
 - **Comprehensive Logging**: Detailed progress tracking and error reporting
+- **🆕 Target Table Mapping**: Custom source → target table name mapping
+- **🆕 JSON Output**: `--json-output` for automation and monitoring integration
+- **🆕 Completion Markers**: `--s3-completion-bucket` for Airflow workflow orchestration
+
+### Precise Row Count Control
+
+**ENHANCED CLI CONTROL** - Use `--limit` and `--max-chunks` together for exact row counts:
+
+```bash
+# Formula: Total Rows = --limit × --max-chunks
+
+# Example: Extract exactly ~2.1M rows
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settlement.settle_orders --limit 75000 --max-chunks 29
+# Result: 29 chunks × 75,000 rows = 2,175,000 rows
+
+# Example: Extract exactly ~2.1M rows with smaller chunks  
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settlement.settle_orders --limit 10000 --max-chunks 211
+# Result: 211 chunks × 10,000 rows = 2,110,000 rows
+```
+
+**Key Points**:
+- Without `--max-chunks`, backup continues until no more data (can extract more than intended)
+- With `--max-chunks`, both backup and load stages process the same amount of data
+- Default chunk size is 75,000 rows if `--limit` not specified
 
 ### Watermark Management System
 
-**ENHANCED WATERMARK CAPABILITIES** - Now supports both automated and manual watermark management:
+**SIMPLIFIED WATERMARK SYSTEM (v2.1)** - Enhanced reliability with absolute count tracking:
 
-#### Automated Watermark Tracking
-- **S3-based Storage**: Watermarks stored in S3 for reliability and persistence
-- **Table-level Granularity**: Individual watermarks per table for precise incremental processing
-- **Dual-stage Tracking**: Separate watermarks for MySQL→S3 and S3→Redshift stages
-- **Atomic Updates**: Prevents race conditions and ensures consistency
-- **Error Recovery**: Backup and restore capabilities for watermark corruption
+#### Core Principles
+- **Absolute Counts Only**: No accumulation across sessions, eliminates double-counting bugs
+- **Session-Based**: Each sync shows exactly how many rows IT processed
+- **Predictable Reset**: Always zeros all counts completely
+- **Simple Logic**: No complex modes or accumulation detection
 
-#### Manual Watermark Control (NEW)
-- **CLI Commands**: `watermark get|set|reset|list` for manual watermark management
+#### Watermark Commands
+- **CLI Commands**: `watermark get|set|reset|list` for watermark management
 - **Fresh Sync Support**: Reset and set starting timestamps for complete fresh syncs
-- **Selective Loading**: Load only S3 files created after specific timestamps
-- **Manual Override**: Override automated watermarks for custom sync scenarios
-- **Row Count Management**: `watermark_count set-count|validate-counts` for fixing discrepancies
+- **Row Count Management**: `watermark-count set-count|validate-counts` for fixing discrepancies
 
 #### Watermark Architecture
 ```
@@ -76,53 +117,46 @@ Watermark Components:
 ├── last_mysql_data_timestamp     # Data cutoff point for MySQL extraction
 ├── last_mysql_extraction_time    # When backup process ran
 ├── mysql_status                  # pending/success/failed
+├── mysql_rows_extracted          # Absolute count from current session
 ├── redshift_status              # pending/success/failed  
+├── redshift_rows_loaded         # Absolute count loaded to Redshift
 ├── backup_strategy              # sequential/inter-table/manual_cli
-└── metadata                     # Additional tracking information
+└── processed_files              # S3 files successfully loaded (blacklist)
 ```
 
 #### Common Watermark Workflows
 
 **1. Fresh Sync from Specific Date:**
 ```bash
-python -m src.cli.main watermark reset -t settlement.table_name
-python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-08-09 20:00:01'
-python -m src.cli.main sync -t settlement.table_name
+python -m src.cli.main watermark reset -p us_dw_hybrid_v1_2 -t settlement.settle_orders
+python -m src.cli.main watermark set -p us_dw_hybrid_v1_2 -t settlement.settle_orders --timestamp '2025-08-09 20:00:01'
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settlement.settle_orders --limit 75000 --max-chunks 29
 ```
 
 **2. Load Existing S3 Files After Date:**
 ```bash
-python -m src.cli.main watermark reset -t settlement.table_name  
-python -m src.cli.main watermark set -t settlement.table_name --timestamp '2025-08-09 20:00:01'
-python -m src.cli.main sync -t settlement.table_name --redshift-only
+python -m src.cli.main watermark reset -p us_dw_hybrid_v1_2 -t settlement.settle_orders  
+python -m src.cli.main watermark set -p us_dw_hybrid_v1_2 -t settlement.settle_orders --timestamp '2025-08-09 20:00:01'
+python -m src.cli.main sync pipeline -p us_dw_hybrid_v1_2 -t settlement.settle_orders --redshift-only
 ```
 
 **3. Check Current Watermark Status:**
 ```bash
 # Basic watermark information
-python -m src.cli.main watermark get -t settlement.table_name
+python -m src.cli.main watermark get -p us_dw_hybrid_v1_2 -t settlement.settle_orders
 
 # Show processed S3 files list
-python -m src.cli.main watermark get -t settlement.table_name --show-files
+python -m src.cli.main watermark get -p us_dw_hybrid_v1_2 -t settlement.settle_orders --show-files
 ```
 
-**4. Fix Watermark Row Count Discrepancies:**
+**4. Fix Watermark Row Count Issues:**
 ```bash
 # Validate watermark counts against actual Redshift data
-python -m src.cli.main watermark-count validate-counts -t settlement.table_name
+python -m src.cli.main watermark-count validate-counts -t settlement.settle_orders
 
-# Fix inflated backup counts (set absolute count)
-python -m src.cli.main watermark-count set-count -t settlement.table_name --count 3000000 --mode absolute
-
-# Add incremental count (if needed)  
-python -m src.cli.main watermark-count set-count -t settlement.table_name --count 500000 --mode additive
+# Fix count discrepancies with absolute count
+python -m src.cli.main watermark-count set-count -t settlement.settle_orders --count 3000000 --mode absolute
 ```
-
-### Filtering Logic
-- **Session-based**: Files within time window around backup extraction time (±10 hours)
-- **Watermark-based**: Files created after manually set data timestamp
-- **Manual Priority**: Manual watermarks (`backup_strategy='manual_cli'`) take precedence
-- **Timezone Handling**: Wide session windows handle timezone differences and processing delays
 
 ## S3 Storage Management (s3clean)
 
@@ -132,44 +166,18 @@ python -m src.cli.main watermark-count set-count -t settlement.table_name --coun
 ```bash
 # Safe exploration and preview
 python -m src.cli.main s3clean list -t table_name
-python -m src.cli.main s3clean list -t table_name --show-timestamps  # Detailed timestamps
 python -m src.cli.main s3clean clean -t table_name --dry-run
 
 # Targeted cleanup operations  
-python -m src.cli.main s3clean clean -t table_name
 python -m src.cli.main s3clean clean -t table_name --older-than "7d"
-python -m src.cli.main s3clean clean -t table_name --pattern "batch_*"
-
-# System-wide cleanup (use with caution)
-python -m src.cli.main s3clean clean-all --older-than "30d"
+python -m src.cli.main s3clean clean-all --older-than "30d" --force
 ```
 
 ### Safety Features
 - **Multi-layer Protection**: Dry-run preview, confirmation prompts, table validation
-- **Time-based Filtering**: Only clean files older than specified age (`7d`, `24h`, `30m`)
+- **Time-based Filtering**: Only clean files older than specified age
 - **Pattern Matching**: Target specific file patterns for selective cleanup
-- **Table Isolation**: Prevents accidental deletion across wrong tables
 - **Size Reporting**: Shows exactly how much space will be freed
-
-### Common S3Clean Workflows
-
-**1. Storage Maintenance:**
-```bash
-# Check current storage usage
-python -m src.cli.main s3clean list -t settlement.table_name
-
-# Clean old backup files (recommended)
-python -m src.cli.main s3clean clean -t settlement.table_name --older-than "7d"
-```
-
-**2. Emergency Cleanup:**
-```bash
-# Preview cleanup before execution
-python -m src.cli.main s3clean clean -t settlement.table_name --dry-run
-
-# Force cleanup without prompts (for automation)
-python -m src.cli.main s3clean clean -t settlement.table_name --force
-```
 
 ## Architecture Features
 
@@ -183,7 +191,6 @@ python -m src.cli.main s3clean clean -t settlement.table_name --force
 - **Efficient Data Formats**: Direct Parquet loading to Redshift
 - **Incremental Processing**: Watermark-based change detection
 - **Resource Management**: Configurable batch sizes and connection pooling
-- **Testing Controls**: Optional row limits for development and testing scenarios
 
 ### Operational Excellence
 - **Comprehensive Logging**: Detailed progress tracking and error reporting
@@ -193,26 +200,69 @@ python -m src.cli.main s3clean clean -t settlement.table_name --force
 
 ---
 
-## 📚 **Documentation Library**
-
-### **📊 Production Guides**
-- **`LARGE_TABLE_GUIDELINES.md`** - Complete guidelines for backing up large tables (1M+ rows)
-- **`WATERMARK_DEEP_DIVE.md`** - Technical deep-dive into watermark-based data loss prevention  
-- **`ORPHANED_FILES_HANDLING.md`** - Managing intermediate files during resume operations
-
-### **🔧 User References**
-- **`USER_MANUAL.md`** - Comprehensive CLI usage guide
-- **`WATERMARK_CLI_GUIDE.md`** - Watermark management commands
-- **`README.md`** - Project overview and quick start
-
-### **🚀 Recommended Reading Path**
-1. **Basic Usage**: `USER_MANUAL.md` 
-2. **Large Tables**: `LARGE_TABLE_GUIDELINES.md`
-3. **Advanced Topics**: `WATERMARK_DEEP_DIVE.md`
-
----
-
 ## 🐛 **CRITICAL BUG FIXES & LESSONS LEARNED**
+
+### **P0 WATERMARK ROW COUNT ACCUMULATION BUG (RESOLVED - Sep 10, 2025)**
+
+**Issue**: Critical watermark row count accumulation causing backup/load discrepancies
+- **Symptoms**: Backup showed 32.5M rows extracted, but only 2.1M rows loaded to Redshift
+- **Root Cause**: Complex mode-based accumulation logic (auto/absolute/additive) was unreliable
+- **Impact**: Confusing row count displays, difficulty debugging sync operations
+
+#### **Technical Root Cause**
+```python
+# DANGEROUS ARCHITECTURE (ELIMINATED):
+# ❌ Complex mode detection: auto/absolute/additive
+# ❌ Cross-session accumulation: old_count + new_count
+# ❌ Incomplete reset: preserved old counts during reset
+# Result: 30.45M (old) + 2.1M (new) = 32.5M (wrong total)
+```
+
+#### **Comprehensive Fix Implemented**
+1. **Eliminated All Mode Logic**
+   - Removed auto/absolute/additive mode detection
+   - Simplified to always use absolute counts
+   - No more complex session tracking or accumulation
+
+2. **Fixed Reset to Zero All Counts**
+   ```python
+   def _create_default_watermark(self, table_name: str):
+       return {
+           'mysql_state': {'total_rows': 0},  # ALWAYS 0 on reset
+           'redshift_state': {'total_rows': 0}  # ALWAYS 0 on reset
+       }
+   ```
+
+3. **Simplified Update Logic**
+   ```python
+   def update_mysql_state(self, rows_extracted=None):
+       # Simple rule: if provided, use it; otherwise keep existing
+       if rows_extracted is not None:
+           total_rows = rows_extracted  # Always absolute
+   ```
+
+#### **Critical Lessons Learned**
+
+**🔴 WATERMARK DESIGN PRINCIPLES**
+1. **KISS Principle**: Simple absolute counts are more reliable than complex modes
+2. **Session Isolation**: Each sync session should report its own totals only
+3. **Complete Reset**: Reset must zero ALL count fields, not preserve any
+4. **Predictable Behavior**: Watermark should always show exactly what was provided
+
+**🔴 CLI PARAMETER CLARITY**
+1. **Precise Control**: Use `--limit` + `--max-chunks` for exact row count control
+2. **Both Stages Match**: Proper parameters ensure backup and load process same amount
+3. **Formula Understanding**: Total Rows = --limit × --max-chunks
+
+#### **User Recovery Process**
+```bash
+# The fix is already deployed - no user action required
+# For precise row control going forward:
+python -m src.cli.main sync pipeline -p pipeline -t table --limit 75000 --max-chunks 29
+# This processes exactly 2,175,000 rows in both backup and load stages
+```
+
+**Status**: ✅ **RESOLVED** - All watermark count accumulation issues eliminated. Simple absolute counting implemented.
 
 ### **P0 SCHEMA ARCHITECTURE BUG (RESOLVED)**
 
@@ -245,179 +295,7 @@ python -m src.cli.main s3clean clean -t settlement.table_name --force
    # Was incorrectly assuming: schema_info.pyarrow_schema (caused tuple errors)
    ```
 
-#### **Critical Lessons Learned**
-
-**🔴 ARCHITECTURAL PRINCIPLES**
-1. **Single Source of Truth**: Critical systems must have exactly one authoritative schema source
-2. **Interface Consistency**: All components consuming shared data must use identical APIs
-3. **Schema Evolution**: Hardcoded schemas become "ticking time bombs" as databases evolve
-4. **Early Detection Failure**: Architectural flaws can remain hidden when system scope is limited
-
-**🔴 PRODUCTION DEBUGGING METHODOLOGY**
-1. **Multi-Component Analysis**: Schema errors require checking ALL pipeline stages, not just one
-2. **API Contract Verification**: Always verify actual return types when refactoring components
-3. **Cross-Stage Consistency**: Backup → Upload → Loading must use identical schema discovery
-4. **Runtime Validation**: Production systems need loud warnings for deprecated/dangerous functions
-
-**🔴 PREVENTION MEASURES**
-- **Unified Schema Architecture**: All components now use `FlexibleSchemaManager` exclusively
-- **Schema Drift Detection**: Built-in utilities to detect hardcoded vs dynamic schema mismatches
-- **API Testing**: Cross-component schema consistency verification
-- **Deprecation Warnings**: Legacy functions generate runtime warnings to prevent silent usage
-
-#### **User Recovery Process**
-```bash
-# The fix is already deployed - no user action required
-# If you encounter schema-related errors:
-# 1. Check logs for deprecation warnings about hardcoded schemas
-# 2. Verify all components use FlexibleSchemaManager
-# 3. Run schema drift detection: python -m src.utils.schema_migration
-```
-
 **Status**: ✅ **RESOLVED** - All components unified under single schema system. Production Parquet compatibility issues eliminated.
-
-### **P0 ID-ONLY WATERMARK RETRIEVAL BUG (RESOLVED)**
-
-**Issue Discovered (September 2, 2025)**: Critical bug in backup watermark retrieval logic causing manual ID watermarks to be completely ignored for ID-only CDC strategies.
-
-- **Symptoms**: Manual ID watermarks appear to be set correctly but backup system starts from ID 0 
-- **Root Cause**: Backup logic incorrectly required BOTH watermark AND timestamp, treating ID-only watermarks as "no watermark"
-- **Impact**: ID-only tables couldn't use manual starting points, causing data duplication
-
-#### **Technical Root Cause**
-```python
-# BUGGY CODE (src/backup/row_based.py:189):
-if not watermark or not watermark.last_mysql_data_timestamp:
-    # No watermark - start from beginning ❌ WRONG FOR ID-ONLY!
-    last_id = 0
-
-# For ID-only watermarks: watermark exists but timestamp is null
-# System incorrectly treated this as "no watermark"
-```
-
-#### **The Critical Fix**
-```python
-# FIXED CODE:
-if not watermark:
-    last_id = 0  # Truly no watermark
-elif not watermark.last_mysql_data_timestamp and not getattr(watermark, 'last_processed_id', 0):
-    last_id = 0  # Empty watermark (no timestamp AND no ID)
-else:
-    # Valid watermark - use timestamp OR ID based approach
-    last_id = getattr(watermark, 'last_processed_id', 0)
-```
-
-#### **Verification Results**
-```
-BEFORE FIX:
-- "last_processed_id": 281623217 (watermark correctly stored)
-- "No watermark found, starting from beginning" (incorrect logic)
-- "resume_from_id": 0 (ignores manual ID)
-
-AFTER FIX:
-- "last_processed_id": 281623217 (watermark correctly stored) 
-- "Resuming row-based backup from watermark" (correct logic)
-- "resume_from_id": 281623217 (uses manual ID correctly!)
-- "WHERE id > 281623217" (correct query generation)
-```
-
-#### **Critical Lessons Learned**
-
-**🔴 ID-ONLY WATERMARK PRINCIPLES**
-1. **Null Timestamps Valid**: ID-only strategies legitimately have null timestamps
-2. **Separate Validation Logic**: Don't require timestamp AND ID - validate either/or
-3. **CDC Strategy Awareness**: Backup logic must understand ID-only vs timestamp strategies
-4. **Debug Log Analysis**: "resume_from_id" must match manually set ID in logs
-
-**🔴 WATERMARK RETRIEVAL DEBUGGING**
-1. **Check Stored vs Retrieved**: Watermark may be stored correctly but retrieved incorrectly
-2. **Logic Condition Analysis**: Trace exact conditional logic causing retrieval failures
-3. **Log Cross-Validation**: Compare watermark contents vs resume parameters
-4. **CDC Strategy Integration**: Verify manual overrides work across all CDC strategies
-
-**Status**: ✅ **RESOLVED** - ID-only watermarks now work correctly for all CDC strategies.
-
-### **P0 WATERMARK DOUBLE-COUNTING BUG (RESOLVED)**
-
-**Issue Discovered (August 25, 2025)**: Critical watermark row count discrepancy
-- **Symptoms**: Watermark showing 3M extracted rows vs 2.5M loaded, while Redshift contains 3M actual rows
-- **Root Cause**: Additive watermark logic causing double-counting in multi-session backups
-- **Impact**: Inflated extraction counts, confusion about actual data processing
-
-#### **Technical Root Cause**
-```python
-# OLD BUGGY BEHAVIOR (FIXED):
-# Session 1: 500K rows → watermark = 500K
-# Session 2: 2.5M session total → watermark = 500K + 2.5M = 3M
-# But if Session 2 already included Session 1 data internally → DOUBLE COUNTING
-
-# NEW FIXED BEHAVIOR:
-# Uses session ID tracking and mode control to prevent double-counting
-# mode='auto' intelligently detects same-session vs cross-session updates
-```
-
-#### **Comprehensive Fix Implemented**
-1. **Mode-Controlled Watermark Updates** (`src/core/s3_watermark_manager.py`)
-   - `mode='absolute'`: Replace existing count (same session updates)
-   - `mode='additive'`: Add to existing count (different session updates) 
-   - `mode='auto'`: Automatic detection based on session IDs
-
-2. **Session Tracking System**
-   - Unique session IDs prevent intra-session double-counting
-   - Cross-session accumulation works correctly for incremental processing
-
-3. **CLI Count Management Commands**
-   ```bash
-   # Immediate fix for discrepancies
-   python -m src.cli.main watermark-count set-count -t table_name --count N --mode absolute
-   
-   # Validation against actual Redshift data
-   python -m src.cli.main watermark-count validate-counts -t table_name
-   ```
-
-4. **Updated Backup Strategies** (`src/backup/row_based.py:815-886`)
-   - Session-controlled final watermark updates
-   - Prevents legacy additive double-counting bugs
-
-#### **Critical Lessons Learned**
-
-**🔴 WATERMARK INTEGRITY PRINCIPLES**
-1. **Session Isolation**: Same backup session should NEVER double-count rows
-2. **Cross-Session Accumulation**: Different sessions should ADD incremental rows
-3. **Validation is Mandatory**: Always compare watermark vs actual Redshift counts
-4. **Mode Awareness**: Be explicit about additive vs replacement updates
-
-**🔴 TESTING REQUIREMENTS** 
-1. **Multi-Session Testing**: Test backup resumption across different sessions
-2. **Count Validation**: Verify watermark counts match actual data movement  
-3. **Edge Case Coverage**: Test scenarios like failed/resumed/partial syncs
-4. **Production Verification**: Always validate fixes with actual production tables
-
-**🔴 DEBUGGING METHODOLOGY**
-1. **Symptom Recognition**: Row count mismatches indicate counting logic bugs
-2. **Session Analysis**: Track which sessions contributed to watermark counts
-3. **Direct Validation**: Query actual Redshift data to establish ground truth
-4. **Fix Verification**: Test fixes with multiple session scenarios
-
-#### **Prevention Measures**
-- **Comprehensive Testing**: All watermark updates now tested with session scenarios
-- **CLI Validation Tools**: Built-in commands to detect and fix count discrepancies  
-- **Documentation**: Clear guidance on watermark count management
-- **Code Reviews**: Enhanced review process for watermark-related code changes
-
-#### **User Recovery Process**
-```bash
-# Step 1: Validate current state
-python -m src.cli.main watermark-count validate-counts -t your_table_name
-
-# Step 2: Fix discrepancy with actual Redshift count
-python -m src.cli.main watermark-count set-count -t your_table_name --count ACTUAL_COUNT --mode absolute
-
-# Step 3: Verify fix
-python -m src.cli.main watermark get -t your_table_name
-```
-
-**Status**: ✅ **RESOLVED** - All fixes tested and validated. Future backups protected against double-counting.
 
 ### **P0 VARCHAR LENGTH & COLUMN NAMING BUG (RESOLVED)**
 
@@ -426,322 +304,27 @@ python -m src.cli.main watermark get -t your_table_name
 - **Root Cause**: MySQL utf8mb4 charset allows data exceeding VARCHAR declarations; Redshift strictly enforces length limits and column naming rules
 - **Impact**: Production pipeline failures, data loading errors, sync interruptions
 
-#### **Technical Root Cause**
-```sql
--- PROBLEMATIC MYSQL TABLE:
-CREATE TABLE dw_parcel_detail_tool (
-    id BIGINT,
-    190_time VARCHAR(255),  -- ❌ Column starts with number (Redshift invalid)
-    start_address VARCHAR(255)  -- ❌ Contains 263 characters (exceeds declared 255)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- MySQL: Lenient enforcement, allows 263 chars in VARCHAR(255)
--- Redshift: Strict enforcement, rejects > 255 chars and numeric-start columns
-```
-
 #### **Comprehensive Fix Implemented**
-1. **VARCHAR Length Safety Buffer** (`src/core/flexible_schema_manager.py:437-439`)
-   ```python
-   # Automatic doubling of VARCHAR sizes for safety
-   safe_length = min(max_length * 2, 65535) if max_length < 32768 else 65535
-   return f"VARCHAR({safe_length})"
-   # MySQL: VARCHAR(255) → Redshift: VARCHAR(510)
-   ```
-
-2. **Column Name Sanitization** (`src/core/flexible_schema_manager.py:791-803`)
-   ```python
-   def _sanitize_column_name_for_redshift(self, column_name: str) -> str:
-       if column_name and column_name[0].isdigit():
-           sanitized = f"col_{column_name}"
-           return sanitized
-   # MySQL: 190_time → Redshift: col_190_time
-   ```
-
-3. **Persistent Column Mapping System** (`src/core/column_mapper.py`)
-   - Automatic detection and sanitization during schema discovery
-   - Persistent storage in `column_mappings/` directory for reuse
-   - CLI commands for mapping management and verification
-
-#### **Critical Lessons Learned**
-
-**🔴 CHARSET & LENGTH ENFORCEMENT PRINCIPLES**
-1. **MySQL Leniency**: utf8mb4 charset with lenient sql_mode can store data exceeding VARCHAR declarations
-2. **Redshift Strictness**: Strict enforcement of declared column lengths and naming rules
-3. **Safety Buffers**: Production systems need safety margins for data length variations
-4. **Character vs Byte Awareness**: UTF-8 multi-byte characters require careful length calculations
-
-**🔴 PRODUCTION COMPATIBILITY METHODOLOGY**
-1. **Proactive Schema Analysis**: Check for numeric-start columns and length enforcement differences
-2. **Safety Multipliers**: Double VARCHAR sizes to handle real-world data variations
-3. **Persistent Mappings**: Remember column transformations across sync operations
-4. **Transparent Handling**: Users should not need to manually handle compatibility issues
-
-**🔴 PREVENTION MEASURES**
-- **Automatic Schema Sanitization**: All schema discovery includes compatibility fixes
-- **Persistent Column Mappings**: System remembers transformations for consistent loading
-- **CLI Management Tools**: Commands to view, verify, and manage column mappings
-- **Production Testing**: Verify with actual data, not just schema definitions
-
-#### **User Recovery Process**
-```bash
-# All fixes are automatic - no user action required
-# To verify column mappings were applied:
-python -m src.cli.main column-mappings show -t your_table_name
-
-# To check VARCHAR length doubling:
-python -m src.cli.main sync -t your_table --dry-run | grep VARCHAR
-
-# Expected: VARCHAR(255) → VARCHAR(510) transformations
-```
-
-**Real-World Resolution:**
-```
-Problem: unidw.dw_parcel_detail_tool with 190_time column and VARCHAR(255) containing 263 characters
-Solution: Automatic column rename (col_190_time) and length doubling (VARCHAR(510))
-Result: ✅ Sync successful, 385M+ rows processed without user intervention
-```
+1. **VARCHAR Length Safety Buffer** - Automatic doubling of VARCHAR sizes for safety
+2. **Column Name Sanitization** - Numeric-start columns renamed (e.g., `190_time` → `col_190_time`)
+3. **Persistent Column Mapping System** - Automatic detection and reuse of transformations
 
 **Status**: ✅ **RESOLVED** - All schema compatibility issues resolved automatically. Production pipelines handle VARCHAR length and column naming transparently.
 
 ---
 
-## 🚀 **DEVELOPMENT ROADMAP - v2.0 Enterprise Data Platform**
+## 📚 **Documentation Library**
 
-### **📊 Current Status: v1.0.0 Production Ready (August 2025)**
+### **📊 Production Guides**
+- **`LARGE_TABLE_GUIDELINES.md`** - Complete guidelines for backing up large tables (1M+ rows)
+- **`WATERMARK_DEEP_DIVE.md`** - Technical deep-dive into watermark-based data loss prevention  
+- **`WATERMARK_ROW_COUNT_ACCUMULATION_FIX.md`** - Latest watermark simplification details
 
-**✅ Production Achievements:**
-- **Battle-Tested Scale**: Successfully processes 65M+ row tables  
-- **Zero Data Loss**: All critical P0/P1/P2 bugs resolved
-- **Enterprise Features**: SSH tunnels, credential security, comprehensive CLI
-- **Proven Reliability**: 5.5M+ rows processed in production workloads
-- **Complete Documentation**: User guides, technical references, operational procedures
-
-### **🎯 Vision: Enterprise Data Integration Platform**
-
-**Transform from:** Specialized MySQL→S3→Redshift backup tool  
-**Transform to:** Comprehensive multi-source data integration platform
-
-### **📈 Evolution Phases**
-
-#### **Phase 1: Multi-Schema Foundation (v1.1.0) - Q4 2025**
-
-**🎯 Goal:** Support multiple database connections while preserving v1.0.0 compatibility
-
-**Key Features:**
-- **Connection Registry**: Pooled multi-database connection management
-- **Enhanced CLI**: Pipeline-based commands (`--pipeline sales_pipeline --table customers`)  
-- **Configuration Layer**: YAML-based connection and table definitions
-- **Backward Compatibility**: All v1.0.0 commands continue working unchanged
-
-**Technical Implementation:**
-```yaml
-# config/pipelines/sales_pipeline.yml
-pipeline:
-  name: "sales_to_reporting"
-  source: "sales_mysql"
-  target: "reporting_redshift"
-  
-tables:
-  customers:
-    cdc_strategy: "hybrid"
-    cdc_timestamp_column: "updated_at"
-    cdc_id_column: "customer_id"
-```
-
-**Success Metrics:**
-- Support 5+ database connections simultaneously
-- 100% v1.0.0 workflow compatibility maintained
-- Configuration-driven table processing
-
-#### **Phase 2: CDC Intelligence Engine (v1.2.0) - Q1 2026**
-
-**🎯 Goal:** Flexible change data capture supporting multiple strategies beyond hardcoded `update_at`
-
-**Key Features:**
-- **Dynamic CDC Strategies**: Hybrid (timestamp+ID), full_sync, id_only, timestamp_only
-- **Data Quality Framework**: Built-in validation (null_check, duplicate_check, range_check)
-- **Enhanced Watermark System**: Multi-pipeline support with conflict resolution
-- **Custom SQL Support**: User-defined incremental queries
-
-**CDC Strategy Engine:**
-```python
-CDC_STRATEGIES = {
-    'hybrid': HybridCDCStrategy,        # Most robust: timestamp + ID
-    'timestamp_only': TimestampCDCStrategy,  # v1.0.0 compatibility
-    'id_only': IdOnlyCDCStrategy,       # Append-only tables
-    'full_sync': FullSyncStrategy,      # Complete refresh
-    'custom_sql': CustomSQLStrategy     # User-defined queries
-}
-```
-
-**Success Metrics:**
-- Support 4+ CDC strategies for different table patterns
-- Built-in data quality validation on all pipelines
-- 90% reduction in data consistency issues
-
-#### **Phase 3: Dimensional Intelligence (v1.3.0) - Q2 2026**
-
-**🎯 Goal:** Support dimensional data with Slowly Changing Dimension (SCD) patterns
-
-**Key Features:**
-- **SCD Type 1 & Type 2**: Automated historical change tracking
-- **Advanced MERGE Operations**: Redshift-native dimensional processing
-- **Business Key Management**: Configurable natural key relationships
-- **Change Detection**: Automated identification of dimensional changes
-
-**SCD Processing:**
-```python
-class SCDProcessor:
-    """Handles SCD Type 1, Type 2, and hybrid patterns"""
-    
-    def process_dimension(self, staging_data, dimension_config, redshift_connection):
-        # Advanced SCD processing with configurable business keys
-        # Multi-statement transaction with staging table strategy
-```
-
-**Configuration Example:**
-```yaml
-tables:
-  dim_customers:
-    table_type: "dimension"
-    scd_type: "type_2"
-    business_key: ["customer_id"]
-    scd_columns: ["customer_name", "address", "tier"]
-    surrogate_key: "customer_sk"
-```
-
-**Success Metrics:**
-- Support SCD Type 1 and Type 2 processing
-- Automated dimensional change tracking
-- 95% reduction in manual dimensional data management
-
-#### **Phase 4: Enterprise Platform (v2.0.0) - Q3-Q4 2026**
-
-**🎯 Goal:** Full enterprise data integration platform with orchestration
-
-**Key Features:**
-- **Pipeline Orchestration**: Dependency management and parallel execution
-- **Enterprise Monitoring**: Prometheus/CloudWatch integration with dashboards
-- **Data Lineage**: End-to-end tracking of data flow and transformations
-- **Multi-Tenancy**: Support for multiple business units and projects
-
-**Advanced Architecture:**
-```python
-class PipelineRunner:
-    """Enterprise orchestration with dependency management"""
-    
-    def execute_pipeline(self, pipeline_config):
-        # 1. Build dependency graph
-        # 2. Parallel execution where possible
-        # 3. Data lineage tracking
-        # 4. Enterprise monitoring integration
-```
-
-**Enterprise Metrics:**
-```python
-class MetricsCollector:
-    """Integration with Prometheus/CloudWatch"""
-    metrics = {
-        'rows_processed_total': Counter('rows_processed_total'),
-        'pipeline_duration_seconds': Histogram('pipeline_duration_seconds'),
-        'data_quality_score': Gauge('data_quality_score'),
-        'scd_changes_detected': Counter('scd_changes_detected'),
-    }
-```
-
-**Success Metrics:**
-- Support 10+ source databases simultaneously
-- Process 1B+ rows daily across all pipelines
-- 99.9% uptime for critical data flows
-- 5+ business units using the platform
-
-### **🛡️ Migration Strategy**
-
-#### **Risk Mitigation Principles:**
-1. **Backward Compatibility First**: v1.0.0 workflows must continue working
-2. **Gradual Enhancement**: Add capabilities without breaking existing features  
-3. **Feature Flags**: Enable/disable new functionality during transition
-4. **Rollback Capability**: Quick return to previous behavior if needed
-
-#### **Migration Path:**
-- **Month 1-2**: Phase 1 implementation with comprehensive v1.0.0 regression testing
-- **Month 3-4**: Phase 2 rollout with opt-in CDC strategies
-- **Month 5-6**: Phase 3 SCD features for new dimensional use cases
-- **Month 7-12**: Phase 4 enterprise features with full platform capabilities
-
-### **📊 Expected ROI**
-
-**Technical Benefits:**
-- **10x Scale**: Support hundreds of tables across multiple databases
-- **70% Development Efficiency**: Reduction in custom ETL development
-- **50% Operational Overhead**: Reduction in pipeline maintenance
-- **3x Time-to-Market**: Faster deployment of new data products
-
-**Business Value:**
-- **Multi-Project Support**: Single platform serves entire organization
-- **Data Governance**: Built-in lineage and quality tracking
-- **Operational Excellence**: Automated monitoring and alerting
-- **Cost Optimization**: Consolidated tooling and reduced maintenance
-
-### **🎯 Success Criteria**
-
-**v2.0.0 Platform Goals:**
-- Support 10+ source databases simultaneously  
-- Process 1B+ rows daily across all pipelines
-- 99.9% uptime for critical business data flows
-- 95% user satisfaction score from data engineering teams
-- 100+ tables under automated management
-- 5+ business units actively using the platform
-
-### **📚 Reference Documents**
-
-- **Technical Architecture**: `NEXT_GENERATION_ARCHITECTURE_DESIGN.md`
-- **Feature Analysis**: `ENHANCED_FEATURES_DESIGN.md` 
-- **v1.0.0 Foundation**: `RELEASE_v1.0.0_SUMMARY.md`
-- **Production Lessons**: Current bug fixes and operational experience
+### **🔧 User References**
+- **`USER_MANUAL.md`** - Comprehensive CLI usage guide
+- **`WATERMARK_CLI_GUIDE.md`** - Watermark management commands
+- **`README.md`** - Project overview and quick start
 
 ---
 
-**🌟 Strategic Vision**: Transform battle-tested v1.0.0 backup system into comprehensive enterprise data integration platform while preserving the reliability and performance that made it production-ready.
-
-**Next Steps:** Stakeholder review, proof-of-concept development, and detailed sprint planning for Phase 1 implementation.
-
----
-
-## 🧠 **CRITICAL ARCHITECTURAL CONSISTENCY PRINCIPLES (v1.2 Lessons Learned)**
-
-### 🚨 **Anti-Patterns to NEVER Repeat**
-- **Duplicated Logic Syndrome**: Same operation implemented in multiple places
-- **Schema Fragmentation**: Different precision/format handling across components
-- **Implicit Contracts**: Assuming method behavior without validation
-- **Metadata Contamination**: Allowing S3 paths, file references in schemas
-- **Integration Test Gaps**: Testing components in isolation only
-
-### ✅ **Required Patterns for All Architecture Work**
-- **Single Source of Truth**: Shared concepts must have exactly one canonical implementation
-- **Consistency Over Complexity**: Most bugs stem from inconsistent implementation, not design flaws
-- **Integration Testing First**: Test component interactions, not just individual components
-- **Metadata Contamination Prevention**: Always sanitize outputs for downstream compatibility
-- **Central Authority Pattern**: Use centralized utilities for shared operations (table naming, schema cleaning)
-
-### 🔍 **Mandatory Checks Before Architectural Changes**
-1. Identify all shared concepts (table naming, schema handling, etc.)
-2. Ensure single canonical implementation for each shared concept
-3. Validate component interface contracts explicitly
-4. Test cross-component interactions with real data
-5. Check for metadata contamination risks
-
-### 🚨 **Red Flags That Require Immediate Attention**
-- Multiple implementations of same logical operation
-- Different components handling same data with different logic
-- Schema/naming inconsistencies between pipeline stages
-- Metadata that could contaminate downstream systems
-- New table name cleaning logic (should use central authority)
-- Schema handling without cross-component validation
-- Parquet generation without metadata sanitization
-
-### 📋 **AI Assistant Memory Integration**
-- **Read First**: Always read `LESSONS_LEARNED_V1_2_ARCHITECTURE.md` before architectural work
-- **Apply Principles**: Use consistency-first thinking, not just feature-first thinking
-- **Validate Integration**: Test cross-component interactions with real data
-- **Document Patterns**: Update lessons learned when new patterns emerge
+**🌟 Current Status**: Production-ready system with all critical bugs resolved. Simplified watermark architecture ensures reliable row count tracking across all operations.
