@@ -1,0 +1,21 @@
+# Airflow-specific files
+airflow.db
+airflow-webserver.pid
+logs/
+*.log
+
+# Python virtual environment
+airflow_env/
+
+# dbt artifacts
+target/
+dbt_packages/
+logs/
+
+# Temporary files
+*.pid
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db

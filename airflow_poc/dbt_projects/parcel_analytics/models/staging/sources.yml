@@ -1,0 +1,25 @@
+# Define source tables from the sync tool
+version: 2
+
+sources:
+  - name: raw_data
+    description: Raw data synced from MySQL via the sync tool
+    schema: public
+    tables:
+      - name: dw_parcel_detail_tool_raw
+        description: "Raw parcel detail data synced from MySQL unidw.dw_parcel_detail_tool"
+        columns:
+          - name: id
+            description: "Primary key - unique identifier for each record"
+            tests:
+              - not_null
+          - name: order_id
+            description: "Order identifier - multiple records can have same order_id (needs deduplication)"
+            tests:
+              - not_null
+          - name: col_broker_handover_time
+            description: "Timestamp when parcel was handed over to broker"
+          - name: created_at
+            description: "Record creation timestamp"
+          - name: updated_at
+            description: "Record last update timestamp"
