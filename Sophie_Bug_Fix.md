@@ -400,25 +400,6 @@ The feature includes comprehensive testing in `tests/test_core/test_redshift_opt
 - Column validation and sanitization work properly
 - Different SORTKEY types generate correct DDL 
 
-## Usually Used Commands
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
-
-python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
-
-git commit -m "add files from main" --no-verify 
-source s3_backup_venv/bin/activate
-
 ## Batch Size Configuration Architecture Fix
 
 ### Problem: Multiple Conflicting Batch Size Systems
@@ -663,4 +644,159 @@ if watermark.mysql_status == 'in_progress':
 **Before:** 46 valid S3 files couldn't be loaded due to status check
 **After:** 46 S3 files successfully processed to Redshift regardless of interrupted backup status
 
-**Key Insight:** Watermark status should guide processing decisions, not block valid data loading when files demonstrably exist.
+**Key Insight:** Watermark status should guide processing decisions, not block valid data loading when files demonstrably exist. 
+
+## Usually Used Commands
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
+
+python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
+
+git commit -m "add files from main" --no-verify 
+source s3_backup_venv/bin/activate
+
+
+## Multi-Connection Password Management Integration (Resolved)
+
+### Issue: Database Password Configuration for Multi-Pipeline Support
+
+**Problem:** System used single `DB_PASSWORD` environment variable but pipeline configurations require connection-specific passwords (US DW, Canada DW, Production, QA, etc.).
+
+**Symptoms:**
+```
+2025-09-16T20:39:59.518831Z [warning] No password found in DatabaseConfig or environment variables
+```
+
+**Root Cause:** 
+1. **ConnectionRegistry Available**: `connections.yml` defined 14+ connection configurations with environment variable references
+2. **ConnectionManager Not Integrated**: System fell back to basic `DatabaseConfig` instead of using ConnectionRegistry
+3. **Missing Password**: No generic `DB_PASSWORD` in `.env`, only connection-specific passwords like:
+   - `DB_US_DW_RO_PASSWORD` (for US Data Warehouse connections)
+   - `DB_CA_DW_RO_PASSWORD` (for Canada connections)  
+   - `DB_US_QA_PASSWORD` (for QA environment)
+   - `DB2_US_RO_PASSWORD` (for DB2 connections)
+
+### Connection Architecture Overview
+
+**Your `.env` Connection-Specific Passwords:**
+```bash
+DB_US_DW_RO_PASSWORD=qPwRT]9(BUI0Q2Vw     # US Data Warehouse
+DB_CA_DW_RO_PASSWORD=cJY(,,%+sbam{%9`     # Canada Data Warehouse  
+DB_US_PROD_RO_PASSWORD=L~yL&Yw9t?qZn=k~   # US Production
+DB_US_QA_PASSWORD=3B/l0PB9}fXRlebm        # US QA Environment
+DB2_US_RO_PASSWORD=qPwRT]9(BUI0Q2Vw       # DB2 Instance
+```
+
+**Your `connections.yml` Configuration:**
+```yaml
+connections:
+  sources:
+    mysql_default:
+      password: "${DB_US_DW_PASSWORD}"  # References environment variable
+    US_DW_UNIDW_SSH:
+      password: "${DB_US_DW_RO_PASSWORD}"  # Connection-specific password
+    CA_DW_RO_SSH:
+      password: "${DB_CA_DW_RO_PASSWORD}"  # Canada-specific password
+```
+
+### Fix Applied: ConnectionRegistry Integration
+
+**1. Enhanced ConnectionManager (`src/core/connections.py:67-76`)**
+```python
+# BEFORE: Only checked basic DatabaseConfig
+if self.connection_registry and connection_name:
+    try:
+        conn_config = self.connection_registry.get_connection(connection_name)
+        if conn_config:
+            logger.info(f"Using connection configuration for: {connection_name}")
+            return conn_config
+    except Exception as e:
+        logger.warning(f"Failed to get connection {connection_name} from registry: {e}")
+        
+# Fallback still happened due to missing connection names in health_check()
+```
+
+**2. Updated Health Check Method (`src/core/connections.py:612,620`)**
+```python
+# BEFORE (PROBLEMATIC): No connection name passed
+with self.ssh_tunnel() as local_port:
+    with self.database_connection(local_port) as conn:
+
+# AFTER (FIXED): Uses mysql_default connection
+with self.ssh_tunnel('mysql_default') as local_port:
+    with self.database_connection(local_port, 'mysql_default') as conn:
+```
+
+**3. Optional Password Field (`src/config/settings.py:13`)**
+```python
+# BEFORE: Required password field
+password: SecretStr = Field(..., description="Database password")
+
+# AFTER: Optional password field (allows connection-specific passwords)
+password: Optional[SecretStr] = Field(None, description="Database password")
+```
+
+### Test Script Enhancement
+
+**Environment Variable Loading Fix (`test_connection_resolution.py:13-36`)**
+```python
+# Added automatic .env loading with fallback
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).parent / '.env'
+    if env_file.exists():
+        load_dotenv(env_file)
+        print(f"✅ Loaded environment variables from {env_file}")
+except ImportError:
+    # Manual .env loading as fallback
+    with open(env_file) as f:
+        for line in f:
+            # Parse KEY=VALUE pairs
+```
+
+### Resolution Workflow
+
+**Test Results Confirm Integration Success:**
+```
+=== Environment Variables Test ===
+✅ DB_US_DW_PASSWORD: **************** (length: 16)
+✅ DB_US_DW_RO_PASSWORD: **************** (length: 16)
+✅ DB_CA_DW_RO_PASSWORD: **************** (length: 16)
+[... all connection-specific passwords loaded]
+
+=== ConnectionRegistry Test ===
+✅ ConnectionRegistry initialized with 14 connections
+✅ Found connection: US_DW_UNIDW_SSH
+   Host: us-west-2.ro.db.analysis.uniuni.com.internal
+   Password: ****************
+
+=== ConnectionManager Test ===
+✅ ConnectionManager loaded
+   Connection: US_DW_UNIDW_SSH
+   Password: ****************
+```
+
+### Impact & Benefits
+
+**Before Fix:**
+- System tried to use single `DB_PASSWORD` for all connections
+- Health checks failed with "No password found" warnings
+- No support for multi-pipeline environments with different credentials
+
+**After Fix:**
+- Each connection uses its specific environment variable (e.g., `${DB_US_DW_RO_PASSWORD}`)
+- ConnectionRegistry provides proper credential resolution
+- Health checks use `mysql_default` connection for system status
+- Full support for multi-environment, multi-pipeline configurations
+
+**Key Insight:** The system now properly leverages your existing multi-connection architecture instead of requiring a generic password. Each pipeline can use its appropriate credentials while maintaining security through environment variable references. 

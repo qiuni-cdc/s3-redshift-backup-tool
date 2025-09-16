@@ -10,13 +10,13 @@ connections:
       port: 3306
       database: unidw
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"  # References .env variable for security
+      password: "${DB_US_DW_PASSWORD}"  # References .env variable for security
       description: "Default v1.0.0 compatibility MySQL connection (US-WEST-2 unidw)"
       
       # SSH tunnel configuration (your current setup)
       ssh_tunnel:
         enabled: true
-        host: "${SSH_BASTION_HOST}"  # Correct US-WEST-2 bastion host
+        host: 35.83.114.196  # Correct US-WEST-2 bastion host
         username: "${SSH_BASTION_USER}"
         private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
@@ -27,7 +27,7 @@ connections:
       port: 3306
       database: unidw
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_CA_DW_RO_PASSWORD}"
       description: "Canada Data Warehouse Read-Only MySQL (US-EAST-1) via SSH tunnel"
       
       ssh_tunnel:
@@ -43,7 +43,7 @@ connections:
       port: 3306
       database: kuaisong
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_PROD_RO_PASSWORD}"
       description: "US Production Read-Only MySQL (US-WEST-2) via SSH tunnel"
       
       ssh_tunnel:
@@ -59,7 +59,7 @@ connections:
       port: 3306
       database: settlement
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_DW_RO_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Settlement Schema via SSH tunnel"
       
       ssh_tunnel:
@@ -75,7 +75,7 @@ connections:
       port: 3306
       database: unidw
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_DW_RO_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Unidw Schema via SSH tunnel"
       
       ssh_tunnel:
@@ -91,7 +91,7 @@ connections:
       port: 3306
       database: uniods
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_DW_RO_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Uniods Schema via SSH tunnel"
       
       ssh_tunnel:
@@ -107,7 +107,7 @@ connections:
       port: 3306
       database: unidw
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_QA_PASSWORD}"
       description: "US QA MySQL (US-WEST-2) via SSH tunnel"
       
       ssh_tunnel:
@@ -123,7 +123,7 @@ connections:
       port: 3306
       database: kuaisong
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_PROD_RO_PASSWORD}"
       description: "US Production Read-Only MySQL (US-WEST-2) direct connection"
       
       # No SSH tunnel configuration - direct connection
@@ -136,7 +136,7 @@ connections:
       port: 3306
       database: settlement
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_DW_RO_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL direct connection (same as mysql_default)"
       
       # No SSH tunnel configuration - direct connection
@@ -149,7 +149,7 @@ connections:
       port: 3306
       database: unidw
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_QA_PASSWORD}"
       description: "US QA MySQL (US-WEST-2) direct connection"
       
       # No SSH tunnel configuration - direct connection
@@ -162,7 +162,7 @@ connections:
       port: 3306
       database: settlement
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB_US_DW_RO_PASSWORD}"
       description: "US Data Warehouse Read-Only MySQL (US-WEST-2) direct connection"
       
       # No SSH tunnel configuration - direct connection
@@ -175,7 +175,7 @@ connections:
       port: 3306
       database: settlement
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB2_US_RO_PASSWORD}"
       description: "US DB2 Read-Only MySQL (US-WEST-2) via SSH tunnel"
       
       ssh_tunnel:
@@ -191,7 +191,7 @@ connections:
       port: 3306
       database: settlement
       username: "${DB_USER}"
-      password: "${DB_PASSWORD}"
+      password: "${DB2_US_RO_PASSWORD}"
       description: "US DB2 Read-Only MySQL (US-WEST-2) direct connection"
       
       # No SSH tunnel configuration - direct connection

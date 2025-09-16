@@ -66,4 +66,7 @@ htmlcov/
 # Windows
 Thumbs.db
 ehthumbs.db
-Desktop.ini
+Desktop.ini 
+
+# md 
+Code_Explain.md

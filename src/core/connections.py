@@ -17,6 +17,7 @@ import socket
 from pathlib import Path
 
 from src.config.settings import AppConfig
+from src.core.connection_registry import ConnectionRegistry, ConnectionConfig
 from src.utils.exceptions import (
     ConnectionError, 
     raise_connection_error,
@@ -42,8 +43,67 @@ class ConnectionManager:
         self._db_pool: Optional[MySQLConnectionPool] = None
         self._s3_client: Optional[Any] = None
         
+        # Initialize connection registry for multi-connection support
+        try:
+            self.connection_registry = ConnectionRegistry()
+            logger.info("ConnectionRegistry initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize ConnectionRegistry, falling back to basic config: {e}")
+            self.connection_registry = None
+        
         # Validate configuration on initialization
         self._validate_config()
+    
+    def get_connection_config(self, connection_name: Optional[str] = None) -> ConnectionConfig:
+        """
+        Get connection configuration by name from ConnectionRegistry or fallback to basic config.
+        
+        Args:
+            connection_name: Name of the connection (e.g., 'US_DW_UNIDW_SSH')
+            
+        Returns:
+            ConnectionConfig object with connection details
+        """
+        if self.connection_registry and connection_name:
+            try:
+                # Try to get connection from registry
+                conn_config = self.connection_registry.get_connection(connection_name)
+                if conn_config:
+                    logger.info(f"Using connection configuration for: {connection_name}")
+                    return conn_config
+            except Exception as e:
+                logger.warning(f"Failed to get connection {connection_name} from registry: {e}")
+        
+        # Fallback to basic config from AppConfig
+        logger.info("Using fallback DatabaseConfig configuration")
+        
+        # Handle case where password might be None (for connection-specific passwords)
+        password = ""
+        if hasattr(self.config.database, 'password') and self.config.database.password:
+            password = self.config.database.password.get_secret_value()
+        else:
+            # Try to get password from environment directly
+            import os
+            password = os.getenv('DB_PASSWORD', '')
+            if not password:
+                logger.warning("No password found in DatabaseConfig or environment variables")
+        
+        return ConnectionConfig(
+            name="default",
+            type="mysql",
+            host=self.config.database.host,
+            port=self.config.database.port,
+            database=self.config.database.database,
+            username=self.config.database.user,
+            password=password,
+            ssh_tunnel={
+                'enabled': True,
+                'host': self.config.ssh.bastion_host,
+                'username': self.config.ssh.bastion_user,
+                'private_key_path': self.config.ssh.bastion_key_path,
+                'local_port': self.config.ssh.local_port
+            }
+        )
     
     def _validate_config(self):
         """Validate connection configuration"""
@@ -61,9 +121,12 @@ class ConnectionManager:
             )
     
     @contextmanager
-    def ssh_tunnel(self) -> Generator[int, None, None]:
+    def ssh_tunnel(self, connection_name: Optional[str] = None) -> Generator[int, None, None]:
         """
         Create SSH tunnel and return local port.
+        
+        Args:
+            connection_name: Optional connection name to use specific SSH configuration
         
         Yields:
             Local port number for the established tunnel
@@ -73,15 +136,21 @@ class ConnectionManager:
         """
         tunnel = None
         try:
-            logger.info("Establishing SSH tunnel", bastion_host=self.config.ssh.bastion_host)
+            # Get connection configuration (from registry or fallback)
+            conn_config_obj = self.get_connection_config(connection_name)
+            ssh_config = conn_config_obj.ssh_tunnel
+            
+            logger.info("Establishing SSH tunnel", 
+                       bastion_host=ssh_config.get('host', self.config.ssh.bastion_host),
+                       connection_name=connection_name or "default")
             
             # Create SSH tunnel
             tunnel = SSHTunnelForwarder(
-                (self.config.ssh.bastion_host, 22),
-                ssh_username=self.config.ssh.bastion_user,
-                ssh_pkey=self.config.ssh.bastion_key_path,
-                remote_bind_address=(self.config.database.host, self.config.database.port),
-                local_bind_address=('127.0.0.1', self.config.ssh.local_port)
+                (ssh_config.get('host', self.config.ssh.bastion_host), 22),
+                ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
+                ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
+                remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
+                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port))
             )
             
             # Start tunnel with retry logic
@@ -215,12 +284,13 @@ class ConnectionManager:
             return False
     
     @contextmanager
-    def database_connection(self, local_port: int) -> Generator[mysql.connector.MySQLConnection, None, None]:
+    def database_connection(self, local_port: int, connection_name: Optional[str] = None) -> Generator[mysql.connector.MySQLConnection, None, None]:
         """
         Create database connection through SSH tunnel.
         
         Args:
             local_port: Local port from SSH tunnel
+            connection_name: Optional connection name to use specific configuration
             
         Yields:
             MySQL database connection
@@ -230,15 +300,23 @@ class ConnectionManager:
         """
         conn = None
         try:
-            logger.info("Establishing database connection", local_port=local_port)
+            # Get connection configuration (from registry or fallback)
+            conn_config_obj = self.get_connection_config(connection_name)
+            
+            logger.info(
+                "Establishing database connection", 
+                local_port=local_port,
+                connection_name=connection_name or "default",
+                database=conn_config_obj.database
+            )
             
             # Connection configuration
             conn_config = {
                 'host': '127.0.0.1',
                 'port': local_port,
-                'user': self.config.database.user,
-                'password': self.config.database.password.get_secret_value(),
-                'database': self.config.database.database,
+                'user': conn_config_obj.username,
+                'password': conn_config_obj.password,
+                'database': conn_config_obj.database,
                 'autocommit': False,
                 'connection_timeout': 30,
                 'charset': 'utf8mb4',
@@ -300,6 +378,27 @@ class ConnectionManager:
             if conn and conn.is_connected():
                 conn.close()
                 logger.info("Database connection closed")
+    
+    @contextmanager
+    def database_session(self, connection_name: Optional[str] = None) -> Generator[mysql.connector.MySQLConnection, None, None]:
+        """
+        Create database session with SSH tunnel using connection configuration.
+        
+        This is a convenience method that combines SSH tunnel and database connection
+        based on the connection name from connections.yml.
+        
+        Args:
+            connection_name: Name of the connection from connections.yml (e.g., 'US_DW_UNIDW_SSH')
+            
+        Yields:
+            MySQL database connection
+            
+        Raises:
+            ConnectionError: If tunnel or database connection fails
+        """
+        with self.ssh_tunnel(connection_name) as local_port:
+            with self.database_connection(local_port, connection_name) as db_conn:
+                yield db_conn
     
     def get_s3_client(self):
         """
@@ -508,17 +607,17 @@ class ConnectionManager:
         except Exception as e:
             health['s3'] = f'ERROR: {str(e)}'
         
-        # Test SSH connectivity
+        # Test SSH connectivity using default connection
         try:
-            with self.ssh_tunnel() as local_port:
+            with self.ssh_tunnel('mysql_default') as local_port:
                 health['ssh'] = 'OK'
         except Exception as e:
             health['ssh'] = f'ERROR: {str(e)}'
         
-        # Test database connectivity (through SSH)
+        # Test database connectivity (through SSH) using default connection
         try:
-            with self.ssh_tunnel() as local_port:
-                with self.database_connection(local_port) as conn:
+            with self.ssh_tunnel('mysql_default') as local_port:
+                with self.database_connection(local_port, 'mysql_default') as conn:
                     cursor = conn.cursor()
                     cursor.execute("SELECT 1")
                     cursor.fetchone()

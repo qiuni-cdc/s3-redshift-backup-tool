@@ -10,7 +10,7 @@ class DatabaseConfig(BaseSettings):
     host: str = Field(..., description="Database host")
     port: int = Field(3306, description="Database port")
     user: str = Field(..., description="Database username")
-    password: SecretStr = Field(..., description="Database password")
+    password: Optional[SecretStr] = Field(None, description="Database password")
     database: str = Field(..., description="Database name")
     
     class Config:
