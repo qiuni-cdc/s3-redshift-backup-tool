@@ -5,6 +5,22 @@
 connections:
   # Source connections (MySQL databases)  
   sources:
+    # Alias for v1.2.0 compatibility when no connection prefix is specified
+    default:
+      host: us-west-2.ro.db.analysis.uniuni.com.internal
+      port: 3306
+      database: unidw
+      username: chenqi
+      password: "${DB_PASSWORD}"
+      description: "Alias for US_DW_UNIDW_SSH - used when no connection prefix specified"
+      
+      ssh_tunnel:
+        enabled: true
+        host: 35.83.114.196
+        username: chenqi
+        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        local_port: 0
+    
     mysql_default:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
