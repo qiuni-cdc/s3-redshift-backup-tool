@@ -4,7 +4,7 @@ description: "Enhanced parcel detail sync with target table mapping for POC"
 # Connection configuration
 connections:
   mysql: "US_DW_UNIDW_SSH"
-  redshift: "US_DW_RO_SSH" 
+  redshift: "redshift_default" 
 
 # Default sync settings optimized for POC
 defaults:

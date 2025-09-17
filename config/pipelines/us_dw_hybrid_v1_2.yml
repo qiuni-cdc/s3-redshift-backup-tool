@@ -36,6 +36,7 @@ tables:
     cdc_ordering: ["created_at", "id"]        # Explicit ordering for consistency
     
     description: "Settlement orders data with hybrid CDC (timestamp + ID)"
+    target_name: "settle_orders"
     
     # Processing optimization for hybrid strategy
     processing:
