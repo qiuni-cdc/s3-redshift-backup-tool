@@ -1,0 +1,183 @@
+# US Production Kuaisong Tracking Tables Pipeline (v1.2.0)
+# High-frequency sync for tracking and order tables
+# Sync frequency: Every 15 minutes (*/15 * * * *)
+
+pipeline:
+  name: "us_prod_kuaisong_tracking"
+  description: "US Production Kuaisong tracking and order tables - 15 minute sync frequency"
+  source: "US_PROD_RO_SSH"         # US Production (us-west-2) with SSH tunnel
+  target: "redshift_default"       # QA Redshift cluster
+  version: "1.2.0"                 # v1.2.0 CDC Intelligence Engine
+  sync_frequency: "*/15 * * * *"    # Every 15 minutes
+  
+  processing:
+    strategy: "sequential"         # Process tables one by one for stability
+    batch_size: 25000             # Default batch size
+    timeout_minutes: 15           # 15 minutes max per sync (larger batches need more time)
+    max_parallel_tables: 1        # Sequential for controlled processing
+    query_timeout_seconds: 90     # 90 seconds for larger batches
+  
+  s3:
+    isolation_prefix: "us_prod_kuaisong/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+  
+  # v1.2.0 CDC Intelligence settings
+  cdc_settings:
+    default_strategy: "timestamp_only"
+    enable_watermark_validation: true
+    enable_schema_validation: true
+    fallback_to_legacy: true      # Maintain compatibility
+
+# Table configurations for all kuaisong tracking tables
+tables:
+  # 1. Unified Tracking Info - ~500K records/day
+  kuaisong.uni_tracking_info:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "update_time"    # UNIX timestamp
+    timestamp_format: "unix"               # Specify UNIX timestamp format
+    cdc_ordering: ["state", "update_time"] # Use composite index order
+    additional_where: "state IS NOT NULL"  # Required for composite index usage
+    
+    description: "Unified tracking information with UNIX timestamp CDC + composite index optimization"
+    target_name: "uni_tracking_info"       # Target table in Redshift
+    
+    processing:
+      batch_size: 20000                    # Optimized batches for better performance
+      enable_parallel_processing: false
+      query_optimization: "use_index"      # Hint to use timestamp index
+      
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 5.0
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+  # 2. Tracking Addon Spath - ~500K records/day  
+  kuaisong.uni_tracking_addon_spath:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "create_at"      # DATETIME format
+    timestamp_format: "datetime"           # Standard MySQL datetime
+    
+    description: "Tracking addon spath data with datetime CDC"
+    target_name: "uni_tracking_addon_spath"
+    
+    processing:
+      batch_size: 20000                    # Optimized batches for better performance
+      enable_parallel_processing: false
+      
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 5.0
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+  # 3. Tracking Spath - ~2M records/day (highest volume)
+  kuaisong.uni_tracking_spath:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "pathTime"       # UNIX timestamp
+    timestamp_format: "unix"               # Specify UNIX timestamp format
+    
+    description: "Tracking spath data - highest volume table"
+    target_name: "uni_tracking_spath"
+    
+    processing:
+      batch_size: 50000                    # Larger batches for highest volume table
+      enable_parallel_processing: false
+      query_timeout_seconds: 90            # Longer timeout for larger batches
+      
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 5.0
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+    performance:
+      memory_limit_mb: 6144               # 6GB for highest volume table (2M records/day)
+      connection_timeout: 300
+      query_timeout: 1800
+      
+  # 4. ECS Order Info - ~500K records/day
+  kuaisong.ecs_order_info:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "add_time"       # UNIX timestamp
+    timestamp_format: "unix"               # Specify UNIX timestamp format
+    
+    description: "ECS order information with UNIX timestamp CDC"
+    target_name: "ecs_order_info"
+    
+    processing:
+      batch_size: 20000                    # Optimized batches for better performance
+      enable_parallel_processing: false
+      
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 5.0
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+  # 5. Order Details - ~71M+ rows total, high incremental volume (HIGHEST PRIORITY)
+  kuaisong.order_details:
+    cdc_strategy: "id_only"                # No timestamp available - use ID-based incremental sync
+    cdc_id_column: "id"                    # AUTO_INCREMENT=71714083 primary key
+    
+    description: "Order details - largest table requiring ID-based incremental sync"
+    target_name: "order_details"
+    
+    processing:
+      batch_size: 100000                   # Larger batches for high volume table
+      enable_parallel_processing: false
+      query_timeout_seconds: 180           # 3 minutes for larger batches
+      
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 10.0            # Higher tolerance for large transactional table
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+    performance:
+      memory_limit_mb: 8192                # 8GB for largest table
+      connection_timeout: 300
+      query_timeout: 3600                  # 1 hour max for very large incremental batches
+
+# Common performance settings for all tables
+default_table_config:
+  backup_strategy: "sequential"
+  watermark_strategy: "automatic"
+  
+  performance:
+    memory_limit_mb: 1024                # 1GB to reduce memory pressure
+    connection_timeout: 30               # 30 second connection timeout
+    query_timeout: 60                    # 60 second query timeout MAX
+    read_timeout: 45                     # 45 second read timeout
+    
+  # Production database protection
+  production_safety:
+    max_query_time_seconds: 60           # Kill long-running queries
+    use_read_uncommitted: true           # Reduce lock contention
+    enable_query_hints: true             # Use index hints where possible
+    
+  monitoring:
+    enable_progress_tracking: true
+    enable_performance_metrics: true
+    alert_on_failures: true

@@ -262,6 +262,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Process table in exact row-based chunks
             chunk_number = 1
             
+            # ACCUMULATION BUFFER: For sparse sequences, accumulate small chunks into larger batches
+            MINIMUM_BATCH_SIZE = 50000  # Don't create S3 files smaller than 50K rows
+            accumulated_data = []
+            accumulated_last_timestamp = last_timestamp
+            accumulated_last_id = last_id
+            
             self.logger.logger.info(
                 "Starting row-based chunking",
                 table_name=table_name,
@@ -340,15 +346,35 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 rows_in_chunk = len(chunk_data)
                 
+                # SPARSE SEQUENCE DETECTION: For ID-only tables, break if we get much less data than requested
+                # This prevents endless loops in tables with large ID gaps (like order_details)
+                if table_config and table_config.get('cdc_strategy') == 'id_only':
+                    if current_chunk_size > 1000 and rows_in_chunk < (current_chunk_size * 0.1):
+                        self.logger.logger.info(
+                            "Sparse ID sequence detected - ending sync (got much less data than requested)",
+                            table_name=table_name,
+                            requested_rows=current_chunk_size,
+                            actual_rows=rows_in_chunk,
+                            efficiency_percent=round((rows_in_chunk / current_chunk_size) * 100, 2),
+                            reason="SPARSE_ID_SEQUENCE_END"
+                        )
+                        break
+                
                 # Safe logging for both timestamp and id_only strategies
                 log_data = {
                     "table_name": table_name,
                     "chunk_size_actual": rows_in_chunk,
                     "chunk_size_requested": current_chunk_size,
-                    "id_range_start": chunk_data[0][id_column],
-                    "id_range_end": chunk_data[-1][id_column],
                     "columns_detected": f"{timestamp_column}, {id_column}"
                 }
+                
+                # Only add ID ranges if ID column exists in data
+                if id_column in chunk_data[0]:
+                    log_data["id_range_start"] = chunk_data[0][id_column]
+                    log_data["id_range_end"] = chunk_data[-1][id_column]
+                else:
+                    log_data["id_column_missing"] = id_column
+                    log_data["available_columns"] = list(chunk_data[0].keys())[:10]  # First 10 columns for debug
                 
                 # Only add timestamp ranges if timestamp column exists in data
                 if timestamp_column in chunk_data[0]:
@@ -362,36 +388,61 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     **log_data
                 )
                 
-                # Process chunk in smaller batches for S3 upload
-                batch_size = self.config.backup.batch_size
-                batch_success_count = 0
+                # ACCUMULATE CHUNKS: Add current chunk to accumulator
+                accumulated_data.extend(chunk_data)
+                accumulated_last_timestamp = chunk_last_timestamp
+                accumulated_last_id = chunk_last_id
                 
-                for i in range(0, rows_in_chunk, batch_size):
-                    batch_data = chunk_data[i:i + batch_size]
-                    batch_id = f"chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
-                    
-                    batch_success = self._process_batch_with_retries(
-                        batch_data, table_name, batch_id, current_timestamp
+                # Process accumulated data when we have enough rows OR this is the last chunk
+                should_process = (
+                    len(accumulated_data) >= MINIMUM_BATCH_SIZE or  # Enough rows
+                    rows_in_chunk < (current_chunk_size * 0.1)      # Sparse sequence detected (small result)
+                )
+                
+                batch_success_count = 0
+                if should_process and accumulated_data:
+                    self.logger.logger.info(
+                        f"Processing accumulated batch with {len(accumulated_data)} rows",
+                        table_name=table_name,
+                        accumulated_chunks=chunk_number,
+                        reason="minimum_size_reached" if len(accumulated_data) >= MINIMUM_BATCH_SIZE else "sparse_sequence_end"
                     )
                     
-                    if not batch_success:
-                        self.logger.logger.error(
-                            f"Failed to process batch in chunk {chunk_number}",
-                            table_name=table_name,
-                            batch_id=batch_id,
-                            batch_size=len(batch_data)
+                    # Process accumulated data in batches for S3 upload
+                    batch_size = self.config.backup.batch_size
+                    for i in range(0, len(accumulated_data), batch_size):
+                        batch_data = accumulated_data[i:i + batch_size]
+                        batch_id = f"accumulated_chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
+                        
+                        batch_success = self._process_batch_with_retries(
+                            batch_data, table_name, batch_id, current_timestamp
                         )
-                        return False
+                        
+                        if not batch_success:
+                            self.logger.logger.error(
+                                f"Failed to process accumulated batch",
+                                table_name=table_name,
+                                batch_id=batch_id,
+                                batch_size=len(batch_data)
+                            )
+                            return False
+                        
+                        batch_success_count += 1
                     
-                    batch_success_count += 1
+                    # Reset accumulator after processing
+                    accumulated_data = []
                 
                 # Update progress
                 total_rows_processed += rows_in_chunk
                 chunk_duration = time.time() - chunk_start_time
                 
                 # Update watermark after successful chunk (absolute progress tracking)
+                # Use accumulated values if we processed data, otherwise use chunk values
+                final_timestamp = accumulated_last_timestamp if batch_success_count > 0 else chunk_last_timestamp
+                final_id = accumulated_last_id if batch_success_count > 0 else chunk_last_id
+                
                 self._update_chunk_watermark_absolute(
-                    table_name, chunk_last_timestamp, chunk_last_id, 
+                    table_name, final_timestamp, final_id, 
                     total_rows_processed  # Use absolute total, not incremental
                 )
                 
@@ -413,6 +464,18 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 last_id = chunk_last_id
                 chunk_number += 1
                 
+                # SPECIAL CASE: For full_sync replace mode
+                # Check if this is a full_sync replace table based on configuration
+                if table_config and table_config.get('cdc_strategy') == 'full_sync' and table_config.get('full_sync_mode') == 'replace':
+                    self.logger.logger.info(
+                        "Full sync replace mode completed - table fully processed",
+                        table_name=table_name,
+                        total_rows_processed=total_rows_processed,
+                        mode="full_sync_replace",
+                        reason="Full sync replace tables process complete table in one iteration"
+                    )
+                    break
+                
                 # Memory management
                 self.memory_manager.force_gc_if_needed(chunk_number)
                 if not self.memory_manager.check_memory_usage(chunk_number):
@@ -422,12 +485,48 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         chunk_number=chunk_number
                     )
             
+            # FINAL ACCUMULATOR FLUSH: Process any remaining accumulated data
+            if accumulated_data:
+                self.logger.logger.info(
+                    f"Processing final accumulated batch with {len(accumulated_data)} rows",
+                    table_name=table_name,
+                    reason="end_of_table"
+                )
+                
+                batch_size = self.config.backup.batch_size
+                for i in range(0, len(accumulated_data), batch_size):
+                    batch_data = accumulated_data[i:i + batch_size]
+                    batch_id = f"final_accumulated_batch_{(i // batch_size) + 1}"
+                    
+                    batch_success = self._process_batch_with_retries(
+                        batch_data, table_name, batch_id, current_timestamp
+                    )
+                    
+                    if not batch_success:
+                        self.logger.logger.error(
+                            f"Failed to process final accumulated batch",
+                            table_name=table_name,
+                            batch_id=batch_id,
+                            batch_size=len(batch_data)
+                        )
+                        return False
+                
+                # Update final watermark with accumulated values
+                self._update_chunk_watermark_absolute(
+                    table_name, accumulated_last_timestamp, accumulated_last_id, 
+                    total_rows_processed
+                )
+            
             # Final watermark update with completion status (additive session total)
-            # Handle both datetime objects and ISO format strings
+            # Handle datetime objects, ISO format strings, and UNIX timestamps
             if isinstance(last_timestamp, datetime):
                 max_data_timestamp = last_timestamp
+            elif isinstance(last_timestamp, (int, float)):
+                # Handle UNIX timestamp (integer)
+                max_data_timestamp = datetime.fromtimestamp(last_timestamp)
             else:
-                max_data_timestamp = datetime.fromisoformat(last_timestamp)
+                # Handle ISO format string
+                max_data_timestamp = datetime.fromisoformat(str(last_timestamp))
             
             self._set_final_watermark_with_session_control(
                 table_name=table_name,
@@ -557,8 +656,13 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if candidate in columns:
                 return candidate
                 
-        # Fallback to default if none found (should not happen after validation)
-        return 'ID'
+        # Fallback to first column if no standard ID column found
+        if columns:
+            logger.warning(f"No standard ID column found for {table_name}, using first column: {columns[0]}")
+            return columns[0]
+        else:
+            logger.error(f"No columns found for table {table_name}")
+            return 'id'  # Last resort fallback
     
     def _get_configured_timestamp_column(self, table_name: str) -> str:
         """
@@ -757,8 +861,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Extract MySQL table name for query building
             mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            # Get table schema for UNIX timestamp detection
+            table_schema = self._get_table_schema(cursor, table_name)
+            
             query = self.cdc_integration.build_incremental_query(
-                mysql_table_name, watermark, chunk_size, table_config
+                mysql_table_name, watermark, chunk_size, table_config, table_schema
             )
             
             self.logger.logger.info(
@@ -788,26 +896,48 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if chunk_data:
                 first_row = chunk_data[0]
                 last_row = chunk_data[-1]
+                
+                # CRITICAL FIX: Extract actual LIMIT used from query (not requested chunk_size)
+                # The CDC system may override the requested chunk_size for full_sync replace mode
+                import re
+                limit_match = re.search(r'LIMIT\s+(\d+)', query, re.IGNORECASE)
+                actual_limit_used = int(limit_match.group(1)) if limit_match else chunk_size
+                
                 self.logger.logger.info(
                     "Query execution completed - DETAILED DEBUG",
                     table_name=table_name,
                     rows_found=len(chunk_data),
                     chunk_size_requested=chunk_size,
-                    rows_vs_limit_ratio=f"{len(chunk_data)}/{chunk_size}",
+                    actual_limit_used=actual_limit_used,
+                    rows_vs_limit_ratio=f"{len(chunk_data)}/{actual_limit_used}",
                     first_row_id=first_row.get(id_column),
                     last_row_id=last_row.get(id_column),
                     id_column_used=id_column,
                     query_executed=query.replace('\n', ' ').strip()
                 )
                 
-                # Critical check: Verify LIMIT was respected
-                if len(chunk_data) > chunk_size:
+                # Critical check: Verify LIMIT was respected (use actual limit from query)
+                # EXCEPTION: Full sync replace mode uses very high LIMIT (999999999)
+                # and expects to get all table rows in one chunk
+                is_full_sync_large_limit = actual_limit_used >= 999_999_999
+                
+                if len(chunk_data) > actual_limit_used and not is_full_sync_large_limit:
                     self.logger.logger.error(
                         "CRITICAL BUG: Query returned more rows than LIMIT",
                         table_name=table_name,
                         requested_limit=chunk_size,
+                        actual_limit_used=actual_limit_used,
                         actual_rows=len(chunk_data),
-                        excess_rows=len(chunk_data) - chunk_size
+                        excess_rows=len(chunk_data) - actual_limit_used
+                    )
+                elif is_full_sync_large_limit and len(chunk_data) < actual_limit_used:
+                    # For full sync replace, if we got less than LIMIT, we have all data
+                    self.logger.logger.info(
+                        "Full sync replace: received complete table",
+                        table_name=table_name,
+                        total_rows=len(chunk_data),
+                        limit_used=actual_limit_used,
+                        mode="full_table_complete"
                     )
             else:
                 self.logger.logger.info(
@@ -1226,7 +1356,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 last_processed_id=last_processed_id,
                 rows_extracted=session_rows_processed,
                 status=status,
-                backup_strategy='row_based',
+                backup_strategy=getattr(self, 'strategy_name', 'sequential'),
                 s3_file_count=actual_s3_files,
                 error_message=error_message
             )
@@ -1272,12 +1402,39 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Try exact match first
             if table_name in tables:
-                return tables.get(table_name)
+                config = tables.get(table_name)
+                self.logger.logger.info(f"Found exact table config for {table_name}", extra={
+                    "table": table_name,
+                    "config_keys": list(config.keys()) if config else [],
+                    "has_additional_where": bool(config.get('additional_where') if config else False)
+                })
+                return config
             
             # Extract unscoped table name for scoped lookups (US_DW_UNIDW_SSH:unidw.table -> unidw.table)
             unscoped_name = self._extract_mysql_table_name(table_name)
             if unscoped_name in tables:
-                return tables.get(unscoped_name)
+                config = tables.get(unscoped_name)
+                self.logger.logger.info(f"Found unscoped table config for {table_name} -> {unscoped_name}", extra={
+                    "table": table_name,
+                    "unscoped_name": unscoped_name,
+                    "config_keys": list(config.keys()) if config else [],
+                    "has_additional_where": bool(config.get('additional_where') if config else False),
+                    "additional_where_value": config.get('additional_where') if config else None
+                })
+                return config
+            
+            # Log available table names for debugging
+            self.logger.logger.warning(f"No table config found for {table_name}", extra={
+                "table": table_name,
+                "unscoped_name": unscoped_name,
+                "available_tables": list(tables.keys())[:10]  # First 10 for brevity
+            })
+        else:
+            self.logger.logger.warning(f"No pipeline config available for {table_name}", extra={
+                "table": table_name,
+                "has_pipeline_config": hasattr(self, 'pipeline_config'),
+                "pipeline_config_is_truthy": bool(getattr(self, 'pipeline_config', None))
+            })
         
         return None
     
