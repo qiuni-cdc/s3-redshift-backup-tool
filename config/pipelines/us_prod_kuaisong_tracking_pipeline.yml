@@ -160,24 +160,32 @@ tables:
       connection_timeout: 300
       query_timeout: 3600                  # 1 hour max for very large incremental batches
 
-# Common performance settings for all tables
-default_table_config:
-  backup_strategy: "sequential"
-  watermark_strategy: "automatic"
-  
-  performance:
-    memory_limit_mb: 1024                # 1GB to reduce memory pressure
-    connection_timeout: 30               # 30 second connection timeout
-    query_timeout: 60                    # 60 second query timeout MAX
-    read_timeout: 45                     # 45 second read timeout
     
-  # Production database protection
-  production_safety:
-    max_query_time_seconds: 60           # Kill long-running queries
-    use_read_uncommitted: true           # Reduce lock contention
-    enable_query_hints: true             # Use index hints where possible
+  # 6. Uni Prealert Order - ~13.4M total, ID-based CDC
+  kuaisong.uni_prealert_order:
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"                    # AUTO_INCREMENT primary key
     
-  monitoring:
-    enable_progress_tracking: true
-    enable_performance_metrics: true
-    alert_on_failures: true
+    description: "Prealert orders - high volume table with ID-based incremental sync"
+    target_name: "uni_prealert_order"      # Target table in Redshift
+    
+    processing:
+      batch_size: 50000                    # Larger batches for efficiency
+      enable_parallel_processing: false
+      
+    validation:
+      enable_schema_validation: true
+      max_null_percentage: 15.0            # Allow nulls in optional fields
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+    performance:
+      memory_limit_mb: 4096                # 4GB for medium-large table
+
+monitoring:
+  enable_progress_tracking: true
+  enable_performance_metrics: true
+  alert_on_failures: true

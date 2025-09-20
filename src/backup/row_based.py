@@ -262,8 +262,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Process table in exact row-based chunks
             chunk_number = 1
             
-            # ACCUMULATION BUFFER: For sparse sequences, accumulate small chunks into larger batches
-            MINIMUM_BATCH_SIZE = 50000  # Don't create S3 files smaller than 50K rows
+            # Simple approach: process chunks as they come (no complex accumulation)
             accumulated_data = []
             accumulated_last_timestamp = last_timestamp
             accumulated_last_id = last_id
@@ -346,19 +345,14 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 rows_in_chunk = len(chunk_data)
                 
-                # SPARSE SEQUENCE DETECTION: For ID-only tables, break if we get much less data than requested
-                # This prevents endless loops in tables with large ID gaps (like order_details)
-                if table_config and table_config.get('cdc_strategy') == 'id_only':
-                    if current_chunk_size > 1000 and rows_in_chunk < (current_chunk_size * 0.1):
-                        self.logger.logger.info(
-                            "Sparse ID sequence detected - ending sync (got much less data than requested)",
-                            table_name=table_name,
-                            requested_rows=current_chunk_size,
-                            actual_rows=rows_in_chunk,
-                            efficiency_percent=round((rows_in_chunk / current_chunk_size) * 100, 2),
-                            reason="SPARSE_ID_SEQUENCE_END"
-                        )
-                        break
+                # Simple end condition: no more data means we're done
+                if rows_in_chunk == 0:
+                    self.logger.logger.info(
+                        "No more data - ending sync",
+                        table_name=table_name,
+                        reason="NO_MORE_DATA"
+                    )
+                    break
                 
                 # Safe logging for both timestamp and id_only strategies
                 log_data = {
@@ -393,26 +387,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 accumulated_last_timestamp = chunk_last_timestamp
                 accumulated_last_id = chunk_last_id
                 
-                # Process accumulated data when we have enough rows OR this is the last chunk
-                should_process = (
-                    len(accumulated_data) >= MINIMUM_BATCH_SIZE or  # Enough rows
-                    rows_in_chunk < (current_chunk_size * 0.1)      # Sparse sequence detected (small result)
-                )
-                
+                # Simple approach: process data immediately if we have any
                 batch_success_count = 0
-                if should_process and accumulated_data:
+                if accumulated_data:
                     self.logger.logger.info(
-                        f"Processing accumulated batch with {len(accumulated_data)} rows",
+                        f"Processing batch with {len(accumulated_data)} rows",
                         table_name=table_name,
-                        accumulated_chunks=chunk_number,
-                        reason="minimum_size_reached" if len(accumulated_data) >= MINIMUM_BATCH_SIZE else "sparse_sequence_end"
+                        chunk_number=chunk_number
                     )
                     
-                    # Process accumulated data in batches for S3 upload
+                    # Process data in batches for S3 upload
                     batch_size = self.config.backup.batch_size
                     for i in range(0, len(accumulated_data), batch_size):
                         batch_data = accumulated_data[i:i + batch_size]
-                        batch_id = f"accumulated_chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
+                        batch_id = f"chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
                         
                         batch_success = self._process_batch_with_retries(
                             batch_data, table_name, batch_id, current_timestamp
@@ -429,11 +417,15 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         
                         batch_success_count += 1
                     
+                    # Count actually processed rows before reset
+                    if batch_success_count > 0:
+                        total_rows_processed += len(accumulated_data)
+                    
                     # Reset accumulator after processing
                     accumulated_data = []
-                
-                # Update progress
-                total_rows_processed += rows_in_chunk
+                else:
+                    # No processing happened, don't count these rows yet
+                    pass
                 chunk_duration = time.time() - chunk_start_time
                 
                 # Update watermark after successful chunk (absolute progress tracking)
@@ -510,6 +502,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                             batch_size=len(batch_data)
                         )
                         return False
+                
+                # Count final processed rows
+                total_rows_processed += len(accumulated_data)
                 
                 # Update final watermark with accumulated values
                 self._update_chunk_watermark_absolute(
@@ -981,6 +976,13 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             chunk_last_timestamp = watermark_data.last_timestamp or safe_last_timestamp
             chunk_last_id = watermark_data.last_id or safe_last_id
             
+            # BUGFIX: Always use actual last ID from data to prevent arithmetic errors
+            if chunk_data:
+                id_column = self._get_configured_id_column(table_name)
+                actual_last_id = chunk_data[-1].get(id_column)
+                if actual_last_id is not None:
+                    chunk_last_id = actual_last_id
+            
             self.logger.logger.debug(
                 "Retrieved row-based chunk",
                 table_name=table_name,
@@ -1178,8 +1180,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if last_processed_id is not None:
                 watermark_data['last_processed_id'] = last_processed_id
             
-            # CRITICAL: Set absolute row count, not additive
-            watermark_data['mysql_rows_extracted'] = total_rows_processed
+            # BUGFIX: Don't overwrite cumulative total with session total
+            # Keep existing cumulative total instead of overwriting with session total
+            if current_watermark and hasattr(current_watermark, 'mysql_rows_extracted'):
+                watermark_data['mysql_rows_extracted'] = current_watermark.mysql_rows_extracted + total_rows_processed
+            else:
+                watermark_data['mysql_rows_extracted'] = total_rows_processed
             
             if error_message:
                 watermark_data['last_error'] = error_message
@@ -1282,8 +1288,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     timestamp=watermark_data.get('last_mysql_data_timestamp'),
                     id=watermark_data.get('last_processed_id'),
                     status=watermark_data.get('mysql_status', 'success'),
-                    error=watermark_data.get('last_error'),
-                    rows_extracted=total_rows_processed  # Track incremental progress
+                    error=watermark_data.get('last_error')
+                    # BUGFIX: Don't overwrite cumulative total with session total
+                    # rows_extracted=total_rows_processed  # ❌ REMOVED: Session total overwrites cumulative
                 )
                 success = True
             except Exception as e:
@@ -1348,13 +1355,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 s3_files_tracked=True
             )
             
-            # Use simplified watermark update with absolute count
+            # BUGFIX: Calculate cumulative total instead of overwriting with session total
+            current_watermark = self.watermark_manager.get_table_watermark(table_name)
+            if current_watermark and hasattr(current_watermark, 'mysql_rows_extracted') and current_watermark.mysql_rows_extracted:
+                cumulative_rows = current_watermark.mysql_rows_extracted + session_rows_processed
+            else:
+                cumulative_rows = session_rows_processed
+                
+            # Use simplified watermark update with cumulative count
             success = self.watermark_manager.update_mysql_watermark(
                 table_name=table_name,
                 extraction_time=extraction_time,
                 max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_processed_id,
-                rows_extracted=session_rows_processed,
+                rows_extracted=cumulative_rows,  # Use cumulative instead of session
                 status=status,
                 backup_strategy=getattr(self, 'strategy_name', 'sequential'),
                 s3_file_count=actual_s3_files,
