@@ -182,8 +182,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 )
                 return False
             
-            # Get current watermark for resume capability
-            watermark = self.watermark_manager.get_table_watermark(table_name)
+            # BUGFIX: Get current watermark using UnifiedWatermarkManager
+            watermark_data = self.unified_watermark.get_watermark(table_name)
+            mysql_state = watermark_data.get('mysql_state', {})
+            
+            # Create compatibility object for existing code
+            class WatermarkCompat:
+                def __init__(self, mysql_state):
+                    self.last_mysql_data_timestamp = mysql_state.get('last_timestamp')
+                    self.last_processed_id = mysql_state.get('last_id')
+                    self.backup_strategy = 'hybrid'  # Default for compatibility
+                    self.mysql_status = mysql_state.get('status', 'pending')
+                    self.mysql_rows_extracted = mysql_state.get('total_rows', 0)
+            
+            watermark = WatermarkCompat(mysql_state) if mysql_state.get('last_id') or mysql_state.get('last_timestamp') else None
             
             # DEBUG: Log watermark details to identify MAX query bug
             if watermark:
@@ -267,6 +279,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             accumulated_last_timestamp = last_timestamp
             accumulated_last_id = last_id
             
+            # WATERMARK CEILING: Capture max ID at sync start to prevent infinite loops
+            # This protects against continuous data injection during sync
+            watermark_ceiling = self._get_current_max_id(cursor, table_name, id_column)
+            
             self.logger.logger.info(
                 "Starting row-based chunking",
                 table_name=table_name,
@@ -274,7 +290,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 max_total_rows=max_total_rows,
                 max_chunks_calculated=max_total_rows // effective_chunk_size if max_total_rows else None,
                 resume_from_timestamp=last_timestamp,
-                resume_from_id=last_id
+                resume_from_id=last_id,
+                watermark_ceiling=watermark_ceiling,
+                protection="continuous_injection_safety"
             )
             
             while True:
@@ -353,6 +371,34 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         reason="NO_MORE_DATA"
                     )
                     break
+                
+                # QUICK FIX: Sparse sequence detection
+                # If chunk efficiency is very low, this indicates sparse ID sequences
+                SPARSE_EFFICIENCY_THRESHOLD = 0.10  # 10%
+                MIN_CHUNK_SIZE_FOR_SPARSE_CHECK = 1000
+                
+                if (current_chunk_size > MIN_CHUNK_SIZE_FOR_SPARSE_CHECK and 
+                    rows_in_chunk < (current_chunk_size * SPARSE_EFFICIENCY_THRESHOLD)):
+                    
+                    efficiency_percent = round((rows_in_chunk / current_chunk_size) * 100, 1)
+                    self.logger.logger.info(
+                        "Sparse ID sequence detected - ending sync for efficiency",
+                        table_name=table_name,
+                        efficiency_percent=efficiency_percent,
+                        rows_found=rows_in_chunk,
+                        chunk_size_requested=current_chunk_size,
+                        sparse_threshold_percent=10,
+                        optimization="quick_fix_early_termination",
+                        recommendation="Consider implementing row accumulation buffer for better performance"
+                    )
+                    
+                    # Process current chunk normally, then break
+                    # This ensures we don't lose the data we already retrieved
+                    process_current_chunk = True
+                    break_after_chunk = True
+                else:
+                    process_current_chunk = True
+                    break_after_chunk = False
                 
                 # Safe logging for both timestamp and id_only strategies
                 log_data = {
@@ -455,6 +501,30 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 last_timestamp = chunk_last_timestamp
                 last_id = chunk_last_id
                 chunk_number += 1
+                
+                # WATERMARK CEILING: Check if we've reached the ceiling to prevent infinite sync
+                if watermark_ceiling and chunk_last_id and chunk_last_id >= watermark_ceiling:
+                    self.logger.logger.info(
+                        "Reached watermark ceiling - sync complete",
+                        table_name=table_name,
+                        watermark_ceiling=watermark_ceiling,
+                        last_processed_id=chunk_last_id,
+                        chunks_processed=chunk_number - 1,
+                        total_rows_processed=total_rows_processed,
+                        protection="continuous_injection_prevention"
+                    )
+                    break
+                
+                # QUICK FIX: Break after processing current chunk if sparse sequence detected
+                if break_after_chunk:
+                    self.logger.logger.info(
+                        "Breaking after processing sparse chunk - optimization applied",
+                        table_name=table_name,
+                        chunks_processed=chunk_number - 1,
+                        total_rows_processed=total_rows_processed,
+                        optimization="sparse_sequence_early_termination"
+                    )
+                    break
                 
                 # SPECIAL CASE: For full_sync replace mode
                 # Check if this is a full_sync replace table based on configuration
@@ -658,6 +728,55 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         else:
             logger.error(f"No columns found for table {table_name}")
             return 'id'  # Last resort fallback
+    
+    def _get_current_max_id(self, cursor, table_name: str, id_column: str) -> Optional[int]:
+        """
+        Get the current maximum ID in the table to set watermark ceiling.
+        This prevents infinite sync when new data is continuously injected.
+        
+        Args:
+            cursor: Database cursor
+            table_name: Name of the table (may be scoped for v1.2.0)
+            id_column: Name of the ID column
+            
+        Returns:
+            Maximum ID in the table, or None if error
+        """
+        try:
+            # Extract MySQL table name from potentially scoped name
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            # Query for max ID
+            max_id_query = f"SELECT MAX({id_column}) FROM {mysql_table_name}"
+            cursor.execute(max_id_query)
+            result = cursor.fetchone()
+            
+            if result and result[0] is not None:
+                max_id = int(result[0])
+                self.logger.logger.info(
+                    "Captured current max ID for watermark ceiling",
+                    table_name=table_name,
+                    id_column=id_column,
+                    max_id=max_id,
+                    query=max_id_query
+                )
+                return max_id
+            else:
+                self.logger.logger.warning(
+                    "No max ID found in table - table may be empty",
+                    table_name=table_name,
+                    id_column=id_column
+                )
+                return None
+                
+        except Exception as e:
+            self.logger.logger.error(
+                "Failed to get current max ID for watermark ceiling",
+                table_name=table_name,
+                id_column=id_column,
+                error=str(e)
+            )
+            return None
     
     def _get_configured_timestamp_column(self, table_name: str) -> str:
         """
@@ -1197,17 +1316,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 if hasattr(current_watermark, 's3_file_count'):
                     watermark_data['s3_file_count'] = current_watermark.s3_file_count
             
-            # Use v2.0 direct API for better performance
+            # BUGFIX: Use UnifiedWatermarkManager for reliable persistence
             try:
-                self.watermark_manager.simple_manager.update_mysql_state(
+                success = self.unified_watermark.update_watermark(
                     table_name=table_name,
-                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
-                    id=watermark_data.get('last_processed_id'),
+                    last_id=watermark_data.get('last_processed_id'),
+                    last_timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    rows_processed=total_rows_processed,
                     status=watermark_data.get('mysql_status', 'success'),
-                    error=watermark_data.get('last_error'),
-                    rows_extracted=total_rows_processed
+                    error=watermark_data.get('last_error')
                 )
-                success = True
             except Exception as e:
                 self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
                 success = False
@@ -1281,18 +1399,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 'last_mysql_extraction_time': datetime.now().isoformat()
             }
             
-            # Use v2.0 direct API for better performance
+            # BUGFIX: Use UnifiedWatermarkManager for reliable chunk updates
             try:
-                self.watermark_manager.simple_manager.update_mysql_state(
+                success = self.unified_watermark.update_watermark(
                     table_name=table_name,
-                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
-                    id=watermark_data.get('last_processed_id'),
-                    status=watermark_data.get('mysql_status', 'success'),
+                    last_id=watermark_data.get('last_processed_id'),
+                    last_timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    rows_processed=0,  # Don't add rows in chunk updates to prevent double-counting
+                    status=watermark_data.get('mysql_status', 'in_progress'),
                     error=watermark_data.get('last_error')
-                    # BUGFIX: Don't overwrite cumulative total with session total
-                    # rows_extracted=total_rows_processed  # ❌ REMOVED: Session total overwrites cumulative
                 )
-                success = True
             except Exception as e:
                 self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
                 success = False

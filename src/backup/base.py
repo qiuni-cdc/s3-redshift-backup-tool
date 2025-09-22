@@ -20,6 +20,7 @@ from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
 from src.core.s3_manager import S3Manager
 from src.core.watermark_adapter import create_watermark_manager
+from src.core.unified_watermark_manager import UnifiedWatermarkManager
 from src.utils.validation import validate_data, ValidationResult
 from src.utils.exceptions import (
     BackupError, 
@@ -338,6 +339,10 @@ class BaseBackupStrategy(ABC):
         self.connection_manager = ConnectionManager(config)
         self.s3_manager = S3Manager(config)
         self.watermark_manager = create_watermark_manager(config.to_dict())
+        
+        # BUGFIX: Add UnifiedWatermarkManager to fix persistence issues
+        self.unified_watermark = UnifiedWatermarkManager(config.to_dict())
+        
         self.logger = get_backup_logger()
         self.metrics = BackupMetrics()
         
@@ -361,9 +366,9 @@ class BaseBackupStrategy(ABC):
         self.s3_client = None
         self._initialize_components()
         
-        # Initialize flexible schema manager for any table
+        # Initialize flexible schema manager for any table with connection registry
         from src.core.flexible_schema_manager import FlexibleSchemaManager
-        self.flexible_schema_manager = FlexibleSchemaManager(self.connection_manager)
+        self.flexible_schema_manager = FlexibleSchemaManager(self.connection_manager, connection_registry=self.connection_registry)
         
         # Track PoC mode usage (renamed from Gemini)
         self._poc_mode_enabled = True
@@ -1150,12 +1155,14 @@ class BaseBackupStrategy(ABC):
                     error=str(e)
                 )
                 
-                # Fallback to basic upload without PoC features
-                table = pa.Table.from_pandas(df)
+                # Fallback to PoC-compatible upload (same method that works for parcel detail)
                 s3_key = self.s3_manager.generate_s3_key(
                     table_name, current_timestamp, batch_id
                 )
-                success = self.s3_manager.upload_parquet(table, s3_key)
+                # Use the proven PoC upload method instead of complex parquet generation
+                success = self.s3_manager.upload_dataframe(
+                    df, s3_key, use_schema_alignment=False, compression="snappy"
+                )
                 
                 if success:
                     self._gemini_usage_stats['batches_with_fallback'] += 1
