@@ -1,5 +1,14 @@
 # S3-Redshift Backup Tool - CLI Quick Reference Card
 
+## 🆕 **Latest Features (September 2025)**
+
+### ⚡ **Performance Optimizations** (Automatic)
+- **Sparse Sequence Detection**: 96% query reduction for sparse ID tables
+- **Infinite Sync Prevention**: Watermark ceiling protection 
+- **Smart Early Termination**: Auto-stops inefficient operations
+
+*No configuration needed - optimizations work automatically!*
+
 ## Command Structure Overview
 
 ```
@@ -7,11 +16,15 @@ python -m src.cli.main <command> [subcommand] [options]
 
 Main Commands:
 ├── sync         # Data synchronization (has subcommands)
+├── cdc          # CDC Strategy Engine (v1.2.0)
 ├── watermark    # Watermark management  
 ├── watermark-count  # Row count management
 ├── s3clean      # S3 file cleanup
 ├── status       # System status check
+├── config       # Configuration management (v1.2.0)
+├── connections  # Connection management (v1.2.0)  
 ├── column-mappings  # Column mapping management
+├── validate-cdc # CDC validation (v1.2.0)
 ├── backup       # Legacy backup command (v1.0.0)
 └── info         # Strategy information
 ```
@@ -47,6 +60,12 @@ python -m src.cli.main sync pipeline -p pipeline_name -t table --redshift-only
 python -m src.cli.main sync pipeline -p pipeline_name -t table --parallel
 python -m src.cli.main sync pipeline -p pipeline_name -t table --limit 10000
 python -m src.cli.main sync pipeline -p pipeline_name -t table --max-chunks 5
+
+# v1.2.0+ JSON output for automation
+python -m src.cli.main sync pipeline -p pipeline_name -t table --json-output results.json
+
+# v1.2.0+ S3 completion markers for Airflow
+python -m src.cli.main sync pipeline -p pipeline_name -t table --s3-completion-bucket completion-bucket
 ```
 
 ### Connection-Based Sync (Ad-hoc)
@@ -87,6 +106,54 @@ python -m src.cli.main watermark-count validate-counts -t schema.table
 # Fix row counts
 python -m src.cli.main watermark-count set-count -t table --count 3000000 --mode absolute
 python -m src.cli.main watermark-count set-count -t table --count 500000 --mode additive
+```
+
+## 🔧 CDC Strategy Commands (v1.2.0)
+
+```bash
+# List supported CDC strategies
+python -m src.cli.main cdc strategies
+
+# Validate CDC configuration for table
+python -m src.cli.main cdc validate -t schema.table
+
+# Validate entire pipeline CDC configuration  
+python -m src.cli.main cdc validate-pipeline -p pipeline_name
+
+# Test CDC strategy with sample data
+python -m src.cli.main cdc test-strategy -t schema.table --strategy id_only
+
+# Generate CDC configuration examples
+python -m src.cli.main cdc examples
+
+# Migrate v1.1.0 pipeline to v1.2.0
+python -m src.cli.main cdc migrate -p old_pipeline_name
+```
+
+## 🛠️ Configuration Management (v1.2.0)
+
+```bash
+# List available pipelines
+python -m src.cli.main config list-pipelines
+
+# Show pipeline configuration
+python -m src.cli.main config show-pipeline -p pipeline_name
+
+# Validate pipeline configuration
+python -m src.cli.main config validate-pipeline -p pipeline_name
+```
+
+## 🔗 Connection Management (v1.2.0)
+
+```bash
+# List available connections
+python -m src.cli.main connections list
+
+# Test specific connection
+python -m src.cli.main connections test connection_name
+
+# Show connection details
+python -m src.cli.main connections show connection_name
 ```
 
 ## 🧹 S3 Cleanup Commands
@@ -204,7 +271,33 @@ python -m src.cli.main s3clean clean -t settlement.orders --older-than 7d
 
 - **v1.0.0**: Direct sync syntax (`sync -t table`)
 - **v1.1.0+**: Pipeline/connection subcommands (`sync pipeline -p name -t table`)
-- **v1.2.0+**: CDC strategies, column mappings, enhanced watermarks
+- **v1.2.0+**: CDC strategies, column mappings, enhanced watermarks, JSON output, S3 completion markers
+
+## 🚀 Performance Features (September 2025)
+
+### **Automatic Optimizations** ⭐ No configuration needed
+- **Sparse Sequence Detection**: Logs show `"Sparse ID sequence detected"` when triggered
+- **Watermark Ceiling Protection**: Logs show `"Reached watermark ceiling"` when active
+- **Smart Early Termination**: Automatically stops inefficient operations
+
+### **Monitoring Performance**
+```bash
+# Watch for optimization messages in logs
+tail -f logs/backup.log | grep -E "Sparse|ceiling|efficiency"
+
+# Check optimization effectiveness
+grep "optimization.*applied" logs/backup.log
+```
+
+### **Key Log Messages**
+```json
+{"event": "Sparse ID sequence detected - ending sync for efficiency",
+ "efficiency_percent": 3.2, "optimization": "sparse_sequence_early_termination"}
+
+{"event": "Reached watermark ceiling - sync complete", 
+ "protection": "continuous_injection_prevention"}
+```
 
 ---
-*Use `--help` with any command for detailed options*
+*Use `--help` with any command for detailed options*  
+*Updated: September 22, 2025 - Includes latest performance optimizations*
