@@ -32,6 +32,8 @@ class TableConfig:
     processing: Dict[str, Any] = field(default_factory=dict)
     validation: Dict[str, Any] = field(default_factory=dict)
     depends_on: List[str] = field(default_factory=list)
+    additional_where: Optional[str] = None  # NEW: Additional WHERE clause for index optimization
+    cdc_ordering: Optional[List[str]] = None  # NEW: Custom ordering columns for index optimization
     
     def __post_init__(self):
         """Post-initialization validation and defaults"""
@@ -592,7 +594,9 @@ class ConfigurationManager:
                     full_sync_mode=merged_config.get('full_sync_mode', 'append'),
                     processing=merged_config.get('processing', {}),
                     validation=merged_config.get('validation', {}),
-                    depends_on=merged_config.get('depends_on', [])
+                    depends_on=merged_config.get('depends_on', []),
+                    additional_where=merged_config.get('additional_where'),  # NEW: Index optimization
+                    cdc_ordering=merged_config.get('cdc_ordering')  # NEW: Custom ordering
                 )
             except Exception as e:
                 logger.error(f"Failed to create table configuration for {table_name}: {e}")
@@ -663,7 +667,9 @@ class ConfigurationManager:
             full_sync_mode=config.get('full_sync_mode', 'append'),
             processing=config.get('processing', {}),
             validation=config.get('validation', {}),
-            depends_on=config.get('depends_on', [])
+            depends_on=config.get('depends_on', []),
+            additional_where=config.get('additional_where'),  # NEW: Index optimization
+            cdc_ordering=config.get('cdc_ordering')  # NEW: Custom ordering
         )
         
         pipeline.tables[table_name] = table_obj

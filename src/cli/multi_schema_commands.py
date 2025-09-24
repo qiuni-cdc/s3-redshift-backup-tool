@@ -1065,8 +1065,10 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     from src.core.watermark_adapter import create_watermark_manager
                     from src.core.cdc_configuration_manager import CDCConfigurationManager
                     
-                    # Use the watermark v2.0 system for Redshift loading
-                    redshift_loader = GeminiRedshiftLoader(config)
+                    # Use the watermark v2.0 system for Redshift loading with shared connection registry
+                    # Pass the connection registry from backup to ensure SSH tunnels are reused
+                    connection_registry = getattr(backup_strategy, 'connection_registry', None)
+                    redshift_loader = GeminiRedshiftLoader(config, connection_registry=connection_registry)
                     watermark_manager = create_watermark_manager(config.to_dict())
                     
                     # Create CDC strategy for full_sync replace mode support

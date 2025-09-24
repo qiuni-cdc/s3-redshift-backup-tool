@@ -88,7 +88,18 @@ class DataValidator:
             # Initialize config, connection manager and schema manager
             config = AppConfig()
             connection_manager = ConnectionManager(config)
-            schema_manager = FlexibleSchemaManager(connection_manager)
+            
+            # Check if this is a scoped table name and we need the connection registry
+            connection_registry = None
+            if ':' in table_name:
+                try:
+                    from src.core.connection_registry import ConnectionRegistry
+                    connection_registry = ConnectionRegistry()
+                    logger.debug(f"Using connection registry for scoped table: {table_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to load connection registry: {e}")
+            
+            schema_manager = FlexibleSchemaManager(connection_manager, connection_registry=connection_registry)
             pyarrow_schema, redshift_ddl = schema_manager.get_table_schema(table_name)
             
             if pyarrow_schema:

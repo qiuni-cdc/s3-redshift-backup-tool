@@ -34,10 +34,19 @@ class GeminiRedshiftLoader:
     4. Integration with table watermark system
     """
     
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, connection_registry=None):
         self.config = config
         self.connection_manager = ConnectionManager(config)
-        self.schema_manager = FlexibleSchemaManager(self.connection_manager)
+        
+        # Use provided connection registry (with active SSH tunnels) or create new one
+        if connection_registry is None:
+            try:
+                from src.core.connection_registry import ConnectionRegistry
+                connection_registry = ConnectionRegistry()
+            except Exception as e:
+                logger.warning(f"Failed to load connection registry: {e}")
+        
+        self.schema_manager = FlexibleSchemaManager(self.connection_manager, connection_registry=connection_registry)
         self.watermark_manager = create_watermark_manager(config.to_dict())
         self.column_mapper = ColumnMapper()
         self.logger = logger

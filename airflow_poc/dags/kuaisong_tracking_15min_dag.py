@@ -1,7 +1,7 @@
 """
 Kuaisong Tracking Tables 15-Minute Sync DAG
-Syncs 5 high-volume tracking tables every 15 minutes without historical data
-Includes order_details (71M+ rows) with ID-only CDC strategy
+Syncs 6 high-volume tracking tables every 15 minutes without historical data
+Includes order_details (71M+ rows) with ID-only CDC and uni_prealert_order (13.4M+ rows) with timestamp CDC
 """
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -23,7 +23,8 @@ TABLES = [
     {"name": "kuaisong.uni_tracking_addon_spath", "expected_volume": 500000, "batch_limit": 20000},
     {"name": "kuaisong.uni_tracking_spath", "expected_volume": 2000000, "batch_limit": 50000},  # Highest volume = largest batch
     {"name": "kuaisong.ecs_order_info", "expected_volume": 500000, "batch_limit": 20000},
-    {"name": "kuaisong.order_details", "expected_volume": 1000000, "batch_limit": 100000}  # Largest table (71M+ rows) - ID-only CDC
+    {"name": "kuaisong.order_details", "expected_volume": 1000000, "batch_limit": 100000},  # Largest table (71M+ rows) - ID-only CDC
+    {"name": "kuaisong.uni_prealert_order", "expected_volume": 200000, "batch_limit": 50000}  # 13.4M rows - timestamp CDC with created_at
 ]
 
 default_args = {
@@ -40,7 +41,7 @@ default_args = {
 dag = DAG(
     'kuaisong_tracking_15min_sync',
     default_args=default_args,
-    description='Sync 5 kuaisong tracking tables every 15 minutes - includes order_details (ID-only CDC)',
+    description='Sync 6 kuaisong tracking tables every 15 minutes - includes order_details (ID-only) and uni_prealert_order (timestamp CDC)',
     schedule_interval='*/15 * * * *',  # Every 15 minutes
     max_active_runs=1,  # Only one instance at a time
     catchup=False,      # Don't run historical

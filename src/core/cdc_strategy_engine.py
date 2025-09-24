@@ -114,6 +114,8 @@ class CDCConfig:
     ordering_columns: Optional[List[str]] = None
     custom_query: Optional[str] = None
     batch_size: int = 50000
+    timestamp_format: Optional[str] = None  # "datetime", "unix", "auto"
+    additional_where: Optional[str] = None  # NEW: Additional WHERE clause snippet
     metadata: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
@@ -150,7 +152,7 @@ class CDCStrategy(ABC):
         self.strategy_name = config.strategy.value
         
     @abstractmethod
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
         """Build SQL query for incremental data extraction"""
         pass
     
@@ -183,7 +185,7 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
     Maintains compatibility with existing 'updated_at' based systems.
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
         """Build timestamp-based incremental query"""
         # SECURITY: Validate table name and column names
         if not _validate_sql_identifier(table_name):
@@ -217,7 +219,44 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
         elif last_timestamp:
             # SECURITY: Sanitize timestamp value
             safe_timestamp = _sanitize_sql_value(last_timestamp)
-            where_clause = f"WHERE {timestamp_col} > {safe_timestamp}"
+            
+            # Determine if this is a UNIX timestamp column
+            # Check both configuration and column type for comprehensive detection
+            is_unix_timestamp = False
+            col_type = ''
+            
+            # Method 1: Check timestamp_format configuration (explicit)
+            if self.config.timestamp_format == 'unix':
+                is_unix_timestamp = True
+                logger.info(f"Using UNIX timestamp (configured): {timestamp_col}")
+            elif self.config.timestamp_format == 'datetime':
+                is_unix_timestamp = False
+                logger.info(f"Using datetime format (configured): {timestamp_col}")
+            elif self.config.timestamp_format == 'auto' or self.config.timestamp_format is None:
+                # Method 2: Auto-detect from column type (backward compatibility)
+                if table_schema and timestamp_col in table_schema:
+                    col_type = table_schema[timestamp_col].lower()
+                is_unix_timestamp = any(t in col_type for t in ['int', 'bigint', 'tinyint', 'smallint', 'mediumint'])
+                if is_unix_timestamp:
+                    logger.info(f"Using UNIX timestamp conversion for {timestamp_col} (type: {col_type})")
+                else:
+                    logger.info(f"Using standard datetime for {timestamp_col} (type: {col_type})")
+            
+            # Build base WHERE clause
+            if is_unix_timestamp:
+                # Convert datetime string to UNIX timestamp for comparison
+                base_where = f"{timestamp_col} > UNIX_TIMESTAMP({safe_timestamp})"
+            else:
+                # Standard datetime comparison
+                base_where = f"{timestamp_col} > {safe_timestamp}"
+            
+            # Add additional WHERE clause if specified (for index optimization)
+            if self.config.additional_where:
+                where_clause = f"WHERE {self.config.additional_where} AND {base_where}"
+                logger.info(f"Using additional WHERE clause: {self.config.additional_where}")
+            else:
+                where_clause = f"WHERE {base_where}"
+                logger.info(f"No additional WHERE clause configured for this table")
         else:
             # First run - no watermark
             where_clause = ""
@@ -262,10 +301,35 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
         # Get last row's timestamp
         last_row = rows[-1]
         timestamp_col = self.config.timestamp_column
-        last_timestamp = last_row.get(timestamp_col)
+        raw_timestamp = last_row.get(timestamp_col)
+        
+        # Convert UNIX timestamp to datetime string based on configuration
+        processed_timestamp = raw_timestamp
+        should_convert_unix = False
+        
+        # Determine if we should convert UNIX timestamp based on configuration
+        if self.config.timestamp_format == 'unix':
+            should_convert_unix = True
+        elif self.config.timestamp_format == 'datetime':
+            should_convert_unix = False
+        elif self.config.timestamp_format == 'auto' or self.config.timestamp_format is None:
+            # Auto-detect: if it's a numeric value, likely UNIX timestamp
+            should_convert_unix = isinstance(raw_timestamp, (int, float))
+        
+        if should_convert_unix and raw_timestamp is not None and isinstance(raw_timestamp, (int, float)):
+            # Convert UNIX timestamp to datetime string
+            try:
+                from datetime import datetime
+                dt = datetime.fromtimestamp(raw_timestamp)
+                processed_timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                logger.debug(f"Converted UNIX timestamp {raw_timestamp} to {processed_timestamp} (format: {self.config.timestamp_format})")
+            except (ValueError, OSError) as e:
+                logger.warning(f"Failed to convert UNIX timestamp {raw_timestamp}: {e}")
+                # Keep raw value if conversion fails
+                processed_timestamp = raw_timestamp
         
         return WatermarkData(
-            last_timestamp=last_timestamp,
+            last_timestamp=processed_timestamp,
             row_count=len(rows),
             strategy_used=self.strategy_name,
             additional_data={'timestamp_column': timestamp_col}
@@ -299,7 +363,7 @@ class HybridCDCStrategy(CDCStrategy):
     - High-frequency updates
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
         """Build hybrid timestamp+ID incremental query"""
         # SECURITY: Validate table name and column names
         if not _validate_sql_identifier(table_name):
@@ -432,7 +496,7 @@ class IdOnlyCDCStrategy(CDCStrategy):
     - Append-only transaction records
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
         """Build ID-based incremental query"""
         # SECURITY: Validate table name and column names
         if not _validate_sql_identifier(table_name):
@@ -540,7 +604,7 @@ class FullSyncStrategy(CDCStrategy):
         if self.sync_mode not in valid_modes:
             raise ValueError(f"Invalid full_sync_mode '{self.sync_mode}'. Must be one of: {valid_modes}")
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
         """Build full sync query based on mode"""
         # SECURITY: Validate table name
         if not _validate_sql_identifier(table_name):
@@ -550,25 +614,14 @@ class FullSyncStrategy(CDCStrategy):
         if not isinstance(limit, int) or limit <= 0:
             raise CDCSecurityError(f"Invalid limit value: {limit}")
         
-        # Check if replace mode has already been completed
+        # FULL_SYNC REPLACE MODE: Always read complete table data
+        # Replace mode should ignore existing watermarks and perform full extraction
         if self.sync_mode == 'replace':
-            # Check if we have a completion timestamp in watermark
-            last_timestamp = watermark.get('last_mysql_data_timestamp')
-            
-            # For full_sync replace mode, any non-epoch timestamp indicates completion
-            # This handles cases where mysql_status might not be properly updated
-            epoch_timestamps = ['1970-01-01T00:00:00Z', '1970-01-01T00:00:00', '1970-01-01 00:00:00']
-            
-            if last_timestamp and last_timestamp not in epoch_timestamps:
-                logger.info(f"FullSync replace mode already completed", extra={
-                    "table": table_name,
-                    "completion_timestamp": last_timestamp,
-                    "mysql_status": watermark.get('mysql_status', 'unknown'),
-                    "mode": "replace",
-                    "detection_method": "non_epoch_timestamp"
-                })
-                # Return empty result query to indicate completion
-                return "SELECT * FROM (SELECT 1 as dummy_col LIMIT 0) as completed_query"
+            logger.info(f"FullSync replace mode: reading complete table", extra={
+                "table": table_name,
+                "mode": "replace",
+                "strategy": "full_table_scan"
+            })
         
         if self.sync_mode == 'paginate':
             # NEW: OFFSET-based pagination for large tables
@@ -593,8 +646,40 @@ class FullSyncStrategy(CDCStrategy):
                 "offset": safe_offset,
                 "mode": "paginate"
             })
+        elif self.sync_mode == 'replace':
+            # REPLACE MODE: Full table sync for dimension refresh
+            # 
+            # DESIGN DECISION: Use a very high LIMIT instead of unlimited query
+            # WHY: The row-based chunking system expects queries with LIMIT clauses
+            #      and validates that results don't exceed the requested limit.
+            #      For full_sync replace mode, we need ALL rows but within chunking framework.
+            # 
+            # SOLUTION: Set LIMIT to 999,999,999 (999M rows) which accommodates any 
+            #           reasonable dimension table while satisfying chunking expectations.
+            #           This allows the complete table to be processed in one chunk.
+            #
+            # BEHAVIOR: Row-based strategy will:
+            #   1. Execute this query and get all table rows (e.g., 112K for ecs_staff)  
+            #   2. Process them in S3 upload batches (e.g., 50K rows per batch)
+            #   3. Complete in one chunking iteration instead of endless loop
+            #   4. Redshift loader will truncate target table before loading (replace mode)
+            large_limit = 999_999_999  # 999M rows - supports any dimension table size
+            
+            query = f"""
+            SELECT * FROM {table_name}
+            ORDER BY {self.config.id_column}
+            LIMIT {large_limit}
+            """.strip()
+            
+            logger.info(f"FullSync replace query built", extra={
+                "table": table_name,
+                "mode": "replace", 
+                "limit": large_limit,
+                "purpose": "complete_table_refresh",
+                "note": "Uses high LIMIT to work with row-based chunking while reading full table"
+            })
         else:
-            # Current behavior for 'replace' and 'append' modes
+            # APPEND mode - use limit for backward compatibility
             query = f"""
             SELECT * FROM {table_name}
             LIMIT {limit}
@@ -695,7 +780,7 @@ class CustomSQLStrategy(CDCStrategy):
     - {limit}: Row limit
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
         """Build custom user-defined query"""
         # SECURITY: Validate all inputs
         if not _validate_sql_identifier(table_name):

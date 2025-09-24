@@ -14,6 +14,7 @@ import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pandas as pd
 from io import BytesIO
 
 # PyArrow compatibility fix for metadata
@@ -60,6 +61,28 @@ class S3Manager:
             'total_bytes': 0,
             'failed_uploads': 0
         }
+    
+    def _clean_table_metadata(self, table: pa.Table) -> pa.Table:
+        """
+        Remove all metadata contamination from PyArrow table.
+        
+        CRITICAL: Prevents Redshift Spectrum 'incompatible Parquet schema' errors
+        by ensuring completely clean schema without any S3 or pandas references.
+        """
+        clean_fields = []
+        for field in table.schema:
+            # Create completely new field without any metadata
+            clean_field = pa.field(
+                name=field.name,
+                type=field.type, 
+                nullable=field.nullable
+                # IMPORTANT: No metadata parameter
+            )
+            clean_fields.append(clean_field)
+        
+        # Create completely clean schema with no metadata
+        clean_schema = pa.schema(clean_fields, metadata=None)
+        return table.cast(clean_schema)
     
     def _ensure_s3_client(self):
         """Ensure S3 client is available"""
@@ -242,60 +265,13 @@ class S3Manager:
                 # 'version': '2.6',  # Use default version for better compatibility
             }
             
-            # CRITICAL FIX: Create completely clean schema without metadata contamination
-            # This prevents 'incompatible Parquet schema for column s3:' errors
-            clean_fields = []
-            for field in table.schema:
-                field_name = field.name
-                field_type = field.type
-                
-                # CRITICAL: Sanitize column names that might contain problematic characters
-                sanitized_name = field_name.replace(':', '_').replace('/', '_').replace('\\', '_')
-                if sanitized_name.startswith('s3_'):
-                    sanitized_name = sanitized_name[3:]  # Remove s3_ prefix
-                
-                # Validate column names for Redshift compatibility
-                if ':' in sanitized_name or '/' in sanitized_name or sanitized_name.startswith('s3'):
-                    logger.warning(f"Sanitizing problematic column name: '{field_name}' -> '{sanitized_name}'")
-                    raise ValueError(f"Invalid column name for Redshift Spectrum after sanitization: '{sanitized_name}'")
-                
-                # ENHANCED: Additional decimal type validation for Spectrum compatibility
-                if pa.types.is_decimal(field_type):
-                    precision = field_type.precision
-                    scale = field_type.scale
-                    if precision > 38:  # Redshift max precision is 38
-                        logger.warning(f"Reducing decimal precision for {sanitized_name}: {precision} -> 38")
-                        field_type = pa.decimal128(38, min(scale, 38))
-                    elif precision > 18 and scale > 18:  # Spectrum compatibility
-                        logger.warning(f"Adjusting decimal for Spectrum compatibility: {sanitized_name} ({precision},{scale}) -> ({min(precision, 18)},{min(scale, 18)})")
-                        field_type = pa.decimal128(min(precision, 18), min(scale, 18))
-                
-                # Create completely new field without any metadata
-                clean_field = pa.field(
-                    name=sanitized_name,
-                    type=field_type,
-                    nullable=field.nullable
-                    # IMPORTANT: No metadata parameter - ensures no S3 references
-                )
-                
-                clean_fields.append(clean_field)
-            
-            # Create completely clean schema and table with no metadata
-            clean_schema = pa.schema(clean_fields, metadata=None)  # Explicitly no metadata
-            
-            # If we had to sanitize column names, we need to rename the table columns
-            if any(field.name != clean_field.name for field, clean_field in zip(table.schema, clean_fields)):
-                logger.info("Renaming table columns to match sanitized schema")
-                # Rename columns in the table to match sanitized names
-                column_mapping = {field.name: clean_field.name for field, clean_field in zip(table.schema, clean_fields)}
-                table = table.rename_columns([column_mapping.get(name, name) for name in table.column_names])
-            
-            clean_table = table.cast(clean_schema)
+            # CRITICAL FIX: Remove all metadata contamination
+            clean_table = self._clean_table_metadata(table)
             
             # FIXED: Additional schema validation and cleaning for Redshift Spectrum compatibility
             try:
                 # Validate decimal field compatibility
-                for field in clean_schema:
+                for field in clean_table.schema:
                     if pa.types.is_decimal(field.type):
                         precision = field.type.precision
                         scale = field.type.scale
@@ -335,18 +311,14 @@ class S3Manager:
             buffer_size = buffer.tell()
             buffer.seek(0)
             
-            # Prepare S3 upload parameters with minimal metadata for Redshift compatibility
+            # Prepare S3 upload parameters with NO metadata for Redshift compatibility
+            # CRITICAL FIX: Remove ALL S3 object metadata to prevent Spectrum contamination
             upload_params = {
                 'Bucket': self.bucket_name,
                 'Key': s3_key,
                 'Body': buffer.getvalue(),
-                'ContentType': 'application/parquet',
-                # Minimal S3 metadata to avoid conflicts with Redshift
-                'Metadata': {
-                    'rows': str(len(table)),
-                    'cols': str(len(table.column_names)),
-                    'comp': compression
-                }
+                'ContentType': 'application/parquet'
+                # NO METADATA - Redshift Spectrum might interpret S3 metadata as column references
             }
             
             # Use optimized upload method
@@ -483,9 +455,10 @@ class S3Manager:
                 logger.info("Applying PoC schema alignment")
                 df = self._align_dataframe_to_poc_schema(df, schema)
             
-            # Convert DataFrame to PyArrow table
+            # Convert DataFrame to PyArrow table with proper schema enforcement for decimals
             if schema:
-                table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+                # CRITICAL FIX: PyArrow ignores schema for decimal columns, so enforce manually
+                table = self._create_schema_enforced_table(df, schema)
             else:
                 table = pa.Table.from_pandas(df, preserve_index=False)
             
@@ -781,14 +754,61 @@ class S3Manager:
                     # Simple timestamp conversion
                     aligned_df[col_name] = pd.to_datetime(aligned_df[col_name], errors='coerce')
                 
+                elif pa.types.is_boolean(target_type):
+                    # CRITICAL FIX: Boolean conversion for MySQL tinyint(1) columns
+                    # Convert int64 (0/1) to proper boolean for Redshift compatibility
+                    def convert_to_boolean(value):
+                        if pd.isna(value) or value is None:
+                            return None
+                        try:
+                            # Convert various formats to boolean
+                            if isinstance(value, (int, float)):
+                                return bool(int(value))
+                            elif isinstance(value, str):
+                                return value.lower() in ('true', '1', 'yes', 'on')
+                            else:
+                                return bool(value)
+                        except (ValueError, TypeError):
+                            logger.warning(f"Failed to convert value {value} to boolean")
+                            return None
+                    
+                    aligned_df[col_name] = aligned_df[col_name].apply(convert_to_boolean)
+                
                 elif pa.types.is_integer(target_type):
-                    # Simple integer conversion
-                    aligned_df[col_name] = pd.to_numeric(aligned_df[col_name], errors='coerce').astype('Int64')
+                    # Simple integer conversion with proper type casting
+                    if pa.types.is_int16(target_type):
+                        # Convert to int16 for SMALLINT compatibility
+                        aligned_df[col_name] = pd.to_numeric(aligned_df[col_name], errors='coerce').astype('Int16')
+                    elif pa.types.is_int32(target_type):
+                        # Convert to int32 for INTEGER compatibility
+                        aligned_df[col_name] = pd.to_numeric(aligned_df[col_name], errors='coerce').astype('Int32')
+                    else:
+                        # Default to int64
+                        aligned_df[col_name] = pd.to_numeric(aligned_df[col_name], errors='coerce').astype('Int64')
                 
                 elif pa.types.is_string(target_type):
-                    # Simple string conversion
-                    aligned_df[col_name] = aligned_df[col_name].astype(str)
-                    aligned_df[col_name] = aligned_df[col_name].replace('nan', None)
+                    # String conversion with NULL handling for non-nullable fields
+                    def convert_to_string(value):
+                        if pd.isna(value) or value is None:
+                            # Handle NULL values based on field nullability
+                            if field.nullable:
+                                return None  # Allow NULL for nullable fields
+                            else:
+                                return ""    # Use empty string for non-nullable fields
+                        try:
+                            str_value = str(value)
+                            # Handle pandas 'nan' string representation
+                            if str_value.lower() in ('nan', 'none', 'null'):
+                                if field.nullable:
+                                    return None
+                                else:
+                                    return ""
+                            return str_value
+                        except (ValueError, TypeError):
+                            logger.warning(f"Failed to convert value {value} to string for column {col_name}")
+                            return "" if not field.nullable else None
+                    
+                    aligned_df[col_name] = aligned_df[col_name].apply(convert_to_string)
             
             # Reorder columns to match schema
             schema_columns = [field.name for field in schema]
@@ -826,6 +846,9 @@ class S3Manager:
             True if successful, False otherwise
         """
         try:
+            # CRITICAL FIX: Remove all metadata contamination 
+            table = self._clean_table_metadata(table)
+            
             # Create parquet file in memory
             parquet_buffer = BytesIO()
             
@@ -884,3 +907,170 @@ class S3Manager:
                 error=str(e)
             )
             return False
+    
+    def _validate_parquet_spectrum_compatibility(self, table, s3_key: str):
+        """
+        Validate parquet table compatibility with Redshift Spectrum
+        
+        Args:
+            table: PyArrow table to validate
+            s3_key: S3 key for logging context
+        """
+        try:
+            import pyarrow as pa
+            
+            logger.debug(f"Validating Spectrum compatibility for {s3_key}")
+            
+            # Check for unsupported data types
+            for field in table.schema:
+                field_type = field.type
+                
+                # Check for complex types that Spectrum doesn't support well
+                if pa.types.is_list(field_type) or pa.types.is_struct(field_type):
+                    logger.warning(f"Field {field.name} has complex type {field_type} that may not be fully supported by Spectrum")
+                
+                # Check decimal precision limits
+                if pa.types.is_decimal(field_type):
+                    precision = field_type.precision
+                    scale = field_type.scale
+                    if precision > 38:  # Redshift limit
+                        logger.warning(f"Decimal field {field.name} precision {precision} exceeds Redshift limit of 38")
+                    if scale > precision:
+                        logger.warning(f"Decimal field {field.name} scale {scale} exceeds precision {precision}")
+                
+                # Check string length (VARCHAR limit in Redshift is 65535)
+                if pa.types.is_string(field_type):
+                    # Can't check actual string lengths without scanning data, just log for awareness
+                    logger.debug(f"String field {field.name} - ensure data doesn't exceed VARCHAR(65535) limit")
+            
+            logger.debug(f"Spectrum compatibility validation completed for {s3_key}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to validate Spectrum compatibility for {s3_key}: {e}")
+            # Don't fail the upload for validation issues
+    
+    def _validate_written_parquet(self, buffer, s3_key: str):
+        """
+        Validate the written parquet data
+        
+        Args:
+            buffer: BytesIO buffer containing parquet data
+            s3_key: S3 key for logging context
+        """
+        try:
+            import pyarrow.parquet as pq
+            
+            # Reset buffer position for reading
+            buffer.seek(0)
+            
+            # Try to read the parquet file to validate it
+            parquet_file = pq.ParquetFile(buffer)
+            
+            # Basic validation
+            num_rows = parquet_file.metadata.num_rows
+            num_columns = len(parquet_file.schema_arrow)
+            
+            logger.debug(
+                f"Validated written parquet file",
+                s3_key=s3_key,
+                rows=num_rows,
+                columns=num_columns
+            )
+            
+            # Reset buffer position for upload
+            buffer.seek(0)
+            
+        except Exception as e:
+            logger.error(f"Parquet validation failed for {s3_key}: {e}")
+            # Reset buffer position anyway
+            buffer.seek(0)
+    
+    def _create_schema_enforced_table(self, df: pd.DataFrame, schema: pa.Schema) -> pa.Table:
+        """
+        Create PyArrow table with proper schema enforcement for decimal columns.
+        
+        CRITICAL FIX: PyArrow's from_pandas() ignores provided schema for decimal columns
+        and infers precision from actual data values. This causes Redshift Spectrum
+        "incompatible Parquet schema" errors when decimal(2,2) gets inferred instead 
+        of the required decimal(10,2) from the schema.
+        
+        Args:
+            df: Pandas DataFrame with data
+            schema: PyArrow schema to enforce
+        
+        Returns:
+            PyArrow table with properly enforced schema
+        """
+        try:
+            logger.debug(f"Enforcing schema for {len(df)} rows with {len(schema)} columns")
+            
+            # First, try the standard conversion
+            table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+            
+            # Check if any decimal columns have incorrect precision/scale
+            needs_fixing = False
+            schema_by_name = {field.name: field for field in schema}
+            
+            for i, column in enumerate(table.columns):
+                field_name = table.schema.field(i).name
+                actual_type = column.type
+                expected_field = schema_by_name.get(field_name)
+                
+                if expected_field and pa.types.is_decimal(expected_field.type):
+                    expected_type = expected_field.type
+                    
+                    if (pa.types.is_decimal(actual_type) and 
+                        (actual_type.precision != expected_type.precision or 
+                         actual_type.scale != expected_type.scale)):
+                        
+                        logger.warning(
+                            f"Decimal column {field_name} needs fixing: "
+                            f"got {actual_type} but schema expects {expected_type}"
+                        )
+                        needs_fixing = True
+            
+            # If decimal columns need fixing, convert them manually
+            if needs_fixing:
+                logger.info("Applying manual decimal column conversion for schema compliance")
+                columns = []
+                names = []
+                
+                for i, field in enumerate(schema):
+                    field_name = field.name
+                    expected_type = field.type
+                    names.append(field_name)
+                    
+                    if field_name in df.columns:
+                        column_data = df[field_name]
+                        
+                        if pa.types.is_decimal(expected_type):
+                            # Convert decimal column with proper type enforcement
+                            decimal_array = pa.array(
+                                column_data, 
+                                type=expected_type,
+                                from_pandas=True
+                            )
+                            columns.append(decimal_array)
+                            logger.debug(f"Fixed decimal column {field_name}: {expected_type}")
+                        else:
+                            # Use standard conversion for non-decimal columns
+                            columns.append(pa.array(column_data, from_pandas=True))
+                    else:
+                        # Handle missing columns with null values
+                        null_array = pa.nulls(len(df), type=expected_type)
+                        columns.append(null_array)
+                        logger.debug(f"Added null column {field_name}: {expected_type}")
+                
+                # Create table with fixed columns
+                fixed_table = pa.table(columns, names=names)
+                logger.info("Successfully created schema-enforced table with fixed decimal types")
+                return fixed_table
+            else:
+                logger.debug("Standard conversion worked correctly, no decimal fixes needed")
+                return table
+            
+        except Exception as e:
+            logger.error(f"Schema enforcement failed: {e}")
+            logger.warning("Falling back to standard conversion without enforcement")
+            # Fallback to standard conversion
+            return pa.Table.from_pandas(df, preserve_index=False)

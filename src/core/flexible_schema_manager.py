@@ -29,8 +29,9 @@ class FlexibleSchemaManager:
     - Support for schema evolution
     """
     
-    def __init__(self, connection_manager: ConnectionManager, cache_ttl: int = 3600):
+    def __init__(self, connection_manager: ConnectionManager, cache_ttl: int = 3600, connection_registry=None):
         self.connection_manager = connection_manager
+        self.connection_registry = connection_registry  # For scoped connections
         self.cache_ttl = cache_ttl  # Cache schemas for 1 hour
         self._schema_cache: Dict[str, Tuple[pa.Schema, str]] = {}
         self._schema_cache_timestamp: Dict[str, float] = {}
@@ -62,31 +63,71 @@ class FlexibleSchemaManager:
         
         logger.info(f"Discovering dynamic schema for table: {table_name}")
         
+        # Handle scoped table names (e.g., "US_PROD_RO_SSH:kuaisong.ecs_order_info")
+        connection_scope = None
+        actual_table_name = table_name
+        
+        if ':' in table_name:
+            connection_scope, actual_table_name = table_name.split(':', 1)
+            logger.info(f"Using connection scope: {connection_scope} for table: {actual_table_name}")
+        
         try:
-            with self.connection_manager.ssh_tunnel() as local_port:
-                with self.connection_manager.database_connection(local_port) as conn:
+            # Use scoped connection if available, otherwise fall back to default
+            if connection_scope and self.connection_registry:
+                # Use connection registry for scoped connections with context manager
+                with self.connection_registry.get_mysql_connection(connection_scope) as conn:
                     cursor = conn.cursor(dictionary=True)
                     
                     try:
                         # Get table structure from MySQL
-                        schema_info = self._get_mysql_table_info(cursor, table_name)
+                        schema_info = self._get_mysql_table_info(cursor, actual_table_name)
                         
                         # Convert to PyArrow schema
-                        pyarrow_schema = self._create_pyarrow_schema(schema_info, table_name)
+                        pyarrow_schema = self._create_pyarrow_schema(schema_info, actual_table_name)
                         
                         # Generate Redshift DDL
-                        redshift_ddl = self._generate_redshift_ddl(table_name, schema_info)
+                        redshift_ddl = self._generate_redshift_ddl(actual_table_name, schema_info)
                         
                         # Cache the result
                         self._cache_schema(table_name, pyarrow_schema, redshift_ddl)
                         
                         logger.info(f"Dynamic schema discovered for {table_name}: {len(pyarrow_schema)} columns")
                         return pyarrow_schema, redshift_ddl
-                    
+                        
                     finally:
-                        # Ensure cursor is properly closed
-                        if cursor:
-                            cursor.close()
+                        cursor.close()
+            else:
+                # Only fall back to old connection manager for truly unscoped tables
+                if connection_scope:
+                    # For scoped tables, we must have connection registry
+                    logger.error(f"Scoped table {table_name} requires connection registry, but none available")
+                    raise ValueError(f"Connection registry required for scoped table {table_name}")
+                
+                # Fall back to old connection manager for non-scoped tables only
+                with self.connection_manager.ssh_tunnel() as local_port:
+                    with self.connection_manager.database_connection(local_port) as conn:
+                        cursor = conn.cursor(dictionary=True)
+                        
+                        try:
+                            # Get table structure from MySQL
+                            schema_info = self._get_mysql_table_info(cursor, actual_table_name)
+                            
+                            # Convert to PyArrow schema
+                            pyarrow_schema = self._create_pyarrow_schema(schema_info, actual_table_name)
+                            
+                            # Generate Redshift DDL
+                            redshift_ddl = self._generate_redshift_ddl(actual_table_name, schema_info)
+                            
+                            # Cache the result
+                            self._cache_schema(table_name, pyarrow_schema, redshift_ddl)
+                            
+                            logger.info(f"Dynamic schema discovered for {table_name}: {len(pyarrow_schema)} columns")
+                            return pyarrow_schema, redshift_ddl
+                        
+                        finally:
+                            # Ensure cursor is properly closed
+                            if cursor:
+                                cursor.close()
                     
         except Exception as e:
             logger.error(f"Failed to discover schema for {table_name}: {e}")
@@ -204,28 +245,24 @@ class FlexibleSchemaManager:
             return pa.string()
         
         elif data_type == 'bigint':
-            # Check for unsigned
-            if 'unsigned' in column_type:
-                return pa.uint64()
+            # CRITICAL FIX: Always use signed integers for Redshift compatibility
+            # Redshift doesn't support unsigned integers, so force all to signed
             return pa.int64()
         
         elif data_type in ['int', 'integer']:
-            if 'unsigned' in column_type:
-                return pa.uint32()
+            # CRITICAL FIX: Always use signed integers for Redshift compatibility
             return pa.int32()
         
         elif data_type == 'smallint':
-            if 'unsigned' in column_type:
-                return pa.uint16()
+            # CRITICAL FIX: Always use signed integers for Redshift compatibility
             return pa.int16()
         
         elif data_type == 'tinyint':
             # Handle boolean (tinyint(1))
             if '(1)' in column_type:
                 return pa.bool_()
-            if 'unsigned' in column_type:
-                return pa.uint8()
-            return pa.int8()
+            # CRITICAL FIX: Always use signed integers for Redshift compatibility
+            return pa.int16()  # Use int16 instead of int8 for better range
         
         elif data_type in ['float', 'real']:
             return pa.float32()

@@ -52,18 +52,7 @@ tables:
       batch_size: 50000
       enable_parallel_processing: false
       
-  # 3. Prealert Order - ~50K rows (MEDIUM priority)
-  kuaisong.uni_prealert_order:
-    cdc_strategy: "full_sync"
-    full_sync_mode: "replace"        # TRUNCATE table before loading
-    description: "Prealert order reference data"
-    target_name: "uni_prealert_order_ref"
-    
-    processing:
-      batch_size: 50000
-      enable_parallel_processing: false
-      
-  # 4. Prealert Info - ~50K rows (MEDIUM priority)
+  # 3. Prealert Info - ~50K rows (MEDIUM priority)
   kuaisong.uni_prealert_info:
     cdc_strategy: "full_sync"
     full_sync_mode: "replace"        # TRUNCATE table before loading

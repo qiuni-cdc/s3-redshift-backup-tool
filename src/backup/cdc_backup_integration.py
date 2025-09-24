@@ -116,7 +116,8 @@ class CDCBackupIntegration:
                                table_name: str, 
                                watermark: Dict[str, Any],
                                limit: int,
-                               table_config: Optional[Dict[str, Any]] = None) -> str:
+                               table_config: Optional[Dict[str, Any]] = None,
+                               table_schema: Optional[Dict[str, str]] = None) -> str:
         """
         Build incremental query using appropriate CDC strategy
         
@@ -127,7 +128,7 @@ class CDCBackupIntegration:
             cdc_strategy = self.get_cdc_strategy(table_name, table_config)
             
             # Build query using strategy
-            query = cdc_strategy.build_query(table_name, watermark, limit)
+            query = cdc_strategy.build_query(table_name, watermark, limit, table_schema)
             
             logger.info(f"Built incremental query for {table_name}", extra={
                 "table": table_name,
