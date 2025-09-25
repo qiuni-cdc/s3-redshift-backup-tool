@@ -234,10 +234,16 @@ class UnifiedWatermarkManager:
     def _write_to_s3(self, key: str, watermark: Dict[str, Any]) -> bool:
         """Write watermark to S3."""
         try:
+            def datetime_serializer(obj):
+                """JSON serializer for datetime objects."""
+                if isinstance(obj, datetime):
+                    return obj.strftime('%Y-%m-%d %H:%M:%S')
+                raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+            
             self.s3_client.put_object(
                 Bucket=self.bucket_name,
                 Key=key,
-                Body=json.dumps(watermark, indent=2),
+                Body=json.dumps(watermark, indent=2, default=datetime_serializer),
                 ContentType='application/json'
             )
             return True

@@ -378,6 +378,9 @@ class BaseBackupStrategy(ABC):
             'batches_with_gemini': 0,  # Keep for compatibility
             'batches_with_fallback': 0
         }
+        
+        # Track S3 files created during backup for watermark blacklist
+        self._created_s3_files = []
     
     def _initialize_components(self):
         """Initialize components with shared S3 client"""
@@ -1169,6 +1172,10 @@ class BaseBackupStrategy(ABC):
             
             if success:
                 batch_duration = time.time() - batch_start_time
+                
+                # Track S3 file for watermark blacklist  
+                s3_uri = f"s3://{self.config.s3.bucket_name}/{s3_key}"
+                self._created_s3_files.append(s3_uri)
                 
                 self.logger.batch_processed(
                     table_name, batch_id, len(batch_data), s3_key

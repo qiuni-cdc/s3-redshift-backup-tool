@@ -11,11 +11,26 @@ from airflow.models import Variable
 from datetime import datetime, timedelta
 import json
 import os
+import subprocess
 
 # Configuration
 SYNC_TOOL_PATH = "/home/qi_chen/s3-redshift-backup"
 PIPELINE_NAME = "us_prod_kuaisong_tracking_pipeline"
 S3_COMPLETION_BUCKET = Variable.get("s3_completion_bucket", default_var="s3-sync-completions")
+
+def get_smart_timeout(table_name):
+    """Simple flag-based timeout: backlog mode = 15min, normal = 8min"""
+    try:
+        backlog_mode = Variable.get("kuaisong_backlog_mode", default_var="false")
+        if backlog_mode.lower() == "true":
+            print(f"🔧 {table_name}: BACKLOG MODE - Using 15 minute timeout")
+            return timedelta(minutes=15)
+        else:
+            print(f"⚡ {table_name}: NORMAL MODE - Using 8 minute timeout")
+            return timedelta(minutes=8)
+    except Exception as e:
+        print(f"⚠️ {table_name}: Timeout check failed ({e}), using safe default")
+        return timedelta(minutes=10)
 
 # Table configurations with expected volumes and optimized batch sizes
 TABLES = [
@@ -105,7 +120,7 @@ with TaskGroup("sync_tables", dag=dag) as sync_group:
                 --max-workers 1
             ''',
             dag=dag,
-            execution_timeout=timedelta(minutes=5),  # 5 min hard timeout per table
+            execution_timeout=timedelta(minutes=20),  # Fixed 20-minute timeout to clear backlog
         )
         
         # Chain tasks sequentially to avoid concurrent production queries

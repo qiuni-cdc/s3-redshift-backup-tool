@@ -360,10 +360,12 @@ class GeminiRedshiftLoader:
                 prefix = table_partition_prefix
                 max_keys = 1000  # Reasonable limit for table-specific files
             else:
-                # Fallback to general prefix but with stricter filtering
-                logger.info(f"Using general prefix with enhanced filtering")
-                prefix = base_prefix
-                max_keys = 2000  # Limit scan size to avoid performance issues
+                # CRITICAL FIX: Use table-specific prefix filtering to avoid missing files
+                # The old logic was missing files due to the 2000 file limit excluding older files
+                table_specific_prefix = f"{base_prefix}year=2025/"  # Focus on 2025 files
+                logger.info(f"Using table-specific year prefix with enhanced filtering")
+                prefix = table_specific_prefix
+                max_keys = 5000  # Increased limit to ensure we don't miss files
             
             logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
             

@@ -85,6 +85,28 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         successful_tables.append(table_name)
                         table_duration = time.time() - table_start_time
                         self.logger.table_completed(table_name, table_duration)
+                        
+                        # CRITICAL FIX: Add S3 files to blacklist after successful backup
+                        if hasattr(self, '_created_s3_files') and self._created_s3_files:
+                            try:
+                                # Add newly created S3 files to processed_files blacklist
+                                self.watermark_manager.simple_manager.update_redshift_state(
+                                    table_name=table_name,
+                                    loaded_files=self._created_s3_files,
+                                    status='pending',  # Files created but not yet loaded to Redshift
+                                    error=None
+                                )
+                                self.logger.logger.info(
+                                    f"Added {len(self._created_s3_files)} S3 files to blacklist",
+                                    table_name=table_name,
+                                    files_count=len(self._created_s3_files)
+                                )
+                            except Exception as e:
+                                self.logger.logger.error(
+                                    f"Failed to update S3 files blacklist: {e}",
+                                    table_name=table_name,
+                                    files_count=len(self._created_s3_files)
+                                )
                     else:
                         failed_tables.append(table_name)
                         self.logger.table_failed(table_name)
@@ -154,6 +176,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 table_name=table_name,
                 fix_applied="s3_stats_reset_per_table"
             )
+            
+            # CRITICAL FIX: Reset S3 files list for accurate per-table tracking
+            self._created_s3_files = []
             
             # Create cursor with dictionary output
             cursor = db_conn.cursor(dictionary=True, buffered=False)
@@ -250,7 +275,11 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         table_name=table_name
                     )
                 else:
-                    last_timestamp = str(raw_timestamp)
+                    # Handle datetime object
+                    if hasattr(raw_timestamp, 'isoformat'):
+                        last_timestamp = raw_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        last_timestamp = str(raw_timestamp)
                 self.logger.logger.info(
                     "Resuming row-based backup from watermark",
                     table_name=table_name,
@@ -1490,6 +1519,28 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 s3_file_count=actual_s3_files,
                 error_message=error_message
             )
+            
+            # CRITICAL FIX: Add S3 files to blacklist after successful backup
+            if status == 'success' and hasattr(self, '_created_s3_files') and self._created_s3_files:
+                try:
+                    # Add newly created S3 files to processed_files blacklist
+                    self.watermark_manager.simple_manager.update_redshift_state(
+                        table_name=table_name,
+                        loaded_files=self._created_s3_files,
+                        status='pending',  # Files created but not yet loaded to Redshift
+                        error=None
+                    )
+                    self.logger.logger.info(
+                        f"Added {len(self._created_s3_files)} S3 files to blacklist",
+                        table_name=table_name,
+                        files_count=len(self._created_s3_files)
+                    )
+                except Exception as e:
+                    self.logger.logger.error(
+                        f"Failed to update S3 files blacklist: {e}",
+                        table_name=table_name,
+                        files_count=len(self._created_s3_files)
+                    )
             
             self.logger.logger.info(
                 "Final watermark updated with absolute count",
