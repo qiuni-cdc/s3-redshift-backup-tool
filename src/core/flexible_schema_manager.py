@@ -43,6 +43,12 @@ class FlexibleSchemaManager:
         # Initialize column mapper
         self.column_mapper = ColumnMapper()
     
+    def _extract_connection_name(self, table_name: str) -> Optional[str]:
+        """Extracts the connection name from a scoped table name."""
+        if ':' in table_name:
+            return table_name.split(':', 1)[0]
+        return None
+
     def get_table_schema(self, table_name: str, force_refresh: bool = False) -> Tuple[pa.Schema, str]:
         """
         Get PyArrow schema and Redshift DDL for any table
@@ -61,10 +67,13 @@ class FlexibleSchemaManager:
             return self._schema_cache[table_name]
         
         logger.info(f"Discovering dynamic schema for table: {table_name}")
+
+        # Extract connection name from scoped table name
+        connection_name = self._extract_connection_name(table_name)
         
         try:
-            with self.connection_manager.ssh_tunnel() as local_port:
-                with self.connection_manager.database_connection(local_port) as conn:
+            with self.connection_manager.ssh_tunnel(connection_name) as local_port:
+                with self.connection_manager.database_connection(local_port, connection_name) as conn:
                     cursor = conn.cursor(dictionary=True)
                     
                     try:

@@ -431,10 +431,6 @@ class GeminiRedshiftLoader:
                     if 'Contents' in page:
                         all_objects.extend(page['Contents'])
                 
-                
-                # Replace response Contents with our paginated results
-                response['Contents'] = all_objects
-                
             except Exception as e:
                 logger.error(f"S3 listing failed: {e}")
                 return []
@@ -609,6 +605,151 @@ class GeminiRedshiftLoader:
     def _set_success_status(self, table_name: str, load_time: datetime, rows_loaded: int, processed_files: List[str] = None):
         """Set successful load status in watermark with session tracking (FIXES ACCUMULATION BUG)"""
         try:
+            # Update with v2.0 API
+            self.watermark_manager.simple_manager.update_redshift_state(
+                table_name=table_name,
+                loaded_files=processed_files or [],
+                status='success'
+            )
+            
+            # After successful state update, also update the row count externally
+            if rows_loaded > 0:
+                self.watermark_manager.simple_manager.update_redshift_count_from_external(
+                    table_name=table_name,
+                    actual_count=rows_loaded
+                )
+        except Exception as e:
+            logger.warning(f"Failed to update success watermark for {table_name}: {e}")
+            
+        except Exception as e:
+            logger.error(f"Failed to get S3 parquet files for {table_name}: {e}")
+            import traceback
+            logger.error(f"Full error traceback: {traceback.format_exc()}")
+            return []
+    
+    def _get_s3_file_size(self, s3_uri: str) -> float:
+        """Get S3 file size in MB for diagnostics"""
+        try:
+            import boto3
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.config.s3.access_key,
+                aws_secret_access_key=self.config.s3.secret_key.get_secret_value(),
+                region_name=self.config.s3.region
+            )
+            
+            # Extract bucket and key from S3 URI
+            bucket = self.config.s3.bucket_name
+            key = s3_uri.replace(f"s3://{bucket}/", "")
+            
+            response = s3_client.head_object(Bucket=bucket, Key=key)
+            size_bytes = response['ContentLength']
+            return size_bytes / (1024 * 1024)  # Convert to MB
+            
+        except Exception as e:
+            logger.debug(f"Failed to get file size for {s3_uri}: {e}")
+            return 0.0
+
+    def _copy_parquet_file(self, conn, table_name: str, s3_uri: str, full_table_name: str = None) -> int:
+        """Execute COPY command for a single parquet file"""
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            
+            # Check if table has column mappings
+            column_list = ""
+            if full_table_name and self.column_mapper.has_mapping(full_table_name):
+                # Get the parquet schema to know source columns
+                # For now, we'll rely on Redshift's automatic column matching
+                # In a full implementation, we'd read the parquet schema
+                logger.info(f"Table {full_table_name} has column mappings - using automatic matching")
+            
+            # Build COPY command for direct parquet loading
+            copy_command = f"""
+                COPY {self.config.redshift.schema}.{table_name}{column_list}
+                FROM '{s3_uri}'
+                ACCESS_KEY_ID '{self.config.s3.access_key}'
+                SECRET_ACCESS_KEY '{self.config.s3.secret_key.get_secret_value()}'
+                FORMAT AS PARQUET;
+            """
+            
+            logger.info(f"Executing COPY command for {s3_uri}")
+            
+            # Execute COPY command
+            cursor.execute(copy_command)
+            
+            # CRITICAL FIX: Get actual number of rows loaded and verify it's not zero
+            cursor.execute("SELECT pg_last_copy_count()")
+            rows_loaded = cursor.fetchone()[0]
+            
+            # Commit the transaction
+            conn.commit()
+            cursor.close()
+            
+            # Log actual result
+            if rows_loaded == 0:
+                logger.warning(f"⚠️  COPY command executed but loaded 0 rows from {s3_uri}")
+            else:
+                logger.info(f"✅ COPY command loaded {rows_loaded} rows from {s3_uri}")
+            
+            return rows_loaded
+            
+        except Exception as e:
+            # Rollback the failed transaction to clean up the connection state
+            try:
+                conn.rollback()
+                logger.debug(f"Rolled back failed transaction for {s3_uri}")
+            except:
+                pass  # Ignore rollback errors
+            
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass  # Ignore cursor close errors
+                    
+            logger.error(f"COPY command failed for {s3_uri}: {e}")
+            raise
+    
+    @contextmanager
+    def _redshift_connection(self):
+        """Context manager for Redshift database connections"""
+        try:
+            # Use Redshift SSH tunnel if configured
+            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.bastion_host:
+                with self.connection_manager.redshift_ssh_tunnel() as local_port:
+                    conn = psycopg2.connect(
+                        host='localhost',
+                        port=local_port,
+                        database=self.config.redshift.database,
+                        user=self.config.redshift.user,
+                        password=self.config.redshift.password.get_secret_value()
+                    )
+                    logger.debug("Connected to Redshift via SSH tunnel")
+                    conn.autocommit = True
+                    yield conn
+                    conn.close()
+            else:
+                # Direct connection
+                conn = psycopg2.connect(
+                    host=self.config.redshift.host,
+                    port=self.config.redshift.port,
+                    database=self.config.redshift.database,
+                    user=self.config.redshift.user,
+                    password=self.config.redshift.password.get_secret_value()
+                )
+                logger.debug("Connected to Redshift directly")
+                conn.autocommit = True
+                yield conn
+                conn.close()
+                
+        except Exception as e:
+            logger.error(f"Failed to connect to Redshift: {e}")
+            raise DatabaseError(f"Redshift connection failed: {e}")
+    
+    def _set_success_status(self, table_name: str, load_time: datetime, rows_loaded: int, processed_files: List[str] = None):
+        """Set successful load status in watermark with session tracking (FIXES ACCUMULATION BUG)"""
+        try:
             # Generate consistent session ID for this loading operation to prevent double-counting
             import uuid
             session_id = f"redshift_load_{uuid.uuid4().hex[:8]}"
@@ -618,10 +759,15 @@ class GeminiRedshiftLoader:
                 table_name=table_name,
                 loaded_files=processed_files or [],
                 status='success',
-                processed_files=processed_files,  # Pass None if no files, not empty list
-                mode='auto',  # Use auto mode for intelligent accumulation
-                session_id=session_id  # Track this loading session to prevent double-counting
+                error=None
             )
+
+            # After successful state update, also update the row count externally
+            if rows_loaded > 0:
+                self.watermark_manager.simple_manager.update_redshift_count_from_external(
+                    table_name=table_name,
+                    actual_count=rows_loaded
+                )
         except Exception as e:
             logger.warning(f"Failed to update success watermark for {table_name}: {e}")
     

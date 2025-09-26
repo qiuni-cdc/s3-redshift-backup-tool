@@ -37,7 +37,18 @@ tables:
       batch_size: 1000000
     validation:
       enable_data_quality_checks: true
-      max_null_percentage: 5.0 
+      max_null_percentage: 5.0  
+
+  unidw.dw_parcel_detail_tool_temp: 
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"
+    description: "Parcel detail tool temp data with ID-only strategy" 
+    target_name: "dw_parcel_detail_tool"  # Map to different target table name
+    processing:
+      batch_size: 50000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 5.0
 
   unidw.dw_parcel_pricing_temp:
     cdc_strategy: "hybrid"

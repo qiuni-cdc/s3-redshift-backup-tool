@@ -163,7 +163,8 @@ class WatermarkAdapter:
                 timestamp=max_data_timestamp,
                 id=last_processed_id,
                 status=status,
-                error=kwargs.get('error')
+                error=kwargs.get('error'),
+                rows_extracted=rows_extracted
             )
             
             logger.info(f"Updated MySQL watermark for {table_name}: "

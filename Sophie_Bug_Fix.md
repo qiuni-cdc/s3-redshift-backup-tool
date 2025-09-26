@@ -644,27 +644,7 @@ if watermark.mysql_status == 'in_progress':
 **Before:** 46 valid S3 files couldn't be loaded due to status check
 **After:** 46 S3 files successfully processed to Redshift regardless of interrupted backup status
 
-**Key Insight:** Watermark status should guide processing decisions, not block valid data loading when files demonstrably exist. 
-
-## Usually Used Commands
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
-
-python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
-
-git commit -m "add files from main" --no-verify 
-source s3_backup_venv/bin/activate
-
+**Key Insight:** Watermark status should guide processing decisions, not block valid data loading when files demonstrably exist.
 
 ## Multi-Connection Password Management Integration (Resolved)
 
@@ -799,4 +779,30 @@ except ImportError:
 - Health checks use `mysql_default` connection for system status
 - Full support for multi-environment, multi-pipeline configurations
 
-**Key Insight:** The system now properly leverages your existing multi-connection architecture instead of requiring a generic password. Each pipeline can use its appropriate credentials while maintaining security through environment variable references. 
+**Key Insight:** The system now properly leverages your existing multi-connection architecture instead of requiring a generic password. Each pipeline can use its appropriate credentials while maintaining security through environment variable references.  
+
+## Usually Used Commands
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
+
+python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 300 2>&1 | tee pricing_temp.log 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
+
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool_temp --json-output sync_parcel_detail.json 
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+
+git commit -m "add files from main" --no-verify
+source s3_backup_venv/bin/activate

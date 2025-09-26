@@ -10,15 +10,15 @@ connections:
       host: us-west-2.ro.db.analysis.uniuni.com.internal
       port: 3306
       database: unidw
-      username: chenqi
-      password: "${DB_PASSWORD}"
+      username: "${DB_USER}"
+      password: "${DB_US_DW_PASSWORD}"
       description: "Alias for US_DW_UNIDW_SSH - used when no connection prefix specified"
       
       ssh_tunnel:
         enabled: true
         host: 35.83.114.196
-        username: chenqi
-        private_key_path: /home/qi_chen/test_env/chenqi.pem
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0
     
     mysql_default:
@@ -85,14 +85,14 @@ connections:
         private_key_path: "${SSH_BASTION_KEY_PATH}"
         local_port: 0  # Auto-assign
 
-    # US Data Warehouse Read-Only with SSH - Unidw Schema  
+    # US Data Warehouse with SSH - Unidw Schema  
     US_DW_UNIDW_SSH:
-      host: us-west-2.ro.db.analysis.uniuni.com.internal
+      host: db.analysis.uniuni.com.internal
       port: 3306
       database: unidw
       username: "${DB_USER}"
-      password: "${DB_US_DW_RO_PASSWORD}"
-      description: "US Data Warehouse Read-Only MySQL (US-WEST-2) Unidw Schema via SSH tunnel"
+      password: "${DB_US_DW_PASSWORD}"
+      description: "US Data Warehouse MySQL (US-WEST-2) Unidw Schema via SSH tunnel"
       
       ssh_tunnel:
         enabled: true

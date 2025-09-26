@@ -1468,13 +1468,13 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 extraction_time=extraction_time,
                 max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_processed_id,
-                rows_extracted=total_existing_rows,  # SIMPLIFIED: Total rows in all existing S3 files
+                rows_extracted=session_rows_processed,
                 status=status,
                 backup_strategy='row_based',
-                s3_file_count=total_existing_files,  # SIMPLIFIED: Total existing S3 files count
+                s3_file_count=actual_s3_files,
                 error_message=error_message,
-                mode='absolute',  # Use absolute with correct total
-                session_id=session_id
+                mode='absolute',  # Use absolute mode to reflect session-specific counts
+                session_id=None
             )
             
             

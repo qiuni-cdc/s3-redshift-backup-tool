@@ -55,6 +55,9 @@ s3_backup_venv/
 logs/
 *.log
 
+# Sync JSON files
+sync_*.json
+
 # Testing
 .pytest_cache/
 .coverage
@@ -68,5 +71,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini 
 
-# md 
+# Markdown files
 Code_Explain.md
+
+# Process files
+nohup.out
+kettle_*shell

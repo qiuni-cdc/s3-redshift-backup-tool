@@ -498,13 +498,18 @@ class S3WatermarkManager:
         backup_strategy: str = 'sequential',
         s3_file_count: int = 0,
         error_message: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        mode: str = 'auto',  # NEW: Add mode parameter for accumulation control
+        session_id: Optional[str] = None,  # NEW: Add session tracking for rows extracted
+        s3_files_created: Optional[List[str]] = None  # NEW: Track S3 files created
     ) -> bool:
         """
-        Update MySQL extraction watermark.
-        
-        SIMPLIFIED: Always use the provided row count as absolute value.
-        No accumulation, no modes, no complexity.
+        Update MySQL extraction watermark with mode-controlled cumulative updates.
+
+        Supports three mode-controlled cumulative metrics:
+        1. Rows Extracted (mode: auto/absolute/additive)
+        2. S3 Files Created (mode: auto/absolute/additive)
+        3. S3 File Count (derived from S3 files list)
         """
         try:
             # Get existing watermark or create new
@@ -526,21 +531,77 @@ class S3WatermarkManager:
             if last_processed_id is not None:
                 watermark.last_processed_id = last_processed_id
             
-            # SIMPLIFIED: Always use absolute count
+            # MODE-CONTROLLED: Rows Extracted cumulative update (prevent double-counting bug)
             if rows_extracted > 0:
-                watermark.mysql_rows_extracted = rows_extracted
-                logger.info(f"Updated watermark with absolute count: {rows_extracted}")
+                effective_mode = mode
+
+                # Auto mode detection based on session ID
+                if mode == 'auto':
+                    # Same session = absolute (replace), different session = additive (accumulate)
+                    last_mysql_session = getattr(watermark, 'last_session_id', None)
+                    if session_id and last_mysql_session == session_id:
+                        effective_mode = 'absolute'  # Same session - replace count
+                        logger.debug(f"MySQL auto mode: same session '{session_id}', using absolute")
+                    else:
+                        effective_mode = 'additive'  # Different session - add to total
+                        logger.debug(f"MySQL auto mode: different session (last='{last_mysql_session}', current='{session_id}'), using additive")
+
+                # Apply the determined mode
+                if effective_mode == 'absolute':
+                    # Replace existing count (for same session updates)
+                    previous_count = watermark.mysql_rows_extracted or 0
+                    watermark.mysql_rows_extracted = rows_extracted
+                    logger.info(f"MySQL absolute watermark update: replaced {previous_count} with {rows_extracted}")
+
+                elif effective_mode == 'additive':
+                    # Add to existing count (for cross-session accumulation)
+                    current_rows = watermark.mysql_rows_extracted or 0
+                    watermark.mysql_rows_extracted = current_rows + rows_extracted
+                    logger.info(f"MySQL additive watermark update: {current_rows} + {rows_extracted} = {watermark.mysql_rows_extracted}")
+
+                else:
+                    raise ValueError(f"Invalid watermark mode: {effective_mode}")
+
+                # Store session ID for future auto mode detection
+                if session_id:
+                    watermark.last_session_id = session_id
             
             watermark.mysql_status = status
             watermark.backup_strategy = backup_strategy
             
-            # CRITICAL FIX: Preserve backup_s3_files and sync s3_file_count
-            # If backup_s3_files exists, use its length for s3_file_count
-            if hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
+            # MODE-CONTROLLED: S3 Files Created cumulative update
+            if s3_files_created is not None:
+                # Initialize lists if needed
+                if not hasattr(watermark, 'backup_s3_files') or not watermark.backup_s3_files:
+                    watermark.backup_s3_files = []
+
+                # Apply mode-controlled update for S3 files
+                if effective_mode == 'absolute':
+                    # Replace existing file list (for same session updates)
+                    previous_count = len(watermark.backup_s3_files)
+                    watermark.backup_s3_files = s3_files_created.copy()
+                    logger.info(f"S3 files absolute update: replaced {previous_count} files with {len(s3_files_created)} files")
+
+                elif effective_mode == 'additive':
+                    # Add new files to existing list (for cross-session accumulation)
+                    existing_files = set(watermark.backup_s3_files)
+                    new_files = []
+                    for file_path in s3_files_created:
+                        if file_path not in existing_files:
+                            watermark.backup_s3_files.append(file_path)
+                            new_files.append(file_path)
+                    logger.info(f"S3 files additive update: added {len(new_files)} new files, total now {len(watermark.backup_s3_files)}")
+
+                # Update s3_file_count from backup_s3_files length
                 watermark.s3_file_count = len(watermark.backup_s3_files)
-                logger.debug(f"Syncing s3_file_count from backup_s3_files: {watermark.s3_file_count}")
+
             else:
-                watermark.s3_file_count = s3_file_count
+                # Legacy behavior: update s3_file_count directly if no file list provided
+                if hasattr(watermark, 'backup_s3_files') and watermark.backup_s3_files:
+                    watermark.s3_file_count = len(watermark.backup_s3_files)
+                    logger.debug(f"Syncing s3_file_count from backup_s3_files: {watermark.s3_file_count}")
+                else:
+                    watermark.s3_file_count = s3_file_count
             
             watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
             
@@ -581,7 +642,16 @@ class S3WatermarkManager:
         mode: str = 'auto',  # NEW: Add mode parameter for accumulation control
         session_id: Optional[str] = None  # NEW: Add session tracking
     ) -> bool:
-        """Update Redshift load watermark with accumulation support (FIXES DOUBLE-COUNTING BUG)"""
+        """
+        Update Redshift load watermark with mode-controlled cumulative updates.
+
+        Supports mode-controlled cumulative metrics:
+        1. Rows Loaded (mode: auto/absolute/additive)
+        2. Processed Files management (move from backup_s3_files to processed_s3_files)
+
+        FIXES DOUBLE-COUNTING BUG: Uses session-based auto mode detection to prevent
+        accumulation issues when the same session updates watermark multiple times.
+        """
         try:
             # Get existing watermark
             watermark = self.get_table_watermark(table_name)
@@ -1807,7 +1877,193 @@ class S3WatermarkManager:
                 )
             
             return success
-            
+
         except Exception as e:
             logger.error(f"Failed to update watermark directly for {table_name}: {e}")
             raise WatermarkError(f"Failed to update watermark directly: {e}")
+
+    def update_cumulative_metrics(
+        self,
+        table_name: str,
+        rows_extracted: Optional[int] = None,
+        rows_loaded: Optional[int] = None,
+        s3_files_created: Optional[List[str]] = None,
+        s3_files_processed: Optional[List[str]] = None,
+        mode: str = 'auto',
+        session_id: Optional[str] = None,
+        mysql_session_id: Optional[str] = None,
+        redshift_session_id: Optional[str] = None
+    ) -> bool:
+        """
+        Unified interface for mode-controlled cumulative watermark updates.
+
+        This method provides a single entry point for updating all cumulative metrics
+        with consistent mode control (auto/absolute/additive) across:
+
+        1. MySQL Rows Extracted (with mysql_session_id)
+        2. Redshift Rows Loaded (with redshift_session_id)
+        3. S3 Files Created (backup_s3_files list)
+        4. S3 Files Processed (processed_s3_files list)
+
+        Args:
+            table_name: Name of the table
+            rows_extracted: Number of rows extracted from MySQL (optional)
+            rows_loaded: Number of rows loaded to Redshift (optional)
+            s3_files_created: List of S3 file paths created during backup (optional)
+            s3_files_processed: List of S3 file paths processed/loaded (optional)
+            mode: Update mode ('auto', 'absolute', 'additive')
+            session_id: Global session ID (used if specific session IDs not provided)
+            mysql_session_id: MySQL-specific session ID (overrides session_id)
+            redshift_session_id: Redshift-specific session ID (overrides session_id)
+
+        Returns:
+            True if successful, False otherwise
+
+        Mode Behavior:
+            - 'auto': Same session = absolute, different session = additive
+            - 'absolute': Replace existing values (for same session updates)
+            - 'additive': Add to existing values (for cross-session accumulation)
+        """
+        try:
+            # Get existing watermark
+            watermark = self.get_table_watermark(table_name)
+            if not watermark:
+                logger.warning(f"No existing watermark for {table_name}, creating new one")
+                watermark = S3TableWatermark(
+                    table_name=table_name,
+                    created_at=datetime.utcnow().isoformat() + 'Z'
+                )
+
+            # Determine effective session IDs
+            effective_mysql_session = mysql_session_id or session_id
+            effective_redshift_session = redshift_session_id or session_id
+
+            # Update MySQL rows extracted with mode control
+            if rows_extracted is not None and rows_extracted > 0:
+                effective_mode = self._determine_effective_mode(
+                    mode, effective_mysql_session, getattr(watermark, 'last_session_id', None)
+                )
+
+                if effective_mode == 'absolute':
+                    previous_count = watermark.mysql_rows_extracted or 0
+                    watermark.mysql_rows_extracted = rows_extracted
+                    logger.info(f"MySQL rows absolute update: replaced {previous_count} with {rows_extracted}")
+                elif effective_mode == 'additive':
+                    current_rows = watermark.mysql_rows_extracted or 0
+                    watermark.mysql_rows_extracted = current_rows + rows_extracted
+                    logger.info(f"MySQL rows additive update: {current_rows} + {rows_extracted} = {watermark.mysql_rows_extracted}")
+
+                # Update session ID
+                if effective_mysql_session:
+                    watermark.last_session_id = effective_mysql_session
+
+            # Update Redshift rows loaded with mode control
+            if rows_loaded is not None and rows_loaded > 0:
+                effective_mode = self._determine_effective_mode(
+                    mode, effective_redshift_session, getattr(watermark, 'last_redshift_session_id', None)
+                )
+
+                if effective_mode == 'absolute':
+                    previous_count = watermark.redshift_rows_loaded or 0
+                    watermark.redshift_rows_loaded = rows_loaded
+                    logger.info(f"Redshift rows absolute update: replaced {previous_count} with {rows_loaded}")
+                elif effective_mode == 'additive':
+                    current_rows = watermark.redshift_rows_loaded or 0
+                    watermark.redshift_rows_loaded = current_rows + rows_loaded
+                    logger.info(f"Redshift rows additive update: {current_rows} + {rows_loaded} = {watermark.redshift_rows_loaded}")
+
+                # Update session ID
+                if effective_redshift_session:
+                    watermark.last_redshift_session_id = effective_redshift_session
+
+            # Update S3 files created with mode control
+            if s3_files_created is not None:
+                if not hasattr(watermark, 'backup_s3_files') or not watermark.backup_s3_files:
+                    watermark.backup_s3_files = []
+
+                effective_mode = self._determine_effective_mode(
+                    mode, effective_mysql_session, getattr(watermark, 'last_session_id', None)
+                )
+
+                if effective_mode == 'absolute':
+                    previous_count = len(watermark.backup_s3_files)
+                    watermark.backup_s3_files = s3_files_created.copy()
+                    logger.info(f"S3 files absolute update: replaced {previous_count} files with {len(s3_files_created)} files")
+                elif effective_mode == 'additive':
+                    existing_files = set(watermark.backup_s3_files)
+                    new_files = []
+                    for file_path in s3_files_created:
+                        if file_path not in existing_files:
+                            watermark.backup_s3_files.append(file_path)
+                            new_files.append(file_path)
+                    logger.info(f"S3 files additive update: added {len(new_files)} new files, total now {len(watermark.backup_s3_files)}")
+
+            # Update S3 files processed (move from backup to processed)
+            if s3_files_processed is not None:
+                if not watermark.processed_s3_files:
+                    watermark.processed_s3_files = []
+                if not hasattr(watermark, 'backup_s3_files') or not watermark.backup_s3_files:
+                    watermark.backup_s3_files = []
+
+                for file_path in s3_files_processed:
+                    # Add to processed files if not already there
+                    if file_path not in watermark.processed_s3_files:
+                        watermark.processed_s3_files.append(file_path)
+                        logger.debug(f"Added to processed files: {file_path.split('/')[-1]}")
+
+                    # Remove from backup files if present
+                    if file_path in watermark.backup_s3_files:
+                        watermark.backup_s3_files.remove(file_path)
+                        logger.debug(f"Removed from backup files: {file_path.split('/')[-1]}")
+
+                logger.info(f"Moved {len(s3_files_processed)} files from backup to processed")
+
+            # Update s3_file_count (total of backup + processed files)
+            backup_count = len(getattr(watermark, 'backup_s3_files', []))
+            processed_count = len(watermark.processed_s3_files or [])
+            watermark.s3_file_count = backup_count + processed_count
+
+            # Update timestamp
+            watermark.updated_at = datetime.utcnow().isoformat() + 'Z'
+
+            # Save to S3
+            success = self._save_watermark(watermark)
+
+            if success:
+                logger.info(
+                    f"Updated cumulative metrics for {table_name}",
+                    mode=mode,
+                    mysql_rows=watermark.mysql_rows_extracted,
+                    redshift_rows=watermark.redshift_rows_loaded,
+                    backup_files=backup_count,
+                    processed_files=processed_count
+                )
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Failed to update cumulative metrics for {table_name}: {e}")
+            raise WatermarkError(f"Failed to update cumulative metrics: {e}")
+
+    def _determine_effective_mode(self, mode: str, current_session: Optional[str], last_session: Optional[str]) -> str:
+        """
+        Determine the effective update mode based on session comparison.
+
+        Args:
+            mode: Requested mode ('auto', 'absolute', 'additive')
+            current_session: Current session ID
+            last_session: Last recorded session ID
+
+        Returns:
+            Effective mode ('absolute' or 'additive')
+        """
+        if mode == 'auto':
+            # Auto mode: same session = absolute, different session = additive
+            if current_session and last_session == current_session:
+                return 'absolute'  # Same session - replace
+            else:
+                return 'additive'  # Different session - accumulate
+        elif mode in ['absolute', 'additive']:
+            return mode
+        else:
+            raise ValueError(f"Invalid watermark mode: {mode}. Must be 'auto', 'absolute', or 'additive'")
