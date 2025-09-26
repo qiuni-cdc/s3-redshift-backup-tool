@@ -626,7 +626,7 @@ DELETE FROM unidw.dw_parcel_detail_tool_temp_utas_2;
       <destinationBCc/>
       <replyto>etl@uniuni.com</replyto>
       <replytoname>etl</replytoname>
-      <subject>Error_US_download_tool</subject>
+      <subject>Error_US_download_tool_temp_table</subject>
       <include_date>N</include_date>
       <contact_person>ETL</contact_person>
       <contact_phone/>
