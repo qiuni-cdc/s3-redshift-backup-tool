@@ -51,15 +51,20 @@ class S3TableWatermark:
         if result['metadata'] is None:
             result['metadata'] = {}
         
-        # Handle datetime serialization and None values
+        # RECURSIVE datetime handling for nested structures
+        def serialize_datetime_recursive(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat() + 'Z' if obj.tzinfo is None else obj.isoformat()
+            elif isinstance(obj, dict):
+                return {k: serialize_datetime_recursive(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [serialize_datetime_recursive(item) for item in obj]
+            else:
+                return obj
+        
+        # Apply recursive datetime serialization to all fields
         for key, value in result.items():
-            if isinstance(value, datetime):
-                result[key] = value.isoformat() + 'Z' if value.tzinfo is None else value.isoformat()
-            elif value is None:
-                result[key] = None  # Explicitly set None for JSON serialization
-            elif isinstance(value, datetime):
-                # Convert datetime to ISO format string for JSON serialization
-                result[key] = value.isoformat() + 'Z' if value.tzinfo is None else value.isoformat()
+            result[key] = serialize_datetime_recursive(value)
         
         return result
     

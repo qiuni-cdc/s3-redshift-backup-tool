@@ -29,6 +29,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
     
     def __init__(self, config):
         super().__init__(config)
+        self.strategy_name = "inter-table"
         self.logger.set_context(strategy="inter_table_parallel", gemini_mode=True)
         self._thread_local = threading.local()
         self._results_lock = threading.Lock()

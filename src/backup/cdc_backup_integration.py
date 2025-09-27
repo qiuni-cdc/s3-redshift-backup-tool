@@ -116,7 +116,8 @@ class CDCBackupIntegration:
                                table_name: str, 
                                watermark: Dict[str, Any],
                                limit: int,
-                               table_config: Optional[Dict[str, Any]] = None) -> str:
+                               table_config: Optional[Dict[str, Any]] = None,
+                               table_schema: Optional[Dict[str, str]] = None) -> str:
         """
         Build incremental query using appropriate CDC strategy
         
@@ -127,7 +128,7 @@ class CDCBackupIntegration:
             cdc_strategy = self.get_cdc_strategy(table_name, table_config)
             
             # Build query using strategy
-            query = cdc_strategy.build_query(table_name, watermark, limit)
+            query = cdc_strategy.build_query(table_name, watermark, limit, table_schema)
             
             logger.info(f"Built incremental query for {table_name}", extra={
                 "table": table_name,
@@ -157,11 +158,19 @@ class CDCBackupIntegration:
             # Extract watermark using strategy
             watermark_data = cdc_strategy.extract_watermark_data(batch_data)
             
+            # Format datetime for logging
+            formatted_timestamp = None
+            if watermark_data.last_timestamp:
+                if hasattr(watermark_data.last_timestamp, 'strftime'):
+                    formatted_timestamp = watermark_data.last_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    formatted_timestamp = str(watermark_data.last_timestamp)
+            
             logger.info(f"Extracted watermark data for {table_name}", extra={
                 "table": table_name,
                 "strategy": watermark_data.strategy_used,
                 "rows_processed": watermark_data.row_count,
-                "last_timestamp": watermark_data.last_timestamp,
+                "last_timestamp": formatted_timestamp,
                 "last_id": watermark_data.last_id
             })
             

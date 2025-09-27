@@ -27,6 +27,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
     
     def __init__(self, config):
         super().__init__(config)
+        self.strategy_name = "sequential"
         self.logger.set_context(strategy="sequential", chunking_type="row_based")
     
     def check_memory_usage(self, batch_number: int) -> bool:

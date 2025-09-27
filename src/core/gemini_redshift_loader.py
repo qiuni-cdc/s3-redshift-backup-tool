@@ -34,10 +34,19 @@ class GeminiRedshiftLoader:
     4. Integration with table watermark system
     """
     
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, connection_registry=None):
         self.config = config
         self.connection_manager = ConnectionManager(config)
-        self.schema_manager = FlexibleSchemaManager(self.connection_manager)
+        
+        # Use provided connection registry (with active SSH tunnels) or create new one
+        if connection_registry is None:
+            try:
+                from src.core.connection_registry import ConnectionRegistry
+                connection_registry = ConnectionRegistry()
+            except Exception as e:
+                logger.warning(f"Failed to load connection registry: {e}")
+        
+        self.schema_manager = FlexibleSchemaManager(self.connection_manager, connection_registry=connection_registry)
         self.watermark_manager = create_watermark_manager(config.to_dict())
         self.column_mapper = ColumnMapper()
         self.logger = logger
@@ -414,18 +423,26 @@ class GeminiRedshiftLoader:
                 logger.warning(f"Failed to check table partition: {e}")
                 has_table_partition = False
             
-            # Use appropriate prefix
-            prefix = table_partition_prefix if has_table_partition else base_prefix
-            logger.info(f"Scanning S3 prefix: {prefix}")
+            # Simple strategy selection based on partition discovery
             
-            # Get all S3 objects
+            # Strategy selection based on partition discovery
+            if has_table_partition:
+                # Use table-specific prefix for maximum efficiency
+                logger.info(f"Using table partition strategy for efficient file discovery")
+                prefix = table_partition_prefix
+                max_keys = 1000  # Reasonable limit for table-specific files
+            else:
+                # CRITICAL FIX: Use table-specific prefix filtering to avoid missing files
+                # The old logic was missing files due to the 2000 file limit excluding older files
+                table_specific_prefix = f"{base_prefix}year=2025/"  # Focus on 2025 files
+                logger.info(f"Using table-specific year prefix with enhanced filtering")
+                prefix = table_specific_prefix
+                max_keys = 5000  # Increased limit to ensure we don't miss files
+            
+            logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
+            
+            # Execute S3 listing with chosen strategy
             try:
-                paginator = s3_client.get_paginator('list_objects_v2')
-                page_iterator = paginator.paginate(
-                    Bucket=self.config.s3.bucket_name,
-                    Prefix=prefix
-                )
-                
                 all_objects = []
                 for page in page_iterator:
                     if 'Contents' in page:

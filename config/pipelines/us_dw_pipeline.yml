@@ -2,11 +2,11 @@
 # Uses US_DW_RO_SSH connection for data warehouse sync
 
 pipeline:
-  name: "us_dw_to_redshift"
-  description: "US Data Warehouse MySQL (US-EAST-1) to Redshift Data Warehouse"
-  source: "US_DW_RO_SSH"          # SSH tunnel: 44.209.128.227 (same as mysql_default)
+  name: "us_dw_pipeline"
+  description: "US Data Warehouse MySQL Settlement to Redshift Data Warehouse"
+  source: "US_DW_RO_SSH"          # SSH tunnel: 35.83.114.196 (fixed connection)
   target: "redshift_default"      # QA Redshift cluster
-  version: "1.1.0"
+  version: "1.2.0"
   
   processing:
     strategy: "sequential"
@@ -40,6 +40,7 @@ tables:
     cdc_timestamp_column: "created_at"
     cdc_id_column: "id"
     description: "Settlement orders with hybrid CDC (timestamp + ID)"
+    target_name: "settle_orders"        # Map to simple table name in Redshift
     processing:
       batch_size: 50000
     validation:

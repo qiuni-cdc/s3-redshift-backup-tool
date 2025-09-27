@@ -85,6 +85,28 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         successful_tables.append(table_name)
                         table_duration = time.time() - table_start_time
                         self.logger.table_completed(table_name, table_duration)
+                        
+                        # CRITICAL FIX: Add S3 files to blacklist after successful backup
+                        if hasattr(self, '_created_s3_files') and self._created_s3_files:
+                            try:
+                                # Add newly created S3 files to processed_files blacklist
+                                self.watermark_manager.simple_manager.update_redshift_state(
+                                    table_name=table_name,
+                                    loaded_files=self._created_s3_files,
+                                    status='pending',  # Files created but not yet loaded to Redshift
+                                    error=None
+                                )
+                                self.logger.logger.info(
+                                    f"Added {len(self._created_s3_files)} S3 files to blacklist",
+                                    table_name=table_name,
+                                    files_count=len(self._created_s3_files)
+                                )
+                            except Exception as e:
+                                self.logger.logger.error(
+                                    f"Failed to update S3 files blacklist: {e}",
+                                    table_name=table_name,
+                                    files_count=len(self._created_s3_files)
+                                )
                     else:
                         failed_tables.append(table_name)
                         self.logger.table_failed(table_name)
@@ -155,6 +177,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 fix_applied="s3_stats_reset_per_table"
             )
             
+            # CRITICAL FIX: Reset S3 files list for accurate per-table tracking
+            self._created_s3_files = []
             
             # Create cursor with dictionary output
             cursor = db_conn.cursor(dictionary=True, buffered=False)
@@ -183,8 +207,20 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 )
                 return False
             
-            # Get current watermark for resume capability
-            watermark = self.watermark_manager.get_table_watermark(table_name)
+            # BUGFIX: Get current watermark using UnifiedWatermarkManager
+            watermark_data = self.unified_watermark.get_watermark(table_name)
+            mysql_state = watermark_data.get('mysql_state', {})
+            
+            # Create compatibility object for existing code
+            class WatermarkCompat:
+                def __init__(self, mysql_state):
+                    self.last_mysql_data_timestamp = mysql_state.get('last_timestamp')
+                    self.last_processed_id = mysql_state.get('last_id')
+                    self.backup_strategy = 'hybrid'  # Default for compatibility
+                    self.mysql_status = mysql_state.get('status', 'pending')
+                    self.mysql_rows_extracted = mysql_state.get('total_rows', 0)
+            
+            watermark = WatermarkCompat(mysql_state) if mysql_state.get('last_id') or mysql_state.get('last_timestamp') else None
             
             # DEBUG: Log watermark details to identify MAX query bug
             if watermark:
@@ -239,7 +275,11 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         table_name=table_name
                     )
                 else:
-                    last_timestamp = str(raw_timestamp)
+                    # Handle datetime object
+                    if hasattr(raw_timestamp, 'isoformat'):
+                        last_timestamp = raw_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        last_timestamp = str(raw_timestamp)
                 self.logger.logger.info(
                     "Resuming row-based backup from watermark",
                     table_name=table_name,
@@ -266,6 +306,15 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Process table in exact row-based chunks
             chunk_number = 1
             
+            # Simple approach: process chunks as they come (no complex accumulation)
+            accumulated_data = []
+            accumulated_last_timestamp = last_timestamp
+            accumulated_last_id = last_id
+            
+            # WATERMARK CEILING: Capture max ID at sync start to prevent infinite loops
+            # This protects against continuous data injection during sync
+            watermark_ceiling = self._get_current_max_id(cursor, table_name, id_column)
+            
             self.logger.logger.info(
                 "Starting row-based chunking",
                 table_name=table_name,
@@ -273,7 +322,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 max_total_rows=max_total_rows,
                 max_chunks_calculated=max_total_rows // effective_chunk_size if max_total_rows else None,
                 resume_from_timestamp=last_timestamp,
-                resume_from_id=last_id
+                resume_from_id=last_id,
+                watermark_ceiling=watermark_ceiling,
+                protection="continuous_injection_safety"
             )
             
             while True:
@@ -344,15 +395,58 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 rows_in_chunk = len(chunk_data)
                 
+                # Simple end condition: no more data means we're done
+                if rows_in_chunk == 0:
+                    self.logger.logger.info(
+                        "No more data - ending sync",
+                        table_name=table_name,
+                        reason="NO_MORE_DATA"
+                    )
+                    break
+                
+                # QUICK FIX: Sparse sequence detection
+                # If chunk efficiency is very low, this indicates sparse ID sequences
+                SPARSE_EFFICIENCY_THRESHOLD = 0.10  # 10%
+                MIN_CHUNK_SIZE_FOR_SPARSE_CHECK = 1000
+                
+                if (current_chunk_size > MIN_CHUNK_SIZE_FOR_SPARSE_CHECK and 
+                    rows_in_chunk < (current_chunk_size * SPARSE_EFFICIENCY_THRESHOLD)):
+                    
+                    efficiency_percent = round((rows_in_chunk / current_chunk_size) * 100, 1)
+                    self.logger.logger.info(
+                        "Sparse ID sequence detected - ending sync for efficiency",
+                        table_name=table_name,
+                        efficiency_percent=efficiency_percent,
+                        rows_found=rows_in_chunk,
+                        chunk_size_requested=current_chunk_size,
+                        sparse_threshold_percent=10,
+                        optimization="quick_fix_early_termination",
+                        recommendation="Consider implementing row accumulation buffer for better performance"
+                    )
+                    
+                    # Process current chunk normally, then break
+                    # This ensures we don't lose the data we already retrieved
+                    process_current_chunk = True
+                    break_after_chunk = True
+                else:
+                    process_current_chunk = True
+                    break_after_chunk = False
+                
                 # Safe logging for both timestamp and id_only strategies
                 log_data = {
                     "table_name": table_name,
                     "chunk_size_actual": rows_in_chunk,
                     "chunk_size_requested": current_chunk_size,
-                    "id_range_start": chunk_data[0][id_column],
-                    "id_range_end": chunk_data[-1][id_column],
                     "columns_detected": f"{timestamp_column}, {id_column}"
                 }
+                
+                # Only add ID ranges if ID column exists in data
+                if id_column in chunk_data[0]:
+                    log_data["id_range_start"] = chunk_data[0][id_column]
+                    log_data["id_range_end"] = chunk_data[-1][id_column]
+                else:
+                    log_data["id_column_missing"] = id_column
+                    log_data["available_columns"] = list(chunk_data[0].keys())[:10]  # First 10 columns for debug
                 
                 # Only add timestamp ranges if timestamp column exists in data
                 if timestamp_column in chunk_data[0]:
@@ -366,41 +460,60 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     **log_data
                 )
                 
-                # Process chunk in smaller batches for S3 upload
-                batch_size = self.config.backup.batch_size
-                batch_success_count = 0
+                # ACCUMULATE CHUNKS: Add current chunk to accumulator
+                accumulated_data.extend(chunk_data)
+                accumulated_last_timestamp = chunk_last_timestamp
+                accumulated_last_id = chunk_last_id
                 
-                for i in range(0, rows_in_chunk, batch_size):
-                    batch_data = chunk_data[i:i + batch_size]
-                    batch_id = f"chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
-                    
-                    batch_success = self._process_batch_with_retries(
-                        batch_data, table_name, batch_id, current_timestamp
+                # Simple approach: process data immediately if we have any
+                batch_success_count = 0
+                if accumulated_data:
+                    self.logger.logger.info(
+                        f"Processing batch with {len(accumulated_data)} rows",
+                        table_name=table_name,
+                        chunk_number=chunk_number
                     )
                     
-                    if not batch_success:
-                        self.logger.logger.error(
-                            f"Failed to process batch in chunk {chunk_number}",
-                            table_name=table_name,
-                            batch_id=batch_id,
-                            batch_size=len(batch_data)
+                    # Process data in batches for S3 upload
+                    batch_size = self.config.backup.batch_size
+                    for i in range(0, len(accumulated_data), batch_size):
+                        batch_data = accumulated_data[i:i + batch_size]
+                        batch_id = f"chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
+                        
+                        batch_success = self._process_batch_with_retries(
+                            batch_data, table_name, batch_id, current_timestamp
                         )
-                        return False
+                        
+                        if not batch_success:
+                            self.logger.logger.error(
+                                f"Failed to process accumulated batch",
+                                table_name=table_name,
+                                batch_id=batch_id,
+                                batch_size=len(batch_data)
+                            )
+                            return False
+                        
+                        batch_success_count += 1
                     
-                    batch_success_count += 1
-                
-                # Update progress
-                total_rows_processed += rows_in_chunk
+                    # Count actually processed rows before reset
+                    if batch_success_count > 0:
+                        total_rows_processed += len(accumulated_data)
+                    
+                    # Reset accumulator after processing
+                    accumulated_data = []
+                else:
+                    # No processing happened, don't count these rows yet
+                    pass
                 chunk_duration = time.time() - chunk_start_time
                 
                 # Update watermark after successful chunk (absolute progress tracking)
-                # ENHANCED: Track S3 files created in this chunk
-                chunk_s3_files = self._get_chunk_s3_files(table_name, current_timestamp)
+                # Use accumulated values if we processed data, otherwise use chunk values
+                final_timestamp = accumulated_last_timestamp if batch_success_count > 0 else chunk_last_timestamp
+                final_id = accumulated_last_id if batch_success_count > 0 else chunk_last_id
                 
-                self._update_chunk_watermark_with_files(
-                    table_name, chunk_last_timestamp, chunk_last_id, 
-                    total_rows_processed,  # Use absolute total, not incremental
-                    chunk_s3_files  # Track files created in this chunk
+                self._update_chunk_watermark_absolute(
+                    table_name, final_timestamp, final_id, 
+                    total_rows_processed  # Use absolute total, not incremental
                 )
                 
                 self.logger.logger.info(
@@ -421,6 +534,42 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 last_id = chunk_last_id
                 chunk_number += 1
                 
+                # WATERMARK CEILING: Check if we've reached the ceiling to prevent infinite sync
+                if watermark_ceiling and chunk_last_id and chunk_last_id >= watermark_ceiling:
+                    self.logger.logger.info(
+                        "Reached watermark ceiling - sync complete",
+                        table_name=table_name,
+                        watermark_ceiling=watermark_ceiling,
+                        last_processed_id=chunk_last_id,
+                        chunks_processed=chunk_number - 1,
+                        total_rows_processed=total_rows_processed,
+                        protection="continuous_injection_prevention"
+                    )
+                    break
+                
+                # QUICK FIX: Break after processing current chunk if sparse sequence detected
+                if break_after_chunk:
+                    self.logger.logger.info(
+                        "Breaking after processing sparse chunk - optimization applied",
+                        table_name=table_name,
+                        chunks_processed=chunk_number - 1,
+                        total_rows_processed=total_rows_processed,
+                        optimization="sparse_sequence_early_termination"
+                    )
+                    break
+                
+                # SPECIAL CASE: For full_sync replace mode
+                # Check if this is a full_sync replace table based on configuration
+                if table_config and table_config.get('cdc_strategy') == 'full_sync' and table_config.get('full_sync_mode') == 'replace':
+                    self.logger.logger.info(
+                        "Full sync replace mode completed - table fully processed",
+                        table_name=table_name,
+                        total_rows_processed=total_rows_processed,
+                        mode="full_sync_replace",
+                        reason="Full sync replace tables process complete table in one iteration"
+                    )
+                    break
+                
                 # Memory management
                 self.memory_manager.force_gc_if_needed(chunk_number)
                 if not self.memory_manager.check_memory_usage(chunk_number):
@@ -430,18 +579,51 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         chunk_number=chunk_number
                     )
             
-            # Final watermark update with completion status (additive session total)
-            # Handle last_timestamp which could be string or datetime
-            if isinstance(last_timestamp, str):
-                max_timestamp = datetime.fromisoformat(last_timestamp)
-            elif isinstance(last_timestamp, datetime):
-                max_timestamp = last_timestamp
-            else:
-                # Fallback to current time if timestamp is invalid
-                max_timestamp = datetime.now()
-                self.logger.logger.warning(
-                    f"Invalid last_timestamp type: {type(last_timestamp)}, using current time"
+            # FINAL ACCUMULATOR FLUSH: Process any remaining accumulated data
+            if accumulated_data:
+                self.logger.logger.info(
+                    f"Processing final accumulated batch with {len(accumulated_data)} rows",
+                    table_name=table_name,
+                    reason="end_of_table"
                 )
+                
+                batch_size = self.config.backup.batch_size
+                for i in range(0, len(accumulated_data), batch_size):
+                    batch_data = accumulated_data[i:i + batch_size]
+                    batch_id = f"final_accumulated_batch_{(i // batch_size) + 1}"
+                    
+                    batch_success = self._process_batch_with_retries(
+                        batch_data, table_name, batch_id, current_timestamp
+                    )
+                    
+                    if not batch_success:
+                        self.logger.logger.error(
+                            f"Failed to process final accumulated batch",
+                            table_name=table_name,
+                            batch_id=batch_id,
+                            batch_size=len(batch_data)
+                        )
+                        return False
+                
+                # Count final processed rows
+                total_rows_processed += len(accumulated_data)
+                
+                # Update final watermark with accumulated values
+                self._update_chunk_watermark_absolute(
+                    table_name, accumulated_last_timestamp, accumulated_last_id, 
+                    total_rows_processed
+                )
+            
+            # Final watermark update with completion status (additive session total)
+            # Handle datetime objects, ISO format strings, and UNIX timestamps
+            if isinstance(last_timestamp, datetime):
+                max_data_timestamp = last_timestamp
+            elif isinstance(last_timestamp, (int, float)):
+                # Handle UNIX timestamp (integer)
+                max_data_timestamp = datetime.fromtimestamp(last_timestamp)
+            else:
+                # Handle ISO format string
+                max_data_timestamp = datetime.fromisoformat(str(last_timestamp))
             
             self._set_final_watermark_with_session_control(
                 table_name=table_name,
@@ -571,8 +753,62 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if candidate in columns:
                 return candidate
                 
-        # Fallback to default if none found (should not happen after validation)
-        return 'ID'
+        # Fallback to first column if no standard ID column found
+        if columns:
+            logger.warning(f"No standard ID column found for {table_name}, using first column: {columns[0]}")
+            return columns[0]
+        else:
+            logger.error(f"No columns found for table {table_name}")
+            return 'id'  # Last resort fallback
+    
+    def _get_current_max_id(self, cursor, table_name: str, id_column: str) -> Optional[int]:
+        """
+        Get the current maximum ID in the table to set watermark ceiling.
+        This prevents infinite sync when new data is continuously injected.
+        
+        Args:
+            cursor: Database cursor
+            table_name: Name of the table (may be scoped for v1.2.0)
+            id_column: Name of the ID column
+            
+        Returns:
+            Maximum ID in the table, or None if error
+        """
+        try:
+            # Extract MySQL table name from potentially scoped name
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            # Query for max ID
+            max_id_query = f"SELECT MAX({id_column}) FROM {mysql_table_name}"
+            cursor.execute(max_id_query)
+            result = cursor.fetchone()
+            
+            if result and result[0] is not None:
+                max_id = int(result[0])
+                self.logger.logger.info(
+                    "Captured current max ID for watermark ceiling",
+                    table_name=table_name,
+                    id_column=id_column,
+                    max_id=max_id,
+                    query=max_id_query
+                )
+                return max_id
+            else:
+                self.logger.logger.warning(
+                    "No max ID found in table - table may be empty",
+                    table_name=table_name,
+                    id_column=id_column
+                )
+                return None
+                
+        except Exception as e:
+            self.logger.logger.error(
+                "Failed to get current max ID for watermark ceiling",
+                table_name=table_name,
+                id_column=id_column,
+                error=str(e)
+            )
+            return None
     
     def _get_configured_timestamp_column(self, table_name: str) -> str:
         """
@@ -772,8 +1008,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Extract MySQL table name for query building
             mysql_table_name = self._extract_mysql_table_name(table_name)
+            
+            # Get table schema for UNIX timestamp detection
+            table_schema = self._get_table_schema(cursor, table_name)
+            
             query = self.cdc_integration.build_incremental_query(
-                mysql_table_name, watermark, chunk_size, table_config
+                mysql_table_name, watermark, chunk_size, table_config, table_schema
             )
             
             self.logger.logger.info(
@@ -803,26 +1043,48 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if chunk_data:
                 first_row = chunk_data[0]
                 last_row = chunk_data[-1]
+                
+                # CRITICAL FIX: Extract actual LIMIT used from query (not requested chunk_size)
+                # The CDC system may override the requested chunk_size for full_sync replace mode
+                import re
+                limit_match = re.search(r'LIMIT\s+(\d+)', query, re.IGNORECASE)
+                actual_limit_used = int(limit_match.group(1)) if limit_match else chunk_size
+                
                 self.logger.logger.info(
                     "Query execution completed - DETAILED DEBUG",
                     table_name=table_name,
                     rows_found=len(chunk_data),
                     chunk_size_requested=chunk_size,
-                    rows_vs_limit_ratio=f"{len(chunk_data)}/{chunk_size}",
+                    actual_limit_used=actual_limit_used,
+                    rows_vs_limit_ratio=f"{len(chunk_data)}/{actual_limit_used}",
                     first_row_id=first_row.get(id_column),
                     last_row_id=last_row.get(id_column),
                     id_column_used=id_column,
                     query_executed=query.replace('\n', ' ').strip()
                 )
                 
-                # Critical check: Verify LIMIT was respected
-                if len(chunk_data) > chunk_size:
+                # Critical check: Verify LIMIT was respected (use actual limit from query)
+                # EXCEPTION: Full sync replace mode uses very high LIMIT (999999999)
+                # and expects to get all table rows in one chunk
+                is_full_sync_large_limit = actual_limit_used >= 999_999_999
+                
+                if len(chunk_data) > actual_limit_used and not is_full_sync_large_limit:
                     self.logger.logger.error(
                         "CRITICAL BUG: Query returned more rows than LIMIT",
                         table_name=table_name,
                         requested_limit=chunk_size,
+                        actual_limit_used=actual_limit_used,
                         actual_rows=len(chunk_data),
-                        excess_rows=len(chunk_data) - chunk_size
+                        excess_rows=len(chunk_data) - actual_limit_used
+                    )
+                elif is_full_sync_large_limit and len(chunk_data) < actual_limit_used:
+                    # For full sync replace, if we got less than LIMIT, we have all data
+                    self.logger.logger.info(
+                        "Full sync replace: received complete table",
+                        table_name=table_name,
+                        total_rows=len(chunk_data),
+                        limit_used=actual_limit_used,
+                        mode="full_table_complete"
                     )
             else:
                 self.logger.logger.info(
@@ -865,6 +1127,13 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Convert to legacy format for compatibility
             chunk_last_timestamp = watermark_data.last_timestamp or safe_last_timestamp
             chunk_last_id = watermark_data.last_id or safe_last_id
+            
+            # BUGFIX: Always use actual last ID from data to prevent arithmetic errors
+            if chunk_data:
+                id_column = self._get_configured_id_column(table_name)
+                actual_last_id = chunk_data[-1].get(id_column)
+                if actual_last_id is not None:
+                    chunk_last_id = actual_last_id
             
             self.logger.logger.debug(
                 "Retrieved row-based chunk",
@@ -1063,8 +1332,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             if last_processed_id is not None:
                 watermark_data['last_processed_id'] = last_processed_id
             
-            # CRITICAL: Set absolute row count, not additive
-            watermark_data['mysql_rows_extracted'] = total_rows_processed
+            # BUGFIX: Don't overwrite cumulative total with session total
+            # Keep existing cumulative total instead of overwriting with session total
+            if current_watermark and hasattr(current_watermark, 'mysql_rows_extracted'):
+                watermark_data['mysql_rows_extracted'] = current_watermark.mysql_rows_extracted + total_rows_processed
+            else:
+                watermark_data['mysql_rows_extracted'] = total_rows_processed
             
             if error_message:
                 watermark_data['last_error'] = error_message
@@ -1076,17 +1349,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 if hasattr(current_watermark, 's3_file_count'):
                     watermark_data['s3_file_count'] = current_watermark.s3_file_count
             
-            # Use v2.0 direct API for better performance
+            # BUGFIX: Use UnifiedWatermarkManager for reliable persistence
             try:
-                self.watermark_manager.simple_manager.update_mysql_state(
+                success = self.unified_watermark.update_watermark(
                     table_name=table_name,
-                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
-                    id=watermark_data.get('last_processed_id'),
+                    last_id=watermark_data.get('last_processed_id'),
+                    last_timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    rows_processed=total_rows_processed,
                     status=watermark_data.get('mysql_status', 'success'),
-                    error=watermark_data.get('last_error'),
-                    rows_extracted=total_rows_processed
+                    error=watermark_data.get('last_error')
                 )
-                success = True
             except Exception as e:
                 self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
                 success = False
@@ -1360,17 +1632,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 'last_mysql_extraction_time': datetime.now().isoformat()
             }
             
-            # Use v2.0 direct API for better performance
+            # BUGFIX: Use UnifiedWatermarkManager for reliable chunk updates
             try:
-                self.watermark_manager.simple_manager.update_mysql_state(
+                success = self.unified_watermark.update_watermark(
                     table_name=table_name,
-                    timestamp=watermark_data.get('last_mysql_data_timestamp'),
-                    id=watermark_data.get('last_processed_id'),
-                    status=watermark_data.get('mysql_status', 'success'),
-                    error=watermark_data.get('last_error'),
-                    rows_extracted=total_rows_processed  # Track incremental progress
+                    last_id=watermark_data.get('last_processed_id'),
+                    last_timestamp=watermark_data.get('last_mysql_data_timestamp'),
+                    rows_processed=0,  # Don't add rows in chunk updates to prevent double-counting
+                    status=watermark_data.get('mysql_status', 'in_progress'),
+                    error=watermark_data.get('last_error')
                 )
-                success = True
             except Exception as e:
                 self.logger.logger.error(f"Failed to update watermark for {table_name}: {e}")
                 success = False
@@ -1462,21 +1733,47 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 fix_applied="simplified_existing_files_count"
             )
             
-            # Use ABSOLUTE mode with TOTAL cumulative count
+            # BUGFIX: Calculate cumulative total instead of overwriting with session total
+            current_watermark = self.watermark_manager.get_table_watermark(table_name)
+            if current_watermark and hasattr(current_watermark, 'mysql_rows_extracted') and current_watermark.mysql_rows_extracted:
+                cumulative_rows = current_watermark.mysql_rows_extracted + session_rows_processed
+            else:
+                cumulative_rows = session_rows_processed
+                
+            # Use simplified watermark update with cumulative count
             success = self.watermark_manager.update_mysql_watermark(
                 table_name=table_name,
                 extraction_time=extraction_time,
                 max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_processed_id,
-                rows_extracted=session_rows_processed,
+                rows_extracted=cumulative_rows,  # Use cumulative instead of session
                 status=status,
-                backup_strategy='row_based',
+                backup_strategy=getattr(self, 'strategy_name', 'sequential'),
                 s3_file_count=actual_s3_files,
-                error_message=error_message,
-                mode='absolute',  # Use absolute mode to reflect session-specific counts
-                session_id=None
+                error_message=error_message
             )
             
+            # CRITICAL FIX: Add S3 files to blacklist after successful backup
+            if status == 'success' and hasattr(self, '_created_s3_files') and self._created_s3_files:
+                try:
+                    # Add newly created S3 files to processed_files blacklist
+                    self.watermark_manager.simple_manager.update_redshift_state(
+                        table_name=table_name,
+                        loaded_files=self._created_s3_files,
+                        status='pending',  # Files created but not yet loaded to Redshift
+                        error=None
+                    )
+                    self.logger.logger.info(
+                        f"Added {len(self._created_s3_files)} S3 files to blacklist",
+                        table_name=table_name,
+                        files_count=len(self._created_s3_files)
+                    )
+                except Exception as e:
+                    self.logger.logger.error(
+                        f"Failed to update S3 files blacklist: {e}",
+                        table_name=table_name,
+                        files_count=len(self._created_s3_files)
+                    )
             
             self.logger.logger.info(
                 "Final watermark updated with absolute count",
@@ -1519,12 +1816,39 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Try exact match first
             if table_name in tables:
-                return tables.get(table_name)
+                config = tables.get(table_name)
+                self.logger.logger.info(f"Found exact table config for {table_name}", extra={
+                    "table": table_name,
+                    "config_keys": list(config.keys()) if config else [],
+                    "has_additional_where": bool(config.get('additional_where') if config else False)
+                })
+                return config
             
             # Extract unscoped table name for scoped lookups (US_DW_UNIDW_SSH:unidw.table -> unidw.table)
             unscoped_name = self._extract_mysql_table_name(table_name)
             if unscoped_name in tables:
-                return tables.get(unscoped_name)
+                config = tables.get(unscoped_name)
+                self.logger.logger.info(f"Found unscoped table config for {table_name} -> {unscoped_name}", extra={
+                    "table": table_name,
+                    "unscoped_name": unscoped_name,
+                    "config_keys": list(config.keys()) if config else [],
+                    "has_additional_where": bool(config.get('additional_where') if config else False),
+                    "additional_where_value": config.get('additional_where') if config else None
+                })
+                return config
+            
+            # Log available table names for debugging
+            self.logger.logger.warning(f"No table config found for {table_name}", extra={
+                "table": table_name,
+                "unscoped_name": unscoped_name,
+                "available_tables": list(tables.keys())[:10]  # First 10 for brevity
+            })
+        else:
+            self.logger.logger.warning(f"No pipeline config available for {table_name}", extra={
+                "table": table_name,
+                "has_pipeline_config": hasattr(self, 'pipeline_config'),
+                "pipeline_config_is_truthy": bool(getattr(self, 'pipeline_config', None))
+            })
         
         return None
     

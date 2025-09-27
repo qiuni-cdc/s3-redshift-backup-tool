@@ -12,6 +12,20 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import structlog
 from structlog.types import FilteringBoundLogger
+import json
+from datetime import datetime
+
+
+def datetime_json_serializer(obj):
+    """JSON serializer that handles datetime objects properly."""
+    if isinstance(obj, datetime):
+        return obj.strftime('%Y-%m-%d %H:%M:%S')
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def json_renderer(logger, method_name, event_dict):
+    """Custom JSON renderer with datetime support."""
+    return json.dumps(event_dict, default=datetime_json_serializer)
 
 
 def setup_logging(
@@ -72,7 +86,7 @@ def setup_logging(
     
     # Choose final renderer based on format preference
     if json_logs:
-        processors.append(structlog.processors.JSONRenderer())
+        processors.append(json_renderer)  # Use custom datetime-aware JSON renderer
     else:
         processors.append(
             structlog.dev.ConsoleRenderer(

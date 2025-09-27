@@ -56,8 +56,9 @@ class CDCConfigurationManager:
                 id_column=table_config.get('cdc_id_column'),
                 ordering_columns=table_config.get('cdc_ordering'),
                 custom_query=table_config.get('custom_query'),
-                batch_size=table_config.get('batch_size', table_config.get('cdc_batch_size', 
-                    table_config.get('system_default_batch_size', 100000)))
+                batch_size=table_config.get('batch_size', 50000),
+                timestamp_format=table_config.get('timestamp_format', 'auto'),
+                additional_where=table_config.get('additional_where')  # NEW: additional WHERE clause
             )
             
             # Handle full_sync strategy metadata
@@ -80,7 +81,9 @@ class CDCConfigurationManager:
                 "strategy": strategy_name,
                 "timestamp_column": cdc_config.timestamp_column,
                 "id_column": cdc_config.id_column,
-                "batch_size": cdc_config.batch_size
+                "batch_size": cdc_config.batch_size,
+                "timestamp_format": cdc_config.timestamp_format,
+                "additional_where": bool(cdc_config.additional_where)  # NEW: show if additional WHERE clause used
             }
             
             # Add full_sync_mode to logs if applicable

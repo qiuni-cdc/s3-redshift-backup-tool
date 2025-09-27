@@ -29,6 +29,48 @@ from src.utils.exceptions import BackupSystemError, ConfigurationError
 from src.core.connections import ConnectionManager
 
 
+def _load_pipeline_config_for_tables(tables: List[str]) -> Optional[Dict[str, Any]]:
+    """
+    Load pipeline configuration for the given tables.
+    Handles v1.2.0 multi-schema support by detecting pipeline from table scoping.
+    """
+    if not tables:
+        return None
+    
+    # Extract pipeline name from first scoped table
+    first_table = tables[0]
+    if ':' not in first_table:
+        return None
+    
+    # Extract connection/pipeline from scoped table name
+    connection_part, _ = first_table.split(':', 1)
+    
+    # Map connection to pipeline file
+    pipeline_mapping = {
+        'US_PROD_RO_SSH': 'us_prod_kuaisong_tracking_pipeline',
+        'US_DW_UNIDW_SSH': 'us_dw_unidw_parcel_poc',
+        'US_DW_HYBRID_SSH': 'us_dw_hybrid_v1_2'
+    }
+    
+    pipeline_name = pipeline_mapping.get(connection_part)
+    if not pipeline_name:
+        return None
+    
+    # Load pipeline configuration
+    config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
+    if not config_path.exists():
+        return None
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            logger.info(f"Successfully loaded pipeline config from {config_path}")
+            return config
+    except Exception as e:
+        logger.error(f"Failed to load pipeline config {config_path}: {e}")
+        return None
+
+
 def _create_cdc_strategy_for_table(pipeline_name: str, table_name: str):
     """
     Create CDC strategy instance for a table from pipeline configuration.
@@ -109,7 +151,9 @@ def _create_cdc_strategy_for_table(pipeline_name: str, table_name: str):
             id_column=table_config.get('cdc_id_column'),
             ordering_columns=table_config.get('cdc_ordering_columns'),
             custom_query=table_config.get('cdc_custom_query'),
-            batch_size=batch_size
+            batch_size=table_config.get('cdc_batch_size', 50000),
+            timestamp_format=table_config.get('timestamp_format', 'auto'),
+            additional_where=table_config.get('additional_where')
         )
         
         # For full_sync strategy, add metadata for mode
@@ -771,31 +815,13 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
             # Create and execute backup strategy
             backup_strategy = STRATEGIES[strategy](config)
             
-            # Get batch_size with proper fallback hierarchy
-            # 3. System default (final fallback)
-            pipeline_batch_size = config.backup.target_rows_per_chunk
-            
-            # Try to get batch_size from pipeline configuration if available
-            if pipeline:
-                pipeline_config = _load_pipeline_config(pipeline)
-                if pipeline_config:
-                    # 2. Pipeline default (middle priority)
-                    pipeline_processing = pipeline_config.get('pipeline', {}).get('processing', {})
-                    if 'batch_size' in pipeline_processing:
-                        pipeline_batch_size = pipeline_processing['batch_size']
-                        click.echo(f"   Using pipeline default batch_size: {pipeline_batch_size}")
-                    
-                    # 1. Table-specific (highest priority)
-                    if 'tables' in pipeline_config:
-                        for table_name in tables:
-                            base_table_name = table_name.split(':')[-1] if ':' in table_name else table_name
-                            for table_key, table_config in pipeline_config['tables'].items():
-                                if base_table_name in table_key or table_key in base_table_name:
-                                    processing = table_config.get('processing', {})
-                                    if 'batch_size' in processing:
-                                        pipeline_batch_size = processing['batch_size']
-                                        click.echo(f"   Using table-specific batch_size: {pipeline_batch_size}")
-                                        break
+            # Load pipeline configuration if available for CDC optimization
+            pipeline_config = _load_pipeline_config_for_tables(tables)
+            if pipeline_config:
+                backup_strategy.pipeline_config = pipeline_config
+                click.echo(f"✅ Loaded pipeline config with {len(pipeline_config.get('tables', {}))} table configurations")
+            else:
+                click.echo("⚠️  No pipeline configuration loaded - CDC will use basic mode")
             
             # Calculate parameters based on limit and max_chunks
             chunk_size = limit if limit else pipeline_batch_size
