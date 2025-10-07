@@ -90,7 +90,7 @@ tables:
     target_name: "uni_tracking_spath"
     
     processing:
-      batch_size: 50000                    # Larger batches for highest volume table
+      batch_size: 100000                    # Larger batches for highest volume table
       enable_parallel_processing: false
       query_timeout_seconds: 90            # Longer timeout for larger batches
       
@@ -184,6 +184,38 @@ tables:
       
     performance:
       memory_limit_mb: 4096                # 4GB for medium-large table
+
+  # 7. Uni Sorting Parcels - ~139M+ total, high volume sorting operations
+  kuaisong.uni_sorting_parcels:
+    cdc_strategy: "id_only"
+    cdc_id_column: "id"                    # AUTO_INCREMENT=139258973 primary key
+    
+    description: "Parcel sorting operations - high volume table with ID-based incremental sync (1 month initial load)"
+    target_name: "uni_sorting_parcels"      # Target table in Redshift
+    
+    # Start from 1 month ago to avoid massive initial load
+    start_from: "30 days ago"              # Only sync data from last 30 days
+    initial_load_filter: "sort_time >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 30 DAY))"
+    
+    processing:
+      batch_size: 100000                    # Optimized for high volume sorting operations
+      enable_parallel_processing: false
+      query_timeout_seconds: 120           # 2 minutes for sorting data batches
+      
+    validation:
+      enable_data_quality_checks: true
+      enable_schema_validation: true
+      max_null_percentage: 10.0            # Allow nulls in optional fields (dimensions, box_id)
+      
+    watermark_settings:
+      enable_backup: true
+      validation_mode: "strict"
+      recovery_strategy: "automatic"
+      
+    performance:
+      memory_limit_mb: 4096                # 4GB for high volume table
+      connection_timeout: 300
+      query_timeout: 1800                  # 30 minutes max
 
 monitoring:
   enable_progress_tracking: true
