@@ -1,7 +1,7 @@
 """
 Kuaisong Tracking Tables 15-Minute Sync DAG
-Syncs 6 high-volume tracking tables every 15 minutes without historical data
-Includes order_details (71M+ rows) with ID-only CDC and uni_prealert_order (13.4M+ rows) with timestamp CDC
+Syncs 7 high-volume tracking tables every 15 minutes without historical data
+Includes ID-only CDC tables: order_details (71M+ rows), uni_prealert_order (13.4M+ rows), and uni_sorting_parcels (139M+ rows)
 """
 from airflow import DAG
 from airflow.operators.bash import BashOperator
@@ -34,12 +34,13 @@ def get_smart_timeout(table_name):
 
 # Table configurations with expected volumes and optimized batch sizes
 TABLES = [
-    {"name": "kuaisong.uni_tracking_info", "expected_volume": 500000, "batch_limit": 20000},
+    {"name": "kuaisong.uni_tracking_info", "expected_volume": 500000, "batch_limit": 100000},
     {"name": "kuaisong.uni_tracking_addon_spath", "expected_volume": 500000, "batch_limit": 20000},
-    {"name": "kuaisong.uni_tracking_spath", "expected_volume": 2000000, "batch_limit": 50000},  # Highest volume = largest batch
-    {"name": "kuaisong.ecs_order_info", "expected_volume": 500000, "batch_limit": 20000},
+    {"name": "kuaisong.uni_tracking_spath", "expected_volume": 2000000, "batch_limit": 500000},  # Highest volume = largest batch
+    {"name": "kuaisong.ecs_order_info", "expected_volume": 500000, "batch_limit": 100000},
     {"name": "kuaisong.order_details", "expected_volume": 1000000, "batch_limit": 100000},  # Largest table (71M+ rows) - ID-only CDC
-    {"name": "kuaisong.uni_prealert_order", "expected_volume": 200000, "batch_limit": 50000}  # 13.4M rows - timestamp CDC with created_at
+    {"name": "kuaisong.uni_prealert_order", "expected_volume": 200000, "batch_limit": 50000},  # 13.4M rows - ID-only CDC
+    {"name": "kuaisong.uni_sorting_parcels", "expected_volume": 1500000, "batch_limit": 500000}  # 139M+ rows - ID-only CDC for sorting operations
 ]
 
 default_args = {
@@ -47,20 +48,20 @@ default_args = {
     'depends_on_past': False,
     'start_date': datetime(2025, 9, 17),
     'email_on_failure': False,  # Disabled - SMTP not configured
-    'email': ['data-alerts@company.com'],
+    'email': ['qi.chen@uniuni.com'],
     'retries': 1,
     'retry_delay': timedelta(minutes=2),
-    'execution_timeout': timedelta(minutes=12),  # 12 min timeout (3 min buffer)
+    'execution_timeout': timedelta(minutes=60),  # 60 min timeout for large dataset processing
 }
 
 dag = DAG(
     'kuaisong_tracking_15min_sync',
     default_args=default_args,
-    description='Sync 6 kuaisong tracking tables every 15 minutes - includes order_details (ID-only) and uni_prealert_order (timestamp CDC)',
+    description='Sync 7 kuaisong tracking tables every 15 minutes - includes order_details, uni_prealert_order, and uni_sorting_parcels (all ID-only CDC)',
     schedule_interval='*/15 * * * *',  # Every 15 minutes
     max_active_runs=1,  # Only one instance at a time
     catchup=False,      # Don't run historical
-    tags=['production', 'tracking', '15min', 'kuaisong', 'order_details']
+    tags=['production', 'tracking', '15min', 'kuaisong', 'order_details', 'sorting']
 )
 
 def get_time_window(**context):
@@ -120,7 +121,7 @@ with TaskGroup("sync_tables", dag=dag) as sync_group:
                 --max-workers 1
             ''',
             dag=dag,
-            execution_timeout=timedelta(minutes=20),  # Fixed 20-minute timeout to clear backlog
+            execution_timeout=timedelta(minutes=60),  # 60-minute timeout for large dataset processing
         )
         
         # Chain tasks sequentially to avoid concurrent production queries
@@ -291,24 +292,39 @@ def validate_data_freshness(**context):
             elif table_name == 'order_details':
                 # ID-only table - check max ID and row count instead of timestamp
                 query = f"SELECT MAX(id) as max_id, COUNT(*) as row_count FROM public.{table_name}"
+            elif table_name == 'uni_sorting_parcels':
+                # ID-only table - check max ID, row count, and latest sort time
+                query = f"SELECT MAX(id) as max_id, COUNT(*) as row_count, MAX(FROM_UNIXTIME(sort_time)) as latest_sort FROM public.{table_name}"
             
             try:
                 result = redshift.get_first(query)
                 
-                if table_name == 'order_details':
+                if table_name in ['order_details', 'uni_sorting_parcels']:
                     # Handle ID-only table validation
                     max_id = result[0] if result else None
                     row_count = result[1] if result and len(result) > 1 else None
                     
                     if max_id and row_count:
-                        validation_results.append({
+                        validation_info = {
                             'table': table_name,
                             'max_id': max_id,
                             'row_count': row_count,
                             'is_fresh': True,  # ID-based tables are always considered fresh if they have data
                             'validation_type': 'id_based'
-                        })
-                        print(f"📊 {table_name}: Max ID {max_id:,}, Total rows {row_count:,}")
+                        }
+                        
+                        # For uni_sorting_parcels, also capture latest sort time
+                        if table_name == 'uni_sorting_parcels' and len(result) > 2:
+                            latest_sort = result[2]
+                            if latest_sort:
+                                validation_info['latest_sort_time'] = latest_sort.isoformat()
+                                print(f"📊 {table_name}: Max ID {max_id:,}, Total rows {row_count:,}, Latest sort: {latest_sort}")
+                            else:
+                                print(f"📊 {table_name}: Max ID {max_id:,}, Total rows {row_count:,}")
+                        else:
+                            print(f"📊 {table_name}: Max ID {max_id:,}, Total rows {row_count:,}")
+                        
+                        validation_results.append(validation_info)
                     else:
                         validation_results.append({
                             'table': table_name,
