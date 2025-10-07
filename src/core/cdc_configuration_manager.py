@@ -56,7 +56,7 @@ class CDCConfigurationManager:
                 id_column=table_config.get('cdc_id_column'),
                 ordering_columns=table_config.get('cdc_ordering'),
                 custom_query=table_config.get('custom_query'),
-                batch_size=table_config.get('batch_size', 50000),
+                batch_size=self._resolve_batch_size(table_config),
                 timestamp_format=table_config.get('timestamp_format', 'auto'),
                 additional_where=table_config.get('additional_where')  # NEW: additional WHERE clause
             )
@@ -101,7 +101,7 @@ class CDCConfigurationManager:
             return CDCConfig(
                 strategy=CDCStrategyType.TIMESTAMP_ONLY,
                 timestamp_column='updated_at',
-                batch_size=table_config.get('batch_size', 100000)
+                batch_size=self._resolve_batch_size(table_config)
             )
     
     def _validate_cdc_config(self, config: CDCConfig, table_name: str) -> None:
@@ -119,7 +119,16 @@ class CDCConfigurationManager:
             
         except ValueError as e:
             raise ValueError(f"Invalid CDC configuration for {table_name}: {e}")
-    
+
+    def _resolve_batch_size(self, table_config: Dict[str, Any]) -> int:
+        """Resolve batch size using proper hierarchy"""
+        from src.utils.validation import resolve_batch_size
+
+        return resolve_batch_size(
+            table_config=table_config,
+            pipeline_config=None  # CDC manager doesn't have pipeline context
+        )
+
     def create_cdc_strategy(self, table_config: Dict[str, Any], table_name: str):
         """Create CDC strategy instance for a table"""
         cdc_config = self.parse_table_cdc_config(table_config, table_name)

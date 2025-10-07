@@ -133,25 +133,26 @@ def _create_cdc_strategy_for_table(pipeline_name: str, table_name: str):
         strategy_type = strategy_mapping[cdc_strategy_name]
         
         # Build CDC configuration
-        # Get batch_size from processing config or use pipeline default
-        processing_config = table_config.get('processing', {})
-        batch_size = processing_config.get('batch_size')
-        if batch_size is None:
-            # Fall back to cdc_batch_size for backward compatibility
-            batch_size = table_config.get('cdc_batch_size')
-        if batch_size is None:
-            # Use pipeline default if available
-            pipeline_config = config.get('pipeline', {})
-            pipeline_processing = pipeline_config.get('processing', {})
-            batch_size = pipeline_processing.get('batch_size', 50000)
-        
+        # Get batch_size from processing config using proper hierarchy
+        from src.utils.validation import resolve_batch_size
+
+        batch_size = resolve_batch_size(
+            table_config=table_config,
+            pipeline_config=config.get('pipeline', {}),
+            app_config=app_config
+        )
+
+        # Fall back to cdc_batch_size for backward compatibility if no processing config
+        if 'processing' not in table_config and 'cdc_batch_size' in table_config:
+            batch_size = table_config.get('cdc_batch_size', batch_size)
+
         cdc_config = CDCConfig(
             strategy=strategy_type,
             timestamp_column=table_config.get('cdc_timestamp_column'),
             id_column=table_config.get('cdc_id_column'),
             ordering_columns=table_config.get('cdc_ordering_columns'),
             custom_query=table_config.get('cdc_custom_query'),
-            batch_size=table_config.get('cdc_batch_size', 50000),
+            batch_size=batch_size,
             timestamp_format=table_config.get('timestamp_format', 'auto'),
             additional_where=table_config.get('additional_where')
         )

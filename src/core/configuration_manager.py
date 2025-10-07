@@ -791,14 +791,14 @@ class ConfigurationManager:
         
         for table_name, table_config in pipeline_config.tables.items():
             try:
-                self._validate_single_table_config(table_config)
+                self._validate_single_table_config(table_config, pipeline_config)
                 report['tables_validated'] += 1
             except Exception as e:
                 details['issues'].append(f"Table {table_name}: {e}")
                 report['errors'].append(f"Table {table_name}: {e}")
                 details['valid'] = False
-    
-    def _validate_single_table_config(self, table_config: TableConfig):
+
+    def _validate_single_table_config(self, table_config: TableConfig, pipeline_config: 'PipelineConfig'):
         """Validate a single table configuration"""
         # Check required fields
         if not table_config.full_name:
@@ -813,8 +813,24 @@ class ConfigurationManager:
             if not table_config.cdc_id_column:
                 raise ValidationError(f"CDC ID column required for {table_config.cdc_strategy} strategy")
         
-        # Validate processing settings
-        batch_size = table_config.processing.get('batch_size', 10000)
+        # Validate processing settings using proper hierarchy
+        from src.utils.validation import resolve_batch_size
+
+        # Convert table_config to dictionary format for utility function
+        table_config_dict = {
+            'processing': table_config.processing
+        }
+
+        # Convert pipeline_config to dictionary format
+        pipeline_config_dict = {
+            'processing': getattr(pipeline_config, 'processing', {}) or {}
+        }
+
+        batch_size = resolve_batch_size(
+            table_config=table_config_dict,
+            pipeline_config=pipeline_config_dict
+        )
+
         if not isinstance(batch_size, int) or batch_size <= 0:
             raise ValidationError(f"Invalid batch_size: {batch_size}")
         

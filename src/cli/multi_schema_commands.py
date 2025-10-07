@@ -932,7 +932,11 @@ def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshi
     click.echo(f"🔍 Preview: {table_config.full_name}")
     click.echo(f"  Strategy: {table_config.cdc_strategy}")
     click.echo(f"  Type: {table_config.table_type}")
-    click.echo(f"  Batch size: {table_config.processing.get('batch_size', 10000)}")
+    from src.utils.validation import resolve_batch_size
+    batch_size = resolve_batch_size(
+        table_config={'processing': table_config.processing}
+    )
+    click.echo(f"  Batch size: {batch_size}")
     
     if not redshift_only:
         click.echo(f"  📤 MySQL extraction: {pipeline_config.source}")
@@ -997,7 +1001,12 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             
             # Configure strategy with pipeline settings
             if hasattr(backup_strategy, 'set_batch_size'):
-                batch_size = table_config.processing.get('batch_size', 10000)
+                from src.utils.validation import resolve_batch_size
+
+                batch_size = resolve_batch_size(
+                    table_config={'processing': table_config.processing},
+                    pipeline_config=pipeline_config_dict
+                )
                 backup_strategy.set_batch_size(batch_size)
             
             # Execute the sync using the table name
@@ -1026,7 +1035,11 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             table_list = [scoped_table_name]
             
             # Calculate parameters for the backup
-            chunk_size = limit if limit else table_config.processing.get('batch_size', 10000)
+            from src.utils.validation import resolve_batch_size
+            default_batch_size = resolve_batch_size(
+                table_config={'processing': table_config.processing}
+            )
+            chunk_size = limit if limit else default_batch_size
             max_total_rows = None
             
             if limit and max_chunks:
@@ -1037,7 +1050,11 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             elif limit and not max_chunks:
                 # limit = total row limit (user expectation for --limit 100)
                 max_total_rows = limit
-                chunk_size = min(limit, table_config.processing.get('batch_size', 10000))
+                from src.utils.validation import resolve_batch_size
+                default_batch_size = resolve_batch_size(
+                    table_config={'processing': table_config.processing}
+                )
+                chunk_size = min(limit, default_batch_size)
                 logger.info(f"Total row limit for {base_table_name}: {max_total_rows} rows (chunk size: {chunk_size})")
             elif max_chunks and not limit:
                 # max_chunks specified but no limit - use default chunk size

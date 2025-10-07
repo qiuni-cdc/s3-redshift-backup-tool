@@ -676,3 +676,45 @@ def quick_validate(data: Union[pd.DataFrame, pa.Table]) -> bool:
     """Quick validation that returns only pass/fail"""
     result = validate_data(data)
     return result.is_valid
+
+
+def resolve_batch_size(table_config: Dict[str, Any],
+                      pipeline_config: Optional[Dict[str, Any]] = None,
+                      app_config=None) -> int:
+    """
+    Resolve batch size using proper hierarchy.
+
+    Priority order:
+    1. Table-specific processing.batch_size (highest priority)
+    2. Pipeline processing.batch_size (fallback)
+    3. System default from AppConfig (final fallback)
+
+    Args:
+        table_config: Table configuration dictionary
+        pipeline_config: Pipeline configuration dictionary (optional)
+        app_config: Application configuration object (optional)
+
+    Returns:
+        Resolved batch size as integer
+    """
+    # 1. Table-specific processing.batch_size (highest priority)
+    processing_config = table_config.get('processing', {})
+    batch_size = processing_config.get('batch_size')
+
+    if batch_size is not None:
+        return int(batch_size)
+
+    # 2. Pipeline processing.batch_size (fallback)
+    if pipeline_config:
+        pipeline_processing = pipeline_config.get('processing', {})
+        batch_size = pipeline_processing.get('batch_size')
+
+        if batch_size is not None:
+            return int(batch_size)
+
+    # 3. System default from AppConfig (final fallback)
+    if app_config is None:
+        from src.config.settings import AppConfig
+        app_config = AppConfig()
+
+    return int(app_config.backup.target_rows_per_chunk)
