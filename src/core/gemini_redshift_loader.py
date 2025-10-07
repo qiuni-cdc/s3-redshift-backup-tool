@@ -159,11 +159,27 @@ class GeminiRedshiftLoader:
                 self._set_error_status(table_name, "All COPY operations failed")
                 return False
             
-            # CRITICAL FIX: Only update watermark with ACTUAL loaded rows and files
-            logger.info(f"✅ Successfully loaded {total_rows_loaded} rows from {successful_files}/{len(s3_files)} files")
+            # Redshift load lifecycle monitoring
+            watermark = self.watermark_manager.get_table_watermark(table_name)
+            blacklist_size = len(watermark.processed_s3_files) if watermark and watermark.processed_s3_files else 0
+            
+            logger.info(
+                "Redshift Load Monitoring",
+                table_name=table_name,
+                files_discovered=len(s3_files),
+                files_successfully_loaded=successful_files,
+                files_failed=len(s3_files) - successful_files,
+                total_rows_loaded=total_rows_loaded,
+                blacklist_size_before=blacklist_size,
+                blacklist_size_after=blacklist_size + successful_files
+            )
+            
+            # Update watermark with loaded files (this adds them to blacklist)
             self._set_success_status(table_name, load_start_time, total_rows_loaded, loaded_file_uris)
             
-            logger.info(f"Gemini Redshift load completed for {table_name}: {total_rows_loaded} rows from {successful_files}/{len(s3_files)} files")
+            # Final monitoring summary
+            logger.info(f"✅ Load completed: {table_name} - {total_rows_loaded} rows loaded, {successful_files} files processed")
+            logger.info(f"✅ Gemini Redshift load completed for {table_name}: {total_rows_loaded} rows from {successful_files}/{len(s3_files)} files")
             return True
             
         except Exception as e:
@@ -360,12 +376,13 @@ class GeminiRedshiftLoader:
                 prefix = table_partition_prefix
                 max_keys = 1000  # Reasonable limit for table-specific files
             else:
-                # CRITICAL FIX: Use table-specific prefix filtering to avoid missing files
-                # The old logic was missing files due to the 2000 file limit excluding older files
-                table_specific_prefix = f"{base_prefix}year=2025/"  # Focus on 2025 files
-                logger.info(f"Using table-specific year prefix with enhanced filtering")
-                prefix = table_specific_prefix
-                max_keys = 5000  # Increased limit to ensure we don't miss files
+                # Priority search for today's files first
+                from datetime import datetime
+                today = datetime.now()
+                today_prefix = f"{base_prefix}year={today.year}/month={today.month:02d}/day={today.day:02d}/"
+                logger.info(f"Prioritizing today's files with prefix: {today_prefix}")
+                prefix = today_prefix
+                max_keys = 1000  # Start with today's files only
             
             logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
             
@@ -451,35 +468,21 @@ class GeminiRedshiftLoader:
                 s3_uri = f"s3://{self.config.s3.bucket_name}/{key}"
                 logger.debug(f"S3 URI: {s3_uri}")
                 
-                # PURE BLACKLIST APPROACH: Only check if file was already processed
+                # Check if file was already processed using blacklist
                 if s3_uri in processed_files_set:
                     logger.debug(f"❌ EXCLUDING file (already processed): {key}")
                     continue
                 
-                # PURE BLACKLIST: Include all files not in blacklist
+                # Include files not in blacklist
                 filtered_files.append(s3_uri)
-                logger.info(f"✅ INCLUDING file (not in processed list): {key}")
-                logger.debug(f"   File URI: {s3_uri}")
-                logger.debug(f"   File in blacklist: False")
+                logger.debug(f"✅ INCLUDING file (not in processed list): {key}")
             
             logger.info(f"FILTERING SUMMARY: Found {len(parquet_files)} total files, filtered to {len(filtered_files)} files for loading")
             
-            # PURE BLACKLIST DEBUG: Show filtering criteria
-            logger.info(f"FILTERING CRITERIA (Pure Blacklist Approach):")
-            logger.info(f"  Total parquet files found: {len(parquet_files)}")
-            logger.info(f"  Previously processed files (blacklist): {len(processed_files)}")
-            logger.info(f"  Files eligible for loading: {len(filtered_files)}")
-            
-            # DEBUG: Show filtering results
-            if len(parquet_files) > 0:
-                if len(filtered_files) == 0:
-                    logger.warning(f"⚠️ ALL {len(parquet_files)} FILES WERE EXCLUDED (already processed)")
-                    logger.info(f"BLACKLIST DEBUG:")
-                    logger.info(f"  Found {len(processed_files)} files in blacklist")
-                    logger.info(f"  All discovered files are already processed")
-                    logger.info(f"  This may be expected if no new data since last sync")
-                else:
-                    logger.info(f"✅ BLACKLIST FILTERING SUCCESS: {len(filtered_files)}/{len(parquet_files)} files are new (not processed before)")
+            # Show filtering results
+            logger.info(f"Filtering results: {len(filtered_files)}/{len(parquet_files)} files eligible for loading")
+            if len(filtered_files) == 0 and len(parquet_files) > 0:
+                logger.warning(f"All {len(parquet_files)} files were already processed")
             
             return filtered_files
             

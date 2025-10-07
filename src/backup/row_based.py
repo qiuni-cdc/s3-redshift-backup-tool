@@ -89,18 +89,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         # CRITICAL FIX: Add S3 files to blacklist after successful backup
                         if hasattr(self, '_created_s3_files') and self._created_s3_files:
                             try:
-                                # Add newly created S3 files to processed_files blacklist
-                                self.watermark_manager.simple_manager.update_redshift_state(
-                                    table_name=table_name,
-                                    loaded_files=self._created_s3_files,
-                                    status='pending',  # Files created but not yet loaded to Redshift
-                                    error=None
-                                )
-                                self.logger.logger.info(
-                                    f"Added {len(self._created_s3_files)} S3 files to blacklist",
-                                    table_name=table_name,
-                                    files_count=len(self._created_s3_files)
-                                )
+                                # Do not update blacklist during backup phase
+                                # Only Redshift loader should update blacklist after successful load
+                                self.logger.logger.info(f"Created {len(self._created_s3_files)} S3 files - blacklist will be updated after Redshift load")
                             except Exception as e:
                                 self.logger.logger.error(
                                     f"Failed to update S3 files blacklist: {e}",
@@ -895,7 +886,14 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 return 0
             
             # Get table-specific file pattern
-            safe_table_name = table_name.replace('.', '_')
+            # Handle scoped table names to match actual file pattern
+            if ':' in table_name:
+                # For "US_DW_RO_SSH:settlement.settle_orders"
+                scope, clean_table = table_name.split(':', 1)
+                # Create pattern like "us_dw_ro_ssh_settlement_settle_orders"
+                safe_table_name = f"{scope.lower()}_{clean_table}".replace('.', '_')
+            else:
+                safe_table_name = table_name.replace('.', '_')
             
             # Search for all parquet files for this table
             response = self.s3_manager.s3_client.list_objects_v2(
@@ -1492,12 +1490,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Get actual S3 file count from S3 directly (not in-memory stats)
             actual_s3_files = self._count_actual_s3_files(table_name)
             
+            # S3 file lifecycle monitoring
+            created_files_count = len(self._created_s3_files) if hasattr(self, '_created_s3_files') and self._created_s3_files else 0
+            
             self.logger.logger.info(
-                "S3 file count tracking for watermark update",
+                "S3 File Lifecycle Monitoring",
                 table_name=table_name,
-                s3_files_created=actual_s3_files,
+                s3_files_discovered=actual_s3_files,
+                s3_files_created_this_session=created_files_count,
                 session_rows=session_rows_processed,
-                s3_files_tracked=True
+                backup_phase="completed"
             )
             
             # BUGFIX: Calculate cumulative total instead of overwriting with session total
@@ -1520,21 +1522,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 error_message=error_message
             )
             
-            # CRITICAL FIX: Add S3 files to blacklist after successful backup
+            # Do not add S3 files to blacklist during backup
+            # Blacklist updates should only happen after successful Redshift load
             if status == 'success' and hasattr(self, '_created_s3_files') and self._created_s3_files:
                 try:
-                    # Add newly created S3 files to processed_files blacklist
-                    self.watermark_manager.simple_manager.update_redshift_state(
-                        table_name=table_name,
-                        loaded_files=self._created_s3_files,
-                        status='pending',  # Files created but not yet loaded to Redshift
-                        error=None
-                    )
-                    self.logger.logger.info(
-                        f"Added {len(self._created_s3_files)} S3 files to blacklist",
-                        table_name=table_name,
-                        files_count=len(self._created_s3_files)
-                    )
+                    # Log file creation without updating blacklist
+                    self.logger.logger.info(f"Created {len(self._created_s3_files)} S3 files, blacklist will be updated after Redshift load")
                 except Exception as e:
                     self.logger.logger.error(
                         f"Failed to update S3 files blacklist: {e}",
