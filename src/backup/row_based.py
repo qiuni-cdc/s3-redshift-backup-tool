@@ -1732,7 +1732,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 total_existing_files=total_existing_files,
                 total_existing_rows=total_existing_rows,
                 session_rows=session_rows_processed,
-                backup_phase="completed"
+                backup_phase="completed",
                 fix_applied="simplified_existing_files_count"
             )
             
