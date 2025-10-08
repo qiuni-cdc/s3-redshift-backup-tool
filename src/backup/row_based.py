@@ -619,7 +619,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             self._set_final_watermark_with_session_control(
                 table_name=table_name,
                 extraction_time=datetime.now(),
-                max_data_timestamp=max_timestamp,
+                max_data_timestamp=max_data_timestamp,
                 last_processed_id=last_id,
                 session_rows_processed=total_rows_processed,  # Session total
                 status='success'
@@ -1720,7 +1720,10 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             except Exception as e:
                 self.logger.logger.warning(f"Failed to count rows in existing S3 files: {e}")
                 total_existing_rows = session_rows_processed  # Fallback to current session
-            
+
+            # Calculate files created this session (estimate based on current backup files)
+            created_files_count = len(existing_backup_files) if existing_backup_files else 0
+
             self.logger.logger.info(
                 "S3 File Lifecycle Monitoring",
                 "Simplified watermark calculation - count all existing S3 files",

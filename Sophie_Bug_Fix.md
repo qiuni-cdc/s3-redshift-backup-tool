@@ -794,7 +794,7 @@ python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_un
 python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
 python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 300 2>&1 | tee pricing_temp.log 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 200 2>&1 | tee pricing_temp.log 
 python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
 
 python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
