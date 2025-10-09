@@ -297,7 +297,7 @@ class FlexibleSchemaManager:
         # Extract table name without schema
         clean_table_name = table_name.split('.')[-1]
         
-        ddl_lines = [f"CREATE TABLE IF NOT EXISTS public.{clean_table_name} ("]
+        ddl_lines = [f"CREATE TABLE IF NOT EXISTS {clean_table_name} ("]
         
         column_ddls = []
         primary_key_candidates = []

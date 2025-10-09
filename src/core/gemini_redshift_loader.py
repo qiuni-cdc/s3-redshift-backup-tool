@@ -105,8 +105,6 @@ class GeminiRedshiftLoader:
             
             # Step 2: Create or update Redshift table
             redshift_table_name = self._get_redshift_table_name(table_name, table_config)
-            
-            # FIXED: Update DDL to use correct target table name if custom mapping is used
             corrected_ddl = self._fix_ddl_table_name(redshift_ddl, redshift_table_name, table_name)
             table_created = self._ensure_redshift_table(redshift_table_name, corrected_ddl)
             
@@ -327,21 +325,22 @@ class GeminiRedshiftLoader:
         else:
             source_table_only = clean_source
         
-        # Pattern to match CREATE TABLE statements
-        # Handles both "CREATE TABLE table_name" and "CREATE TABLE IF NOT EXISTS table_name"
-        pattern = r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:public\.)?(\w+)'
-        
+        # Pattern to match CREATE TABLE statements with optional schema prefix
+        # Handles: "CREATE TABLE schema.table" or "CREATE TABLE IF NOT EXISTS schema.table" or "CREATE TABLE table"
+        pattern = r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:(\w+)\.)?(\w+)'
+
         # Find the current table name in DDL
         match = re.search(pattern, ddl, re.IGNORECASE)
         if match:
-            current_table_in_ddl = match.group(1)
-            
+            schema_in_ddl = match.group(1)  # May be None if no schema prefix
+            current_table_in_ddl = match.group(2)
+
             # Only replace if the current table name matches our source (avoid incorrect replacements)
             if current_table_in_ddl == source_table_only or current_table_in_ddl == clean_source.replace('.', '_'):
-                # Replace with target table name, preserving schema
+                # Replace with target table name, removing any schema prefix
                 corrected_ddl = re.sub(
-                    r'(CREATE TABLE(?:\s+IF NOT EXISTS)?\s+)(?:public\.)?(\w+)',
-                    rf'\1public.{target_table_name}',
+                    r'(CREATE TABLE(?:\s+IF NOT EXISTS)?\s+)(?:\w+\.)?(\w+)',
+                    rf'\1{target_table_name}',
                     ddl,
                     flags=re.IGNORECASE
                 )
@@ -384,33 +383,42 @@ class GeminiRedshiftLoader:
     def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None) -> List[str]:
         """SIMPLIFIED: Get all S3 files, exclude processed files, load remaining"""
         try:
+            logger.info(f"🔍 DEBUG: Starting _get_s3_parquet_files for table_name={table_name}")
+
             # Get watermark to check for processed files
             watermark = self.watermark_manager.get_table_watermark(table_name)
-            
+
             if not watermark:
                 logger.warning(f"No watermark found for {table_name}")
                 return []
-            
+
+            logger.info(f"🔍 DEBUG: Watermark - mysql_status={watermark.mysql_status}, redshift_status={watermark.redshift_status}")
+
             # Allow loading with in_progress or success status (files may exist from interrupted backup)
             if watermark.mysql_status not in ['success', 'in_progress']:
                 logger.warning(f"MySQL backup status is {watermark.mysql_status} for {table_name}, skipping")
                 return []
-            
+
             if watermark.mysql_status == 'in_progress':
                 logger.info(f"MySQL backup is in_progress for {table_name}, checking for existing S3 files")
-            
+
             logger.info(f"SIMPLIFIED LOGIC: Finding all S3 files for {table_name}, excluding processed files")
-            
+
             # Get S3 client
             s3_client = self.connection_manager.get_s3_client()
-            
+
             # Build S3 prefix for this table's data
             clean_table_name = self._clean_table_name_with_scope(table_name)
             base_prefix = f"{self.config.s3.incremental_path.strip('/')}/"
-            
+
+            logger.info(f"🔍 DEBUG: clean_table_name={clean_table_name}")
+            logger.info(f"🔍 DEBUG: base_prefix={base_prefix}")
+
             # Try table-specific partition first, then general prefix
             table_partition_prefix = f"{base_prefix}table={clean_table_name}/"
-            
+
+            logger.info(f"🔍 DEBUG: Checking table partition: {table_partition_prefix}")
+
             # Check if table partition exists
             try:
                 table_partition_response = s3_client.list_objects_v2(
@@ -419,12 +427,15 @@ class GeminiRedshiftLoader:
                     MaxKeys=1
                 )
                 has_table_partition = len(table_partition_response.get('Contents', [])) > 0
+                logger.info(f"🔍 DEBUG: has_table_partition={has_table_partition}")
+                if has_table_partition:
+                    logger.info(f"🔍 DEBUG: Found table partition, first file: {table_partition_response.get('Contents', [{}])[0].get('Key', 'N/A')}")
             except Exception as e:
                 logger.warning(f"Failed to check table partition: {e}")
                 has_table_partition = False
-            
+
             # Simple strategy selection based on partition discovery
-            
+
             # Strategy selection based on partition discovery
             if has_table_partition:
                 # Use table-specific prefix for maximum efficiency
@@ -437,18 +448,55 @@ class GeminiRedshiftLoader:
                 today = datetime.now()
                 today_prefix = f"{base_prefix}year={today.year}/month={today.month:02d}/day={today.day:02d}/"
                 logger.info(f"Prioritizing today's files with prefix: {today_prefix}")
+                logger.info(f"🔍 DEBUG: No table partition found, falling back to date-based search")
                 prefix = today_prefix
                 max_keys = 1000  # Start with today's files only
-            
+
+            logger.info(f"🔍 DEBUG: Final search prefix={prefix}, max_keys={max_keys}")
             logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
-            
+
             # Execute S3 listing with chosen strategy
             try:
                 all_objects = []
-                for page in page_iterator:
-                    if 'Contents' in page:
-                        all_objects.extend(page['Contents'])
-                
+                continuation_token = None
+                total_scanned = 0
+
+                # FIXED: Implement proper pagination to find ALL files, not just first 1000
+                while True:
+                    list_params = {
+                        'Bucket': self.config.s3.bucket_name,
+                        'Prefix': prefix
+                    }
+
+                    # Add pagination token if we have one
+                    if continuation_token:
+                        list_params['ContinuationToken'] = continuation_token
+
+                    # For general prefix, limit each page size
+                    if not has_table_partition:
+                        list_params['MaxKeys'] = 1000  # Page size, not total limit
+
+                    response = s3_client.list_objects_v2(**list_params)
+
+                    # Add objects from this page
+                    page_objects = response.get('Contents', [])
+                    all_objects.extend(page_objects)
+                    total_scanned += len(page_objects)
+
+                    # Check if we have more pages
+                    if response.get('IsTruncated', False) and total_scanned < max_keys:
+                        continuation_token = response.get('NextContinuationToken')
+                        logger.debug(f"S3 listing paginating... scanned {total_scanned} objects so far")
+                    else:
+                        break
+
+                # Trim to max_keys if needed
+                if not has_table_partition and len(all_objects) > max_keys:
+                    # Sort by LastModified descending to prioritize newer files
+                    all_objects.sort(key=lambda x: x.get('LastModified', ''), reverse=True)
+                    all_objects = all_objects[:max_keys]
+                    logger.info(f"S3 scan found {total_scanned} objects, limited to newest {max_keys}")
+
             except Exception as e:
                 logger.error(f"S3 listing failed: {e}")
                 return []

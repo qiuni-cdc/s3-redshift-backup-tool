@@ -37,9 +37,18 @@ class TableConfig:
     
     def __post_init__(self):
         """Post-initialization validation and defaults"""
-        # Set target_name default
+        # Set target_name default - strip scope and schema prefix for Redshift compatibility
         if not self.target_name:
-            self.target_name = self.full_name
+            # Strip scope prefix (e.g., "US_DW_UNIDW_SSH:unidw.dw_parcel_pricing_temp" -> "unidw.dw_parcel_pricing_temp")
+            table_name = self.full_name
+            if ':' in table_name:
+                _, table_name = table_name.split(':', 1)
+
+            # Strip schema prefix (e.g., "unidw.dw_parcel_pricing_temp" -> "dw_parcel_pricing_temp")
+            if '.' in table_name:
+                _, table_name = table_name.rsplit('.', 1)
+
+            self.target_name = table_name
         
         # Validate CDC strategy
         valid_strategies = ['hybrid', 'timestamp_only', 'id_only', 'full_sync', 'custom_sql']

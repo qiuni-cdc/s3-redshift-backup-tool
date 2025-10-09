@@ -16,7 +16,7 @@ pipeline:
   
   s3:
     isolation_prefix: "us_dw_unidw/"
-    partition_strategy: "datetime"
+    partition_strategy: "table"
     compression: "snappy"
   
   default_table_config:
