@@ -179,16 +179,18 @@ class S3Manager:
                 )
             elif partition_strategy == "table":
                 # Partition by table first, then datetime
+                # Include table name in filename for consistency
                 key = (
                     f"{self.incremental_path}/"
                     f"table={clean_table_name}/"
                     f"year={dt.year}/"
                     f"month={dt.month:02d}/"
                     f"day={dt.day:02d}/"
-                    f"{timestamp_str}_batch_{batch_str}.parquet"
+                    f"{clean_table_name}_{timestamp_str}_batch_{batch_str}.parquet"
                 )
             elif partition_strategy == "hybrid":
                 # Hybrid approach: year/month/table/day/hour
+                # Include table name in filename for consistency
                 key = (
                     f"{self.incremental_path}/"
                     f"year={dt.year}/"
@@ -196,7 +198,7 @@ class S3Manager:
                     f"table={clean_table_name}/"
                     f"day={dt.day:02d}/"
                     f"hour={dt.hour:02d}/"
-                    f"{timestamp_str}_batch_{batch_str}.parquet"
+                    f"{clean_table_name}_{timestamp_str}_batch_{batch_str}.parquet"
                 )
             else:
                 raise ValidationError(f"Unknown partition strategy: {partition_strategy}")

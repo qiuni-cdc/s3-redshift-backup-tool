@@ -334,12 +334,13 @@ class BaseBackupStrategy(ABC):
     connection management, data processing, validation, and error handling.
     """
     
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, pipeline_config: Optional[Dict[str, Any]] = None):
         self.config = config
+        self.pipeline_config = pipeline_config  # Store pipeline configuration
         self.connection_manager = ConnectionManager(config)
         self.s3_manager = S3Manager(config)
         self.watermark_manager = create_watermark_manager(config.to_dict())
-        
+
         # BUGFIX: Add UnifiedWatermarkManager to fix persistence issues
         self.unified_watermark = UnifiedWatermarkManager(config.to_dict())
         
@@ -381,7 +382,24 @@ class BaseBackupStrategy(ABC):
         
         # Track S3 files created during backup for watermark blacklist
         self._created_s3_files = []
-    
+
+    def _get_partition_strategy(self) -> str:
+        """
+        Get partition strategy from pipeline config or fallback to default.
+
+        Returns:
+            Partition strategy: 'datetime', 'table', or 'hybrid'
+        """
+        if self.pipeline_config:
+            # Try to get from pipeline config
+            s3_config = self.pipeline_config.get('pipeline', {}).get('s3', {})
+            partition_strategy = s3_config.get('partition_strategy')
+            if partition_strategy:
+                return partition_strategy
+
+        # Fallback to default
+        return 'datetime'
+
     def _initialize_components(self):
         """Initialize components with shared S3 client"""
         try:
@@ -1126,9 +1144,10 @@ class BaseBackupStrategy(ABC):
                         schema_cached=table_name in self.flexible_schema_manager._schema_cache
                     )
                 
-                # Generate S3 key
+                # Generate S3 key with configured partition strategy
                 s3_key = self.s3_manager.generate_s3_key(
-                    table_name, current_timestamp, batch_id
+                    table_name, current_timestamp, batch_id,
+                    partition_strategy=self._get_partition_strategy()
                 )
                 
                 # Use flexible upload with dynamic schema alignment
@@ -1160,7 +1179,8 @@ class BaseBackupStrategy(ABC):
                 
                 # Fallback to PoC-compatible upload (same method that works for parcel detail)
                 s3_key = self.s3_manager.generate_s3_key(
-                    table_name, current_timestamp, batch_id
+                    table_name, current_timestamp, batch_id,
+                    partition_strategy=self._get_partition_strategy()
                 )
                 # Use the proven PoC upload method instead of complex parquet generation
                 success = self.s3_manager.upload_dataframe(

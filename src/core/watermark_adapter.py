@@ -41,17 +41,20 @@ class LegacyWatermarkObject:
         self.last_mysql_extraction_time = mysql_state.get('last_updated')
         self.last_processed_id = mysql_state.get('last_id')
         self.mysql_status = mysql_state.get('status', 'pending')
-        self.mysql_rows_extracted = mysql_state.get('total_rows', 0)  # Add missing field
-        
+        self.mysql_rows_extracted = mysql_state.get('total_rows', 0)  # Total cumulative
+        self.mysql_last_session_rows = mysql_state.get('last_session_rows', 0)  # Last session only
+
         # Redshift fields (legacy names)
         self.redshift_rows_loaded = redshift_state.get('total_rows', 0)
         self.redshift_status = redshift_state.get('status', 'pending')
         self.redshift_load_time = redshift_state.get('last_updated')
         self.last_redshift_load_time = redshift_state.get('last_updated')  # Add missing field
-        
+
         # File management
         self.processed_s3_files = watermark_data.get('processed_files', [])
-        self.s3_file_count = len(self.processed_s3_files)  # Add missing field
+        # FIX: s3_file_count should come from MySQL state (files created during extraction)
+        # NOT from processed_files (files loaded to Redshift)
+        self.s3_file_count = mysql_state.get('s3_files_created', 0)
         
         # Other legacy fields
         self.backup_strategy = watermark_data.get('cdc_strategy', 'hybrid')
@@ -164,13 +167,14 @@ class WatermarkAdapter:
                 id=last_processed_id,
                 status=status,
                 error=kwargs.get('error'),
-                rows_extracted=rows_extracted
+                rows_extracted=rows_extracted,
+                s3_files_created=kwargs.get('s3_file_count', None)  # Support legacy s3_file_count param
             )
-            
+
             logger.info(f"Updated MySQL watermark for {table_name}: "
                        f"timestamp={max_data_timestamp}, id={last_processed_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to update MySQL watermark for {table_name}: {e}")
             return False

@@ -25,8 +25,8 @@ class SequentialBackupStrategy(BaseBackupStrategy):
     exact row count control and perfect resume capability.
     """
     
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, pipeline_config=None):
+        super().__init__(config, pipeline_config)
         self.strategy_name = "sequential"
         self.logger.set_context(strategy="sequential", chunking_type="row_based")
     
@@ -188,13 +188,14 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         """
         # Delegate to the specialized row-based strategy
         try:
-            row_based_strategy = RowBasedBackupStrategy(self.config)
-            
+            # Create row-based strategy with pipeline configuration
+            row_based_strategy = RowBasedBackupStrategy(self.config, pipeline_config=self.pipeline_config)
+
             # P1 FIX: Transfer necessary components but create new memory manager instance
             # to avoid shared state pollution between strategies
             row_based_strategy.logger = self.logger
             row_based_strategy.watermark_manager = self.watermark_manager
-            
+
             # P1 FIX: Create isolated memory manager for row-based strategy
             from src.backup.base import MemoryConfig, MemoryManager
             memory_config = MemoryConfig.from_app_config(self.config)
@@ -202,17 +203,13 @@ class SequentialBackupStrategy(BaseBackupStrategy):
                 memory_config=memory_config,
                 logger=self.logger.logger  # Share logger but isolate memory state
             )
-            
+
             row_based_strategy.s3_manager = self.s3_manager
             row_based_strategy.process_batch = self.process_batch
             # Use row-based strategy's own validate_table_exists (with CDC support)
             # row_based_strategy.validate_table_exists = self.validate_table_exists  # REMOVED
             row_based_strategy.update_watermarks = self.update_watermarks
             row_based_strategy.database_session = self.database_session
-            
-            # Pass pipeline configuration for CDC integration
-            if hasattr(self, 'pipeline_config'):
-                row_based_strategy.pipeline_config = self.pipeline_config
             
             # Use the row-based strategy to process this single table
             success = row_based_strategy._process_single_table_row_based(

@@ -29,13 +29,13 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
     Best for very large tables with time-based data distribution.
     """
     
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, pipeline_config=None):
+        super().__init__(config, pipeline_config)
         self.logger.set_context(strategy="intra_table_parallel", gemini_mode=True)
         self._thread_local = threading.local()
         self._results_lock = threading.Lock()
         self._chunk_results = {}
-        
+
         # Shared connection management for thread safety
         self._shared_ssh_tunnel = None
         self._shared_local_port = None
@@ -673,9 +673,10 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
             True if batch processed successfully
         """
         try:
-            # Create unique S3 key for this chunk batch
+            # Create unique S3 key for this chunk batch with configured partition strategy
             s3_key = self.s3_manager.generate_s3_key(
-                table_name, timestamp, 0  # Use 0 as batch_id since it's in the batch_id string
+                table_name, timestamp, 0,  # Use 0 as batch_id since it's in the batch_id string
+                partition_strategy=self._get_partition_strategy()
             )
             
             # Modify S3 key to include chunk information

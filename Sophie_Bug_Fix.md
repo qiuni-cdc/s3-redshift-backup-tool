@@ -794,7 +794,7 @@ python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_un
 python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
 python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 200 2>&1 | tee pricing_temp.log 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log 
 python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
 
 python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
@@ -806,3 +806,258 @@ python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us
 
 git commit -m "add files from main" --no-verify
 source s3_backup_venv/bin/activate
+
+---
+
+## Watermark Logic - Final Architecture (Resolved)
+
+### Overview
+
+The watermark system implements a **dual-tracking architecture** that separates cumulative totals from session-specific metrics, providing both historical progress tracking and per-execution visibility.
+
+### Core Design Principles
+
+#### 1. **Separation of Concerns**
+- **Cumulative Metrics**: Track lifetime totals across all sync sessions
+- **Session Metrics**: Track current execution only (essential for Airflow/monitoring)
+
+#### 2. **Two-Phase Update Pattern**
+
+**Phase 1: Batch Processing (Incremental Updates)**
+Location: `row_based.py:508-516`
+
+```python
+# During batch processing - accumulate rows incrementally
+self.watermark_manager.simple_manager.update_mysql_state(
+    table_name=table_name,
+    timestamp=accumulated_last_timestamp,
+    id=accumulated_last_id,
+    status='in_progress',
+    rows_extracted=batch_rows,              # Adds to cumulative total
+    s3_files_created=batch_files,           # Adds to cumulative total
+    session_rows_total=total_rows_processed # Show session progress so far
+)
+```
+
+**Behavior**:
+- `rows_extracted=100` → Adds 100 to cumulative `total_rows`
+- `session_rows_total=total_rows_processed` → Shows cumulative session progress (e.g., after 2 batches: 200)
+- Updates `last_session_rows = total_rows_processed` (accumulates, not overwrites!)
+- Provides resume capability if sync is interrupted
+- **CRITICAL**: Even if interrupted, watermark shows correct session total
+
+**Phase 2: Final Update (Session Total)**
+Location: `row_based.py:1796-1803`
+
+```python
+# After all batches complete - set final session total
+success = self.watermark_manager.simple_manager.update_mysql_state(
+    table_name=table_name,
+    timestamp=max_data_timestamp.isoformat(),
+    id=last_processed_id,
+    status=status,
+    error=error_message,
+    rows_extracted=0,                      # Don't add again (already accumulated)
+    session_rows_total=session_rows_processed  # Set session display total
+)
+```
+
+**Behavior**:
+- `rows_extracted=0` → No change to cumulative total (avoid double-counting)
+- `session_rows_total=300` → Sets `last_session_rows = 300` directly
+- Changes status from `in_progress` → `success`
+
+#### 3. **Watermark Manager Implementation**
+Location: `simple_watermark_manager.py:98-137`
+
+```python
+def update_mysql_state(self, table_name: str,
+                      rows_extracted: Optional[int] = None,
+                      session_rows_total: Optional[int] = None) -> None:
+    """
+    Dual-mode update supporting both cumulative and session tracking
+    """
+    watermark = self.get_watermark(table_name)
+
+    # CUMULATIVE: Add new rows to existing total
+    session_rows = 0
+    if rows_extracted is not None and rows_extracted > 0:
+        current_rows = watermark['mysql_state'].get('total_rows', 0)
+        total_rows = current_rows + rows_extracted
+        session_rows = rows_extracted
+        logger.info(f"Cumulative update: {current_rows} + {rows_extracted} = {total_rows}")
+    else:
+        total_rows = watermark['mysql_state'].get('total_rows', 0)
+
+    # SESSION: Allow direct setting of session total (for final updates)
+    if session_rows_total is not None:
+        session_rows = session_rows_total
+        logger.info(f"Session total set directly: {session_rows_total}")
+
+    watermark['mysql_state'].update({
+        'total_rows': total_rows,           # Cumulative across all sessions
+        'last_session_rows': session_rows,  # Current session only
+        'last_updated': datetime.now(timezone.utc).isoformat()
+    })
+
+    self._save_watermark(table_name, watermark)
+```
+
+### Data Flow Example
+
+**Scenario: Sync processes 300 rows across 3 batches**
+
+```
+Initial State:
+  total_rows: 400
+  last_session_rows: 0
+
+Batch 1 (100 rows):
+  rows_extracted=100
+  session_rows_total=100
+  → total_rows: 400 + 100 = 500
+  → last_session_rows: 100 ✅
+
+Batch 2 (100 rows):
+  rows_extracted=100
+  session_rows_total=200
+  → total_rows: 500 + 100 = 600
+  → last_session_rows: 200 ✅ (accumulates!)
+
+Batch 3 (100 rows):
+  rows_extracted=100
+  session_rows_total=300
+  → total_rows: 600 + 100 = 700
+  → last_session_rows: 300 ✅ (accumulates!)
+
+Final Update:
+  rows_extracted=0
+  session_rows_total=300
+  → total_rows: 700 (unchanged)
+  → last_session_rows: 300 (confirms session total!)
+```
+
+**Interruption Handling (NEW):**
+
+```
+Initial State:
+  total_rows: 400
+  last_session_rows: 0
+
+Batch 1 (100 rows):
+  → total_rows: 500
+  → last_session_rows: 100 ✅
+
+Batch 2 (100 rows):
+  → total_rows: 600
+  → last_session_rows: 200 ✅
+
+💥 PROGRAM CRASHES 💥
+
+Watermark shows:
+  total_rows: 600 ✅ (cumulative correct)
+  last_session_rows: 200 ✅ (session progress preserved!)
+  status: 'in_progress' ⚠️
+
+After Restart - Session 2:
+  Resume from last watermark
+
+Batch 3 (100 rows):
+  → total_rows: 600 + 100 = 700
+  → last_session_rows: 100 (new session)
+
+Final Update:
+  → last_session_rows: 100 (this session only)
+```
+
+### Integration Points
+
+#### 1. **CLI Display** (`main.py:1494-1502`)
+```python
+last_session_rows = getattr(watermark, 'mysql_last_session_rows', 0)
+click.echo(f"Rows Extracted This Session: {last_session_rows:,}")
+click.echo(f"Total Rows Extracted (Cumulative): {watermark.mysql_rows_extracted:,}")
+```
+
+#### 2. **Airflow Integration** (`multi_schema_commands.py:1156`)
+```python
+# Use session-specific metric for Airflow task reporting
+backup_session_rows = getattr(watermark, 'mysql_last_session_rows', 0) or 0
+actual_rows = backup_session_rows  # Report what THIS task did
+```
+
+#### 3. **JSON Output** (Airflow Automation)
+```json
+{
+  "table_metrics": {
+    "settlement.orders": {
+      "rows_processed": 300,      // Session metric (from last_session_rows)
+      "files_created": 3,
+      "duration": 45.2
+    }
+  }
+}
+```
+
+### Key Benefits
+
+#### 1. **No Double-Counting**
+- Batch updates accumulate correctly during processing
+- Final update doesn't add rows again
+
+#### 2. **Accurate Session Tracking**
+- Airflow sees: "This sync processed 300 rows" ✅
+- Not: "Total lifetime: 700 rows" ❌
+
+#### 3. **Resume Capability**
+- Interrupted syncs can resume from last processed ID/timestamp
+- Cumulative totals remain accurate across restarts
+
+#### 4. **Historical Tracking**
+- `total_rows` provides lifetime statistics
+- Useful for capacity planning and trend analysis
+
+### TODO: Future Enhancement
+
+**Redshift Session Tracking** (`multi_schema_commands.py:1158-1159`):
+```python
+# TODO: Add session tracking for Redshift loading as well
+redshift_rows = getattr(watermark, 'redshift_rows_loaded', 0) or 0
+```
+
+Currently Redshift only tracks cumulative totals. Consider implementing:
+- `redshift_last_session_rows` for per-load metrics
+- Useful for load performance monitoring
+
+### Production Status
+
+The watermark system is now **production-ready** with:
+- ✅ Clear separation of cumulative vs session metrics
+- ✅ No double-counting bugs
+- ✅ Accurate Airflow integration
+- ✅ Resume capability for interrupted syncs
+- ✅ Proper display in CLI and JSON output
+- ✅ **Interruption-safe session tracking** - Shows accurate progress even if process crashes
+
+The dual-tracking architecture provides both **historical context** (cumulative totals) and **operational visibility** (session metrics), making it suitable for enterprise data pipeline monitoring and automation.
+
+### Key Enhancement: Interruption-Safe Session Tracking
+
+**Problem Solved:** Previously, if a sync was interrupted after processing 2 batches (e.g., 100,000 rows), the watermark would only show `last_session_rows: 50,000` (the last batch size), losing visibility of the 50,000 rows from the first batch.
+
+**Solution Implemented:** Each batch update now passes `session_rows_total=total_rows_processed`, which shows the **cumulative progress within the current session**:
+
+```python
+# Before (line 514): Only passed batch_rows
+rows_extracted=batch_rows  # Overwrites session display with each batch
+
+# After (lines 515-516): Pass both batch and session total
+rows_extracted=batch_rows,              # For cumulative tracking
+session_rows_total=total_rows_processed # For accurate session display ✅
+```
+
+**Impact:**
+- **Interrupted Session 1:** Processed 200k rows → Watermark shows `last_session_rows: 200,000` ✅
+- **Completed Session 2:** Processed 100k rows → Watermark shows `last_session_rows: 100,000` ✅
+- **Monitoring Accuracy:** Operations teams see true session progress even after failures
+- **Airflow Reliability:** Task metrics reflect actual work done, not just last batch size

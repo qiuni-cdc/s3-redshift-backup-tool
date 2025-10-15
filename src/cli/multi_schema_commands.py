@@ -988,16 +988,20 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             if parallel:
                 strategy_name = 'parallel'
             
-            # Create backup strategy using the existing v1.0.0 pattern
-            if strategy_name == 'parallel':
-                backup_strategy = InterTableBackupStrategy(config)
-            else:
-                backup_strategy = SequentialBackupStrategy(config)
-            
-            # Pass pipeline configuration to backup strategy for CDC integration
-            backup_strategy.pipeline_config = {
+            # Prepare pipeline configuration for backup strategy
+            pipeline_config_dict = {
+                'pipeline': {
+                    's3': pipeline_config.s3,
+                    'processing': pipeline_config.processing
+                },
                 'tables': {name: asdict(cfg) for name, cfg in pipeline_config.tables.items()}
             }
+
+            # Create backup strategy with pipeline configuration
+            if strategy_name == 'parallel':
+                backup_strategy = InterTableBackupStrategy(config, pipeline_config=pipeline_config_dict)
+            else:
+                backup_strategy = SequentialBackupStrategy(config, pipeline_config=pipeline_config_dict)
             
             # Configure strategy with pipeline settings
             if hasattr(backup_strategy, 'set_batch_size'):
@@ -1145,26 +1149,30 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     from src.core.watermark_adapter import create_watermark_manager
                     watermark_manager = create_watermark_manager(config.to_dict())
                     watermark = watermark_manager.get_table_watermark(scoped_table_name)
-                    
+
                     if watermark:
-                        # Get actual rows processed from watermark
-                        backup_rows = getattr(watermark, 'mysql_rows_extracted', 0) or 0
+                        # FIXED: Get session-specific rows processed from watermark (not cumulative)
+                        # For Airflow integration, we want to report what was processed in THIS sync session
+                        backup_session_rows = getattr(watermark, 'mysql_last_session_rows', 0) or 0
+
+                        # For Redshift, we don't have session tracking yet, use cumulative as fallback
+                        # TODO: Add session tracking for Redshift loading as well
                         redshift_rows = getattr(watermark, 'redshift_rows_loaded', 0) or 0
-                        
+
                         # Use the most relevant metric based on operation type
                         if redshift_only:
-                            actual_rows = redshift_rows
+                            actual_rows = redshift_rows  # Cumulative (no session tracking for Redshift yet)
                         elif backup_only:
-                            actual_rows = backup_rows
+                            actual_rows = backup_session_rows  # Session-specific for backup
                         else:
-                            # Full sync - use redshift rows (final loaded count)
-                            actual_rows = redshift_rows
-                        
+                            # Full sync - use backup session rows (more accurate for this sync)
+                            actual_rows = backup_session_rows
+
                         # Get file count from processed S3 files list
                         processed_files = getattr(watermark, 'processed_s3_files', []) or []
                         actual_files = len(processed_files)
-                        
-                        logger.info(f"METRICS: {scoped_table_name} - {actual_rows} rows, {actual_files} files")
+
+                        logger.info(f"METRICS (session): {scoped_table_name} - {actual_rows} rows, {actual_files} files")
                     
                 except Exception as metrics_error:
                     logger.warning(f"Failed to get actual metrics for {scoped_table_name}: {metrics_error}")

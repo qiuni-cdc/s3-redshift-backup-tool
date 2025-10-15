@@ -24,8 +24,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
     Provides predictable chunk sizes and user-friendly time-based progress.
     """
     
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, pipeline_config=None):
+        super().__init__(config, pipeline_config)
         self.logger.set_context(strategy="row_based", chunking_type="timestamp_id")
         self.cdc_integration = None
     
@@ -170,7 +170,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # CRITICAL FIX: Reset S3 files list for accurate per-table tracking
             self._created_s3_files = []
-            
+
             # Create cursor with dictionary output
             cursor = db_conn.cursor(dictionary=True, buffered=False)
             
@@ -464,17 +464,26 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         table_name=table_name,
                         chunk_number=chunk_number
                     )
-                    
+
                     # Process data in batches for S3 upload
                     batch_size = self.config.backup.batch_size
                     for i in range(0, len(accumulated_data), batch_size):
                         batch_data = accumulated_data[i:i + batch_size]
                         batch_id = f"chunk_{chunk_number}_batch_{(i // batch_size) + 1}"
-                        
+
                         batch_success = self._process_batch_with_retries(
                             batch_data, table_name, batch_id, current_timestamp
                         )
-                        
+
+                        # DEBUG: Log batch processing result
+                        self.logger.logger.debug(
+                            f"Batch processing result: {'SUCCESS' if batch_success else 'FAILED'}",
+                            table_name=table_name,
+                            batch_id=batch_id,
+                            batch_success=batch_success,
+                            batch_size=len(batch_data)
+                        )
+
                         if not batch_success:
                             self.logger.logger.error(
                                 f"Failed to process accumulated batch",
@@ -483,29 +492,44 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                                 batch_size=len(batch_data)
                             )
                             return False
-                        
+
                         batch_success_count += 1
-                    
-                    # Count actually processed rows before reset
-                    if batch_success_count > 0:
-                        total_rows_processed += len(accumulated_data)
-                    
+
+                        # ✅ NEW: Update watermark after EACH successful batch
+                        # Track counts before processing
+                        batch_rows = len(batch_data)
+                        batch_files = 1  # Each batch typically creates 1 S3 file
+
+                        total_rows_processed += batch_rows
+
+                        # Update watermark with cumulative tracking (same logic for rows and files)
+                        # This ensures interrupted sessions don't lose progress
+                        # CRITICAL: Pass session_rows_total to show cumulative session progress
+                        self.watermark_manager.simple_manager.update_mysql_state(
+                            table_name=table_name,
+                            timestamp=accumulated_last_timestamp,
+                            id=accumulated_last_id,
+                            status='in_progress',
+                            rows_extracted=batch_rows,  # Adds to cumulative total automatically
+                            s3_files_created=batch_files,  # Adds to cumulative total automatically
+                            session_rows_total=total_rows_processed  # Show session progress so far
+                        )
+
+                        self.logger.logger.debug(
+                            f"Watermark updated after batch completion",
+                            table_name=table_name,
+                            batch_id=batch_id,
+                            total_rows_processed=total_rows_processed,
+                            last_timestamp=accumulated_last_timestamp,
+                            last_id=accumulated_last_id
+                        )
+
                     # Reset accumulator after processing
                     accumulated_data = []
                 else:
                     # No processing happened, don't count these rows yet
                     pass
                 chunk_duration = time.time() - chunk_start_time
-                
-                # Update watermark after successful chunk (absolute progress tracking)
-                # Use accumulated values if we processed data, otherwise use chunk values
-                final_timestamp = accumulated_last_timestamp if batch_success_count > 0 else chunk_last_timestamp
-                final_id = accumulated_last_id if batch_success_count > 0 else chunk_last_id
-                
-                self._update_chunk_watermark_absolute(
-                    table_name, final_timestamp, final_id, 
-                    total_rows_processed  # Use absolute total, not incremental
-                )
                 
                 self.logger.logger.info(
                     f"Completed row-based chunk {chunk_number}",
@@ -577,16 +601,25 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     table_name=table_name,
                     reason="end_of_table"
                 )
-                
+
                 batch_size = self.config.backup.batch_size
                 for i in range(0, len(accumulated_data), batch_size):
                     batch_data = accumulated_data[i:i + batch_size]
                     batch_id = f"final_accumulated_batch_{(i // batch_size) + 1}"
-                    
+
                     batch_success = self._process_batch_with_retries(
                         batch_data, table_name, batch_id, current_timestamp
                     )
-                    
+
+                    # DEBUG: Log batch processing result
+                    self.logger.logger.debug(
+                        f"Batch processing result: {'SUCCESS' if batch_success else 'FAILED'}",
+                        table_name=table_name,
+                        batch_id=batch_id,
+                        batch_success=batch_success,
+                        batch_size=len(batch_data)
+                    )
+
                     if not batch_success:
                         self.logger.logger.error(
                             f"Failed to process final accumulated batch",
@@ -595,17 +628,37 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                             batch_size=len(batch_data)
                         )
                         return False
-                
-                # Count final processed rows
-                total_rows_processed += len(accumulated_data)
-                
-                # Update final watermark with accumulated values
-                self._update_chunk_watermark_absolute(
-                    table_name, accumulated_last_timestamp, accumulated_last_id, 
-                    total_rows_processed
-                )
+
+                    # ✅ NEW: Update watermark after EACH successful batch
+                    # Track counts (same logic for rows and files)
+                    batch_rows = len(batch_data)
+                    batch_files = 1  # Each batch typically creates 1 S3 file
+
+                    total_rows_processed += batch_rows
+
+                    # Update watermark with cumulative tracking
+                    # This ensures interrupted sessions don't lose progress
+                    # CRITICAL: Pass session_rows_total to show cumulative session progress
+                    self.watermark_manager.simple_manager.update_mysql_state(
+                        table_name=table_name,
+                        timestamp=accumulated_last_timestamp,
+                        id=accumulated_last_id,
+                        status='in_progress',
+                        rows_extracted=batch_rows,  # Adds to cumulative total automatically
+                        s3_files_created=batch_files,  # Adds to cumulative total automatically
+                        session_rows_total=total_rows_processed  # Show session progress so far
+                    )
+
+                    self.logger.logger.debug(
+                        f"Watermark updated after final batch completion",
+                        table_name=table_name,
+                        batch_id=batch_id,
+                        total_rows_processed=total_rows_processed,
+                        last_timestamp=accumulated_last_timestamp,
+                        last_id=accumulated_last_id
+                    )
             
-            # Final watermark update with completion status (additive session total)
+            # Final watermark update with completion status
             # Handle datetime objects, ISO format strings, and UNIX timestamps
             if isinstance(last_timestamp, datetime):
                 max_data_timestamp = last_timestamp
@@ -653,7 +706,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
         except Exception as e:
             self.logger.error_occurred(e, "row_based_backup", table_name=table_name)
-            # Update watermark with error status (additive session count)
+            # Update watermark with error status
             try:
                 self._set_final_watermark_with_session_control(
                     table_name=table_name,
@@ -768,22 +821,39 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         try:
             # Extract MySQL table name from potentially scoped name
             mysql_table_name = self._extract_mysql_table_name(table_name)
-            
+
             # Query for max ID
             max_id_query = f"SELECT MAX({id_column}) FROM {mysql_table_name}"
             cursor.execute(max_id_query)
             result = cursor.fetchone()
-            
-            if result and result[0] is not None:
-                max_id = int(result[0])
-                self.logger.logger.info(
-                    "Captured current max ID for watermark ceiling",
-                    table_name=table_name,
-                    id_column=id_column,
-                    max_id=max_id,
-                    query=max_id_query
-                )
-                return max_id
+
+            # Handle both dictionary cursor (dictionary=True) and tuple cursor
+            if result:
+                if isinstance(result, dict):
+                    # Dictionary cursor: get first value from dict
+                    max_id_value = list(result.values())[0] if result.values() else None
+                else:
+                    # Tuple cursor: access by index
+                    max_id_value = result[0] if result else None
+
+                if max_id_value is not None:
+                    max_id = int(max_id_value)
+                    self.logger.logger.info(
+                        "Captured current max ID for watermark ceiling",
+                        table_name=table_name,
+                        id_column=id_column,
+                        max_id=max_id,
+                        query=max_id_query,
+                        cursor_type="dictionary" if isinstance(result, dict) else "tuple"
+                    )
+                    return max_id
+                else:
+                    self.logger.logger.warning(
+                        "No max ID found in table - table may be empty",
+                        table_name=table_name,
+                        id_column=id_column
+                    )
+                    return None
             else:
                 self.logger.logger.warning(
                     "No max ID found in table - table may be empty",
@@ -1293,8 +1363,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         return False
     
     def _set_final_watermark_absolute(
-        self, 
-        table_name: str, 
+        self,
+        table_name: str,
         extraction_time: datetime,
         max_data_timestamp: Optional[datetime] = None,
         last_processed_id: Optional[int] = None,
@@ -1303,29 +1373,29 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         error_message: Optional[str] = None
     ):
         """
-        Set final watermark with absolute values (not additive).
-        
+        Set final watermark with specified values.
+
         Args:
             table_name: Name of the table
             extraction_time: Time of extraction
             max_data_timestamp: Latest data timestamp processed
             last_processed_id: Last processed ID
-            total_rows_processed: Absolute total rows processed
+            total_rows_processed: Total rows processed in this session
             status: Final status ('success' or 'failed')
             error_message: Optional error message for failed status
         """
         try:
             # Get current watermark to preserve S3 file list and other metadata
             current_watermark = self.watermark_manager.get_table_watermark(table_name)
-            
-            # Build absolute watermark update (not additive)
+
+            # Build watermark update data
             watermark_data = {
                 'last_mysql_extraction_time': extraction_time.isoformat(),
                 'mysql_status': status,
                 'backup_strategy': 'row_based'
             }
-            
-            # Set absolute values
+
+            # Set values from this session
             if max_data_timestamp:
                 watermark_data['last_mysql_data_timestamp'] = max_data_timestamp.isoformat()
             if last_processed_id is not None:
@@ -1363,23 +1433,22 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 success = False
             
             self.logger.logger.info(
-                "Final watermark set with absolute values",
+                "Final watermark set successfully",
                 table_name=table_name,
                 total_rows_final=total_rows_processed,
-                status=status,
-                additive_bypassed=True
+                status=status
             )
             
             return success
             
         except Exception as e:
             self.logger.logger.error(
-                "Failed to set final absolute watermark",
+                "Failed to set final watermark",
                 table_name=table_name,
                 error=str(e),
                 total_rows=total_rows_processed
             )
-            # Fallback to regular update_watermarks if absolute method fails
+            # Fallback to regular update_watermarks if method fails
             return self.update_watermarks(
                 table_name=table_name,
                 extraction_time=extraction_time,
@@ -1658,7 +1727,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
         except Exception as e:
             self.logger.logger.warning(
-                "Failed to update chunk watermark with absolute values",
+                "Failed to update chunk watermark",
                 table_name=table_name,
                 error=str(e),
                 total_rows=total_rows_processed
@@ -1666,8 +1735,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             return False
     
     def _set_final_watermark_with_session_control(
-        self, 
-        table_name: str, 
+        self,
+        table_name: str,
         extraction_time: datetime,
         max_data_timestamp: Optional[datetime] = None,
         last_processed_id: Optional[int] = None,
@@ -1676,17 +1745,16 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         error_message: Optional[str] = None
     ):
         """
-        Set final watermark using absolute row count.
-        
-        SIMPLIFIED: Always uses the provided row count as absolute value.
-        No accumulation, no modes, no complexity.
-        
+        Set final watermark with session row count.
+
+        Uses v2.0 SimpleWatermarkManager for automatic cumulative tracking.
+
         Args:
             table_name: Name of the table
             extraction_time: Time of extraction
             max_data_timestamp: Latest data timestamp processed
             last_processed_id: Last processed ID
-            session_rows_processed: Rows processed in this session (absolute count)
+            session_rows_processed: Rows processed in this session
             status: Final status ('success' or 'failed')
             error_message: Optional error message for failed status
         """
@@ -1725,8 +1793,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             created_files_count = len(existing_backup_files) if existing_backup_files else 0
 
             self.logger.logger.info(
-                "S3 File Lifecycle Monitoring",
-                "Simplified watermark calculation - count all existing S3 files",
+                "S3 File Lifecycle Monitoring - Simplified watermark calculation",
                 table_name=table_name,
                 s3_files_discovered=actual_s3_files,
                 s3_files_created_this_session=created_files_count,
@@ -1739,24 +1806,22 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 fix_applied="simplified_existing_files_count"
             )
             
-            # BUGFIX: Calculate cumulative total instead of overwriting with session total
-            current_watermark = self.watermark_manager.get_table_watermark(table_name)
-            if current_watermark and hasattr(current_watermark, 'mysql_rows_extracted') and current_watermark.mysql_rows_extracted:
-                cumulative_rows = current_watermark.mysql_rows_extracted + session_rows_processed
-            else:
-                cumulative_rows = session_rows_processed
-                
-            # Use simplified watermark update with cumulative count
-            success = self.watermark_manager.update_mysql_watermark(
+            # CRITICAL FIX: Update session total without adding to cumulative!
+            # v2.0 already accumulated rows during batch processing (lines 507-514)
+            # Final watermark update should change status AND set session total
+            #
+            # Before fix: last_session_rows = 0 (WRONG!)
+            # After fix: last_session_rows = session_rows_processed (CORRECT!)
+
+            # Use direct simple_manager call to set session total without affecting cumulative
+            success = self.watermark_manager.simple_manager.update_mysql_state(
                 table_name=table_name,
-                extraction_time=extraction_time,
-                max_data_timestamp=max_data_timestamp,
-                last_processed_id=last_processed_id,
-                rows_extracted=cumulative_rows,  # Use cumulative instead of session
+                timestamp=max_data_timestamp.isoformat() if max_data_timestamp else None,
+                id=last_processed_id,
                 status=status,
-                backup_strategy=getattr(self, 'strategy_name', 'sequential'),
-                s3_file_count=actual_s3_files,
-                error_message=error_message
+                error=error_message,
+                rows_extracted=0,  # Don't add to cumulative - already done in batches
+                session_rows_total=session_rows_processed  # Set session total for display
             )
             
             # Do not add S3 files to blacklist during backup
@@ -1773,10 +1838,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     )
             
             self.logger.logger.info(
-                "Final watermark updated with absolute count",
+                "Final watermark updated successfully (status change only)",
                 table_name=table_name,
                 session_rows=session_rows_processed,
-                status=status
+                status=status,
+                note="Row counts already accumulated during batch processing",
+                double_counting_fix_applied=True
             )
             
             return success
@@ -1788,23 +1855,21 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 error=str(e),
                 session_rows=session_rows_processed
             )
-            # Fallback to old method if new mode fails (with S3 count fix)
+            # CRITICAL FIX: Fallback should also set session total correctly
+            # Use direct simple_manager call for consistency
             try:
-                s3_stats = self.s3_manager.get_upload_stats()
-                fallback_s3_files = s3_stats.get('total_files', 0)
-            except:
-                fallback_s3_files = 0  # Safe fallback if S3Manager fails
-                
-            return self.update_watermarks(
-                table_name=table_name,
-                extraction_time=extraction_time,
-                max_data_timestamp=max_data_timestamp,
-                last_processed_id=last_processed_id,
-                rows_extracted=session_rows_processed,
-                s3_file_count=fallback_s3_files,  # ✅ FIXED: Include S3 count in fallback
-                status=status,
-                error_message=error_message
-            )
+                return self.watermark_manager.simple_manager.update_mysql_state(
+                    table_name=table_name,
+                    timestamp=max_data_timestamp.isoformat() if max_data_timestamp else None,
+                    id=last_processed_id,
+                    status=status,
+                    error=error_message,
+                    rows_extracted=0,  # Don't add to cumulative
+                    session_rows_total=session_rows_processed  # Set session total
+                )
+            except Exception as fallback_error:
+                self.logger.logger.error(f"Fallback watermark update also failed: {fallback_error}")
+                return False
     
     def _get_table_config(self, table_name: str) -> Optional[Dict[str, Any]]:
         """Get table configuration from pipeline config"""

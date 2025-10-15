@@ -575,9 +575,12 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
         click.echo(f"   Workers: {config.backup.max_workers}")
         click.echo(f"   Batch size: {config.backup.batch_size}")
         click.echo()
-        
-        # Create and execute backup strategy
-        backup_strategy = strategy_class(config)
+
+        # Load pipeline configuration if available
+        pipeline_config = _load_pipeline_config_for_tables(tables)
+
+        # Create backup strategy with pipeline configuration
+        backup_strategy = strategy_class(config, pipeline_config=pipeline_config)
         
         start_time = time.time()
         success = backup_strategy.execute(list(tables))
@@ -812,17 +815,16 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
         if not redshift_only:
             click.echo("📊 Stage 1: MySQL → S3 Backup")
             click.echo("   Dynamic schema discovery + parquet upload")
-            
-            # Create and execute backup strategy
-            backup_strategy = STRATEGIES[strategy](config)
-            
+
             # Load pipeline configuration if available for CDC optimization
             pipeline_config = _load_pipeline_config_for_tables(tables)
             if pipeline_config:
-                backup_strategy.pipeline_config = pipeline_config
                 click.echo(f"✅ Loaded pipeline config with {len(pipeline_config.get('tables', {}))} table configurations")
             else:
                 click.echo("⚠️  No pipeline configuration loaded - CDC will use basic mode")
+
+            # Create backup strategy with pipeline configuration
+            backup_strategy = STRATEGIES[strategy](config, pipeline_config=pipeline_config)
             
             # Calculate parameters based on limit and max_chunks
             chunk_size = limit if limit else pipeline_batch_size
@@ -1491,7 +1493,12 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 # MySQL/Backup Stage
                 click.echo("   🔄 MySQL → S3 Backup Stage:")
                 click.echo(f"      Status: {watermark.mysql_status}")
-                click.echo(f"      Rows Extracted: {watermark.mysql_rows_extracted:,}")
+
+                # Always show current session rows for clarity
+                last_session_rows = getattr(watermark, 'mysql_last_session_rows', 0)
+                click.echo(f"      Rows Extracted This Session: {last_session_rows:,}")
+                click.echo(f"      Total Rows Extracted: {watermark.mysql_rows_extracted:,}")
+
                 click.echo(f"      S3 Files Created: {watermark.s3_file_count}")
                 
                 
@@ -1530,10 +1537,10 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 
                 click.echo()
                 
-                # S3 → Redshift Stage 
+                # S3 → Redshift Stage
                 click.echo("   📊 S3 → Redshift Loading Stage:")
                 click.echo(f"      Status: {watermark.redshift_status}")
-                click.echo(f"      Rows Loaded: {watermark.redshift_rows_loaded:,}")
+                click.echo(f"      Total Rows Loaded: {watermark.redshift_rows_loaded:,}")
                 if watermark.last_redshift_load_time:
                     click.echo(f"      Last Load Time: {watermark.last_redshift_load_time}")
                 else:
@@ -1779,26 +1786,21 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
 @click.argument('operation', type=click.Choice(['set-count', 'validate-counts']))
 @click.option('--table', '-t', required=True, help='Table name for count operations')
 @click.option('--count', type=int, help='Row count to set (required for set-count)')
-@click.option('--mode', type=click.Choice(['absolute', 'additive']), default='absolute', 
-              help='How to update the count: absolute (replace) or additive (add to existing)')
 @click.option('--pipeline', '-p', help='Pipeline name for multi-schema support (v1.2.0)')
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.pass_context
-def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipeline: str, connection: str):
+def watermark_count(ctx, operation: str, table: str, count: int, pipeline: str, connection: str):
     """
-    Advanced watermark row count management (BUG FIX COMMANDS).
-    
+    Watermark row count management.
+
     Operations:
-        set-count - Set or add to watermark row count (fixes double-counting bug)
+        set-count - Set watermark row count to specified value
         validate-counts - Cross-validate watermark vs actual Redshift counts
-    
+
     Examples:
-        # Fix current row count mismatch (absolute mode - replaces existing)
-        s3-backup watermark-count set-count -t settlement.settlement_normal_delivery_detail --count 3000000 --mode absolute
-        
-        # Add incremental count (additive mode - adds to existing)  
-        s3-backup watermark-count set-count -t settlement.settlement_normal_delivery_detail --count 500000 --mode additive
-        
+        # Set row count to specific value
+        s3-backup watermark-count set-count -t settlement.settlement_normal_delivery_detail --count 3000000
+
         # Validate consistency across systems
         s3-backup watermark-count validate-counts -t settlement.settlement_normal_delivery_detail
     """
@@ -1871,67 +1873,37 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
                 click.echo("❌ Count value required for set-count operation", err=True)
                 click.echo("   Use --count <number>")
                 sys.exit(1)
-            
+
             try:
-                if mode == 'absolute':
-                    # Set absolute count using v2.0 API (replaces existing)
-                    try:
-                        watermark_manager.simple_manager.update_redshift_count_from_external(
-                            table_name=effective_table_name,
-                            actual_count=count
-                        )
-                        success = True
-                    except Exception as e:
-                        click.echo(f"❌ Failed to update count: {e}")
-                        success = False
-                    
-                    if success:
-                        click.echo(f"✅ Set absolute count to {count:,} rows")
-                        click.echo(f"   Mode: {mode} (replaced existing MySQL and Redshift counts)")
-                    else:
-                        click.echo("❌ Failed to update watermark count", err=True)
-                        sys.exit(1)
-                        
-                elif mode == 'additive':
-                    # Add to existing count - FIX: Update BOTH MySQL and Redshift counts
-                    current_watermark = watermark_manager.get_table_watermark(effective_table_name)
-                    existing_mysql_count = current_watermark.mysql_rows_extracted if current_watermark else 0
-                    existing_redshift_count = current_watermark.redshift_rows_loaded if current_watermark else 0
-                    new_mysql_count = existing_mysql_count + count
-                    new_redshift_count = existing_redshift_count + count
-                    
-                    # Add to existing count using v2.0 API
-                    try:
-                        watermark_manager.simple_manager.update_redshift_count_from_external(
-                            table_name=effective_table_name,
-                            actual_count=new_redshift_count
-                        )
-                        success = True
-                    except Exception as e:
-                        click.echo(f"❌ Failed to update count: {e}")
-                        success = False
-                    
-                    if success:
-                        click.echo(f"✅ Added {count:,} to existing counts:")
-                        click.echo(f"   MySQL: {existing_mysql_count:,} + {count:,} = {new_mysql_count:,}")
-                        click.echo(f"   Redshift: {existing_redshift_count:,} + {count:,} = {new_redshift_count:,}")
-                        click.echo(f"   Mode: {mode} (added to existing counts)")
-                    else:
-                        click.echo("❌ Failed to update watermark count", err=True)
-                        sys.exit(1)
-                
+                # Get current watermark to show before/after
+                current_watermark = watermark_manager.get_table_watermark(effective_table_name)
+                old_redshift_count = current_watermark.redshift_rows_loaded if current_watermark else 0
+
+                # Set count using v2.0 API - directly sets to specified value
+                # Note: This replaces the existing cumulative count with the new value
+                watermark = watermark_manager.simple_manager.get_watermark(effective_table_name)
+                watermark['redshift_state']['total_rows'] = count
+                watermark_manager.simple_manager._save_watermark(effective_table_name, watermark)
+
+                click.echo(f"✅ Set Redshift row count to {count:,} rows")
+                if old_redshift_count != count:
+                    click.echo(f"   Previous count: {old_redshift_count:,}")
+
                 # Verify the change by showing updated watermark
                 click.echo()
                 click.echo("📊 Updated Watermark Status:")
                 updated_watermark = watermark_manager.get_table_watermark(effective_table_name)
                 if updated_watermark:
-                    click.echo(f"   MySQL Rows Extracted: {updated_watermark.mysql_rows_extracted:,}")
-                    click.echo(f"   Redshift Rows Loaded: {updated_watermark.redshift_rows_loaded:,}")
+                    click.echo(f"   MySQL Rows Extracted (last session): {updated_watermark.mysql_last_session_rows:,}")
+                    click.echo(f"   MySQL Rows Extracted (cumulative): {updated_watermark.mysql_rows_extracted:,}")
+                    click.echo(f"   Redshift Rows Loaded (cumulative): {updated_watermark.redshift_rows_loaded:,}")
                     click.echo(f"   MySQL Status: {updated_watermark.mysql_status}")
                     click.echo(f"   Redshift Status: {updated_watermark.redshift_status}")
-                    
+
             except Exception as e:
                 click.echo(f"❌ Error updating row count: {e}", err=True)
+                import traceback
+                click.echo(f"   {traceback.format_exc()}", err=True)
                 sys.exit(1)
         
         elif operation == 'validate-counts':
@@ -1989,11 +1961,11 @@ def watermark_count(ctx, operation: str, table: str, count: int, mode: str, pipe
                         click.echo(f"   • {issue}")
                     click.echo()
                     click.echo("💡 Recommended Actions:")
-                    click.echo("   1. If backup count is inflated, use:")
+                    click.echo("   1. If watermark count is incorrect, use:")
                     if isinstance(actual_redshift_count, int):
-                        click.echo(f"      watermark-count set-count -t {table} --count {actual_redshift_count} --mode absolute")
-                    click.echo("   2. Check if recent syncs used additive mode incorrectly")
-                    click.echo("   3. Verify S3 files match expected processing")
+                        click.echo(f"      watermark-count set-count -t {table} --count {actual_redshift_count}")
+                    click.echo("   2. Verify S3 files match expected processing")
+                    click.echo("   3. Check for interrupted sync operations")
                 else:
                     click.echo("✅ All counts are consistent!")
                     click.echo("   No row count discrepancies detected")
@@ -2199,27 +2171,27 @@ def _parse_time_delta(time_str: str):
 
 
 def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, show_timestamps: bool = False):
-    """List S3 files with filtering"""
+    """List S3 files with filtering and processing status"""
     try:
         prefix = f"{config.s3.incremental_path.strip('/')}/"
-        
+
         # Handle pagination to get ALL files, not just first 1000
         all_files = []
         filtered_files = []
         total_size = 0
-        
+
         paginator = s3_client.get_paginator('list_objects_v2')
         page_iterator = paginator.paginate(
             Bucket=config.s3.bucket_name,
             Prefix=prefix
         )
-        
+
         for page in page_iterator:
             for obj in page.get('Contents', []):
                 key = obj['Key']
                 size = obj['Size']
                 modified = obj['LastModified']
-                
+
                 # Table filtering with v1.2.0 scoped table name support
                 if table:
                     # Use the same table name cleaning logic as S3Manager
@@ -2234,85 +2206,142 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
                     else:
                         # Unscoped table (v1.0.0 compatibility)
                         clean_table_name = table.replace('.', '_').replace('-', '_')
-                    
+
                     if clean_table_name not in key:
                         continue
-                
+
                 all_files.append((key, size, modified))
-                
+
                 # Apply filters
                 include_file = True
-                
+
                 # Pattern filtering
                 if pattern:
                     filename = key.split('/')[-1]
                     if not fnmatch.fnmatch(filename, pattern):
                         include_file = False
-                
+
                 # Time filtering
                 if cutoff_time and modified.replace(tzinfo=None) > cutoff_time:
                     include_file = False
-                
+
                 if include_file:
                     filtered_files.append((key, size, modified))
                     total_size += size
-        
+
+        # Separate processed vs unprocessed files using watermark
+        processed_files = []
+        unprocessed_files = []
+
+        if table:
+            try:
+                # Initialize watermark manager
+                from src.core.watermark_adapter import create_watermark_manager
+                watermark_config = {
+                    's3': {
+                        'bucket_name': config.s3.bucket_name,
+                        'access_key_id': config.s3.access_key,
+                        'secret_access_key': config.s3.secret_key.get_secret_value(),
+                        'region': config.s3.region,
+                        'watermark_prefix': 'watermarks/v2/'
+                    }
+                }
+                watermark_manager = create_watermark_manager(watermark_config)
+
+                # Get S3 URIs for status check
+                files_to_display = filtered_files if (older_than or pattern) else all_files
+                s3_uris = [f"s3://{config.s3.bucket_name}/{key}" for key, _, _ in files_to_display]
+
+                # Separate by status using watermark blacklist
+                status = watermark_manager.simple_manager.get_files_by_status(table, s3_uris)
+                processed_set = set(status['processed_files'])
+
+                for key, size, modified in files_to_display:
+                    s3_uri = f"s3://{config.s3.bucket_name}/{key}"
+                    if s3_uri in processed_set:
+                        processed_files.append((key, size, modified))
+                    else:
+                        unprocessed_files.append((key, size, modified))
+
+            except Exception as e:
+                # If watermark check fails, treat all as unprocessed
+                click.echo(f"   ⚠️  Could not check processing status: {e}", err=True)
+                unprocessed_files = filtered_files if (older_than or pattern) else all_files
+        else:
+            # No table specified, can't check status
+            unprocessed_files = filtered_files if (older_than or pattern) else all_files
+
         # Sort by newest first
         all_files.sort(key=lambda x: x[2], reverse=True)
-        filtered_files.sort(key=lambda x: x[2], reverse=True)
-        
+        processed_files.sort(key=lambda x: x[2], reverse=True)
+        unprocessed_files.sort(key=lambda x: x[2], reverse=True)
+
         # Display results
         if table:
             click.echo(f"📁 S3 Files for {table}:")
         else:
             click.echo("📁 All S3 Files:")
-        
-        click.echo(f"   Total files found: {len(all_files)}")
+
+        click.echo(f"   Total files: {len(all_files)}")
+        if table:
+            click.echo(f"   ✅ Processed (loaded to Redshift): {len(processed_files)}")
+            click.echo(f"   ⏳ Unprocessed (pending load): {len(unprocessed_files)}")
         if older_than or pattern:
             click.echo(f"   Files matching criteria: {len(filtered_files)}")
             click.echo(f"   Total size: {total_size / 1024 / 1024:.2f} MB")
-        
-        # Show newest files first (increased from 10 to 20)
-        click.echo("   Showing newest files first:")
         click.echo()
-        
-        display_limit = 20  # Show more files
-        # Use filtered_files if filters were applied, otherwise use all_files
-        files_to_display = filtered_files if (older_than or pattern) else all_files
-        sample_files = files_to_display[:display_limit]
-        
-        for i, (key, size, modified) in enumerate(sample_files, 1):
-            size_mb = size / 1024 / 1024
-            filename = key.split('/')[-1]
-            
-            if show_timestamps:
-                # Show detailed format with full timestamp
-                click.echo(f"   {i:2d}. {filename}")
-                click.echo(f"       Size: {size_mb:.2f} MB")
-                click.echo(f"       Modified: {modified}")
-                click.echo(f"       Path: {key}")
-            else:
-                # Show simplified format with relative time
-                date_str = modified.strftime('%Y-%m-%d %H:%M:%S')
-                # Calculate age
-                from datetime import datetime
-                age = datetime.now(modified.tzinfo) - modified
-                if age.days > 0:
-                    age_str = f"{age.days}d ago"
-                elif age.seconds > 3600:
-                    age_str = f"{age.seconds // 3600}h ago"
-                else:
-                    age_str = f"{age.seconds // 60}m ago"
-                
-                click.echo(f"   {i:2d}. {filename}")
-                click.echo(f"       {size_mb:.2f} MB | {date_str} ({age_str})")
-        
-        if len(files_to_display) > display_limit:
+
+        # Show unprocessed files first (most important)
+        if unprocessed_files:
+            click.echo("⏳ UNPROCESSED FILES (pending Redshift load):")
+            display_limit = 10
+            for i, (key, size, modified) in enumerate(unprocessed_files[:display_limit], 1):
+                _display_file_info(i, key, size, modified, show_timestamps)
+
+            if len(unprocessed_files) > display_limit:
+                click.echo(f"   ... and {len(unprocessed_files) - display_limit} more unprocessed files")
             click.echo()
-            click.echo(f"   ... and {len(files_to_display) - display_limit} more files (oldest not shown)")
-            
+
+        # Show processed files
+        if processed_files:
+            click.echo("✅ PROCESSED FILES (already loaded to Redshift):")
+            display_limit = 10
+            for i, (key, size, modified) in enumerate(processed_files[:display_limit], 1):
+                _display_file_info(i, key, size, modified, show_timestamps)
+
+            if len(processed_files) > display_limit:
+                click.echo(f"   ... and {len(processed_files) - display_limit} more processed files")
+
     except Exception as e:
         click.echo(f"❌ Failed to list S3 files: {e}", err=True)
+
+
+def _display_file_info(index: int, key: str, size: int, modified, show_timestamps: bool):
+    """Helper function to display file information"""
+    size_mb = size / 1024 / 1024
+    filename = key.split('/')[-1]
+
+    if show_timestamps:
+        # Show detailed format with full timestamp
+        click.echo(f"   {index:2d}. {filename}")
+        click.echo(f"       Size: {size_mb:.2f} MB")
+        click.echo(f"       Modified: {modified}")
+        click.echo(f"       Path: {key}")
+    else:
+        # Show simplified format with relative time
+        date_str = modified.strftime('%Y-%m-%d %H:%M:%S')
+        # Calculate age
+        from datetime import datetime
+        age = datetime.now(modified.tzinfo) - modified
+        if age.days > 0:
+            age_str = f"{age.days}d ago"
+        elif age.seconds > 3600:
+            age_str = f"{age.seconds // 3600}h ago"
+        else:
+            age_str = f"{age.seconds // 60}m ago"
+
+        click.echo(f"   {index:2d}. {filename}")
+        click.echo(f"       {size_mb:.2f} MB | {date_str} ({age_str})")
 
 
 def _s3_clean_table(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, dry_run: bool, force: bool, simple_delete: bool = False):
