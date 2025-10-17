@@ -198,20 +198,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 )
                 return False
             
-            # BUGFIX: Get current watermark using UnifiedWatermarkManager
-            watermark_data = self.unified_watermark.get_watermark(table_name)
-            mysql_state = watermark_data.get('mysql_state', {})
-            
-            # Create compatibility object for existing code
-            class WatermarkCompat:
-                def __init__(self, mysql_state):
-                    self.last_mysql_data_timestamp = mysql_state.get('last_timestamp')
-                    self.last_processed_id = mysql_state.get('last_id')
-                    self.backup_strategy = 'hybrid'  # Default for compatibility
-                    self.mysql_status = mysql_state.get('status', 'pending')
-                    self.mysql_rows_extracted = mysql_state.get('total_rows', 0)
-            
-            watermark = WatermarkCompat(mysql_state) if mysql_state.get('last_id') or mysql_state.get('last_timestamp') else None
+            # Get current watermark using watermark_adapter (wraps simple_watermark_manager)
+            watermark = self.watermark_manager.get_table_watermark(table_name)
             
             # DEBUG: Log watermark details to identify MAX query bug
             if watermark:
@@ -1258,11 +1246,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # Check if this is an id_only table by checking existing watermark strategy
             is_id_only_table = False
             try:
-                from src.core.s3_watermark_manager import S3WatermarkManager
-                from src.config.settings import AppConfig
-                config = AppConfig()
-                watermark_manager = S3WatermarkManager(config)
-                watermark = watermark_manager.get_table_watermark(table_name)
+                watermark = self.watermark_manager.get_table_watermark(table_name)
                 if watermark and watermark.backup_strategy == 'id_only':
                     is_id_only_table = True
                     self.logger.logger.info(f"Table {table_name} detected as id_only strategy from watermark")
@@ -1418,9 +1402,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 if hasattr(current_watermark, 's3_file_count'):
                     watermark_data['s3_file_count'] = current_watermark.s3_file_count
             
-            # BUGFIX: Use UnifiedWatermarkManager for reliable persistence
+            # Use watermark_adapter for reliable persistence (wraps simple_watermark_manager)
             try:
-                success = self.unified_watermark.update_watermark(
+                success = self.watermark_manager.update_mysql_watermark(
                     table_name=table_name,
                     last_id=watermark_data.get('last_processed_id'),
                     last_timestamp=watermark_data.get('last_mysql_data_timestamp'),
@@ -1700,9 +1684,9 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 'last_mysql_extraction_time': datetime.now().isoformat()
             }
             
-            # BUGFIX: Use UnifiedWatermarkManager for reliable chunk updates
+            # Use watermark_adapter for reliable chunk updates (wraps simple_watermark_manager)
             try:
-                success = self.unified_watermark.update_watermark(
+                success = self.watermark_manager.update_mysql_watermark(
                     table_name=table_name,
                     last_id=watermark_data.get('last_processed_id'),
                     last_timestamp=watermark_data.get('last_mysql_data_timestamp'),

@@ -414,12 +414,29 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
             include_caller=debug
         )
         
-        # Load configuration
-        if config_file:
-            config = AppConfig.load(config_file)
-        else:
-            config = AppConfig.load()
-        
+        # Load configuration (migrated to YAML-based system)
+        try:
+            from src.core.configuration_manager import ConfigurationManager
+
+            # Initialize ConfigurationManager to load connections.yml
+            config_manager = ConfigurationManager()
+
+            # Create AppConfig from YAML (for backward compatibility with existing code)
+            config = config_manager.create_app_config()
+
+            # Store config_manager in context for commands that need it
+            ctx.obj['config_manager'] = config_manager
+
+        except Exception as e:
+            # Fallback to direct .env loading if YAML config fails
+            click.echo(f"⚠️  Failed to load YAML configuration: {e}")
+            click.echo("   Falling back to .env configuration...")
+
+            if config_file:
+                config = AppConfig.load(config_file)
+            else:
+                config = AppConfig.load()
+
         # Override debug setting if specified
         if debug:
             config.debug = True

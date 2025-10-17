@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from sshtunnel import SSHTunnelForwarder
 
 from src.config.settings import AppConfig
-from src.core.s3_watermark_manager import S3WatermarkManager
+from src.core.watermark_adapter import create_watermark_manager
 from src.utils.exceptions import BackupError
 from src.utils.logging import get_logger
 
@@ -27,13 +27,13 @@ logger = get_logger(__name__)
 class RedshiftLoader:
     """
     Handles loading S3 backup data into Redshift tables.
-    
+
     Uses the proven CSV conversion approach for reliable loading.
     """
-    
+
     def __init__(self, config: AppConfig):
         self.config = config
-        self.watermark_manager = S3WatermarkManager(config)
+        self.watermark_manager = create_watermark_manager(config.to_dict())
         self.s3_client = None
         self._init_s3_client()
         

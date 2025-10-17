@@ -20,7 +20,6 @@ from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
 from src.core.s3_manager import S3Manager
 from src.core.watermark_adapter import create_watermark_manager
-from src.core.unified_watermark_manager import UnifiedWatermarkManager
 from src.utils.validation import validate_data, ValidationResult
 from src.utils.exceptions import (
     BackupError, 
@@ -341,9 +340,6 @@ class BaseBackupStrategy(ABC):
         self.s3_manager = S3Manager(config)
         self.watermark_manager = create_watermark_manager(config.to_dict())
 
-        # BUGFIX: Add UnifiedWatermarkManager to fix persistence issues
-        self.unified_watermark = UnifiedWatermarkManager(config.to_dict())
-        
         self.logger = get_backup_logger()
         self.metrics = BackupMetrics()
         

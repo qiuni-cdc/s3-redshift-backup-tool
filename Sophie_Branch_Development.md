@@ -781,34 +781,6 @@ except ImportError:
 
 **Key Insight:** The system now properly leverages your existing multi-connection architecture instead of requiring a generic password. Each pipeline can use its appropriate credentials while maintaining security through environment variable references.  
 
-## Usually Used Commands
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
-
-python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
-
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool_temp --json-output sync_parcel_detail.json 
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-
-git commit -m "add files from main" --no-verify
-source s3_backup_venv/bin/activate
-
----
-
 ## Watermark Logic - Final Architecture (Resolved)
 
 ### Overview
@@ -1060,4 +1032,382 @@ session_rows_total=total_rows_processed # For accurate session display ✅
 - **Interrupted Session 1:** Processed 200k rows → Watermark shows `last_session_rows: 200,000` ✅
 - **Completed Session 2:** Processed 100k rows → Watermark shows `last_session_rows: 100,000` ✅
 - **Monitoring Accuracy:** Operations teams see true session progress even after failures
-- **Airflow Reliability:** Task metrics reflect actual work done, not just last batch size
+- **Airflow Reliability:** Task metrics reflect actual work done, not just last batch size 
+
+## YAML-Based Configuration System Migration (Resolved)
+
+### Issue: Configuration Management and Environment Variable Substitution
+
+**Problem:** System relied on direct `.env` file reading with mixed configuration structure and credentials, making multi-environment management difficult.
+
+**Symptoms:**
+```
+❌ Status check failed: 2 validation errors for DatabaseConfig
+host
+  Field required [type=missing, input_value={'user': 'tianziqin'...}]
+database
+  Field required [type=missing, input_value={'user': 'tianziqin'...}]
+```
+
+### Root Cause Analysis
+
+**Original Architecture (v1.0.0):**
+```
+.env file → AppConfig (Pydantic) → Application
+```
+- Configuration structure and credentials mixed in .env
+- Hard to manage multiple environments
+- No central source of truth for infrastructure settings
+- Duplication between .env and YAML files
+
+**Issues Identified:**
+
+1. **Environment Variable Substitution Not Working**
+   - `connections.yml` had `${DB_USER}` placeholders
+   - `.env` file not loaded before YAML interpolation
+   - Variables stayed as `${DB_USER}` instead of being substituted
+
+2. **Allowlist Blocking Variables**
+   - Variables like `SSH_BASTION_USER`, `REDSHIFT_USER`, `DB2_US_RO_PASSWORD` blocked
+   - Security allowlist needed prefixes: `SSH_`, `REDSHIFT_`, `DB2_`, etc.
+   - Warning logs: `Environment variable 'DB2_US_RO_PASSWORD' not in allowlist`
+
+3. **Validation Errors After AppConfig Creation**
+   - Environment variables cleared after creating AppConfig
+   - Subsequent validation calls couldn't access config values
+   - Try/finally block removing env vars broke Pydantic validation
+
+### Fix Applied: YAML-First Configuration Architecture
+
+#### 1. **New Architecture (v1.1.0+)**
+
+```
+.env (credentials) → connections.yml (${VAR} refs) → ConfigurationManager → AppConfig → Application
+```
+
+**Benefits:**
+- Configuration structure in YAML (version controlled)
+- Credentials in .env (not version controlled, secure)
+- Central source of truth for infrastructure
+- Environment variable substitution via `${VAR}` syntax
+
+#### 2. **Load .env Before YAML Interpolation**
+
+**Code location:** `src/core/configuration_manager.py:173-190`
+
+```python
+def _load_dotenv(self):
+    """Load .env file to populate environment variables for YAML interpolation"""
+    from dotenv import load_dotenv
+
+    env_file = Path.cwd() / '.env'
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
+        logger.debug(f"Loaded .env file from: {env_file}")
+```
+
+**Critical Initialization Order:**
+```python
+def __init__(self, config_root: str = "config"):
+    # CRITICAL: Load .env BEFORE interpolating YAML
+    self._load_dotenv()           # Step 1: Load credentials
+    self._load_connections()      # Step 2: Load YAML + interpolate ${VAR}
+    self._load_environments()
+    self._load_templates()
+    self._load_pipelines()
+```
+
+**Why This Order Matters:**
+- ✅ `.env` loaded **first** - Credentials available for interpolation
+- ✅ YAML loaded **second** - Can substitute `${VAR}` with actual values
+- ❌ Wrong order would leave `${DB_USER}` as placeholder
+
+#### 3. **Environment Variable Allowlist Fix**
+
+**Code location:** `src/core/configuration_manager.py:535-587`
+
+```python
+# BEFORE (BROKEN): Missing infrastructure prefixes
+safe_prefixes = [
+    'BACKUP_', 'CONFIG_', 'DB_', 'CONN_'
+]
+
+# AFTER (FIXED): Added all infrastructure prefixes
+safe_prefixes = [
+    'BACKUP_', 'CONFIG_', 'DB_', 'DB2_', 'CONN_',
+    'SSH_', 'REDSHIFT_', 'MYSQL_', 'AWS_', 'S3_'
+]
+```
+
+**Security Features:**
+- ✅ Only whitelisted variables are interpolated
+- ✅ Blocks dangerous patterns (command injection, path traversal)
+- ✅ Prevents access to arbitrary system environment variables
+- ✅ Logs warnings for blocked variables
+
+#### 4. **Removed Environment Variable Clearing**
+
+**Code location:** `src/core/configuration_manager.py:1218-1274`
+
+```python
+# BEFORE (BROKEN): Cleared env vars after creating AppConfig
+try:
+    app_config = AppConfig()
+    return app_config
+finally:
+    # This broke subsequent validation!
+    for key in infrastructure_keys:
+        del os.environ[key]  # ❌ Removed needed values
+
+# AFTER (FIXED): Keep env vars for validation
+for key, value in env_mapping.items():
+    if value is not None:
+        os.environ[key] = str(value)
+
+app_config = AppConfig()  # Pydantic reads from environment
+return app_config  # No cleanup - values persist for validation ✅
+```
+
+**Why This Matters:**
+- AppConfig properties create sub-configs on-demand (lazy loading)
+- `app_config.database` triggers `DatabaseConfig()` creation
+- DatabaseConfig needs environment variables still set
+- Clearing vars broke `validate_all()` and health checks
+
+#### 5. **Environment Variable Interpolation**
+
+**Code location:** `src/core/configuration_manager.py:552-616`
+
+**Example YAML** (`config/connections.yml`):
+```yaml
+connections:
+  sources:
+    default:
+      host: us-west-2.ro.db.analysis.uniuni.com.internal
+      username: "${DB_USER}"           # ← References .env
+      password: "${DB_US_DW_PASSWORD}" # ← References .env
+
+      ssh_tunnel:
+        enabled: true
+        host: 35.83.114.196
+        username: "${SSH_BASTION_USER}"
+        private_key_path: "${SSH_BASTION_KEY_PATH}"
+
+s3:
+  bucket_name: redshift-dw-qa-uniuni-com
+  access_key_id: "${AWS_ACCESS_KEY_ID}"
+  secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+```
+
+**Substitution Process:**
+```
+BEFORE interpolation:
+  username: "${DB_USER}"
+  password: "${DB_US_DW_PASSWORD}"
+
+AFTER interpolation:
+  username: "tianziqin"
+  password: "qPwRT]9(BUI0Q2Vw"
+```
+
+### Complete Data Flow
+
+```
+┌─────────────────────────────────────────┐
+│ Step 1: Load .env file                  │
+│   DB_USER=tianziqin                     │
+│   DB_US_DW_PASSWORD=secret123           │
+│   ↓ load_dotenv()                       │
+│   os.environ['DB_USER'] = 'tianziqin'   │
+└─────────────────┬───────────────────────┘
+                  ↓
+┌─────────────────────────────────────────┐
+│ Step 2: Load connections.yml            │
+│   username: "${DB_USER}" → "tianziqin"  │
+│   password: "${DB_US_DW_PASSWORD}" → OK │
+│   ↓ _interpolate_environment_variables  │
+└─────────────────┬───────────────────────┘
+                  ↓
+┌─────────────────────────────────────────┐
+│ Step 3: Create AppConfig                │
+│   Set environment variables from YAML   │
+│   ↓ AppConfig() (Pydantic reads env)    │
+│   app_config.database.user = 'tianziqin'│
+└─────────────────┬───────────────────────┘
+                  ↓
+┌─────────────────────────────────────────┐
+│ Step 4: Use in application              │
+│   Backup strategies use AppConfig       │
+│   No changes needed - backward compat!  │
+└─────────────────────────────────────────┘
+```
+
+### Testing Results
+
+**Before Fix:**
+```
+BEFORE INTERPOLATION: username = ${DB_USER}
+AFTER INTERPOLATION:  username = ${DB_USER}  ← Not substituted!
+
+ENV_MAPPING VALUES:
+  DB_HOST = us-west-2.ro.db.analysis.uniuni.com.internal
+  DB_USER = ${DB_USER}  ← Still placeholder!
+
+❌ Status check failed: host Field required, database Field required
+```
+
+**After Fix:**
+```
+✓ Loaded .env file from: /home/tianzi/s3-redshift-backup-tool/.env
+
+BEFORE INTERPOLATION: username = ${DB_USER}
+AFTER INTERPOLATION:  username = tianziqin  ← Substituted!
+
+✓ Substituted ${DB_USER} = tianziqin
+✓ Substituted ${DB_US_DW_PASSWORD} = qPwRT]9(BUI0Q2Vw
+✓ Substituted ${SSH_BASTION_USER} = tianziqin
+✓ Substituted ${AWS_ACCESS_KEY_ID} = AKIA3QYE2ANHIFTCRKN3
+
+✅ Status check passed
+```
+
+### Components Modified
+
+**1. ConfigurationManager (`src/core/configuration_manager.py`)**
+- Added `_load_dotenv()` method (lines 173-190)
+- Updated `__init__()` to load .env first (line 157)
+- Fixed allowlist in `is_safe_env_var()` (lines 542-544)
+- Removed env var cleanup in `create_app_config()` (lines 1218-1274)
+
+**2. CLI Initialization (`src/cli/main.py`)**
+```python
+# Initialize ConfigurationManager to load connections.yml
+config_manager = ConfigurationManager()
+
+# Create AppConfig from YAML (backward compatibility)
+config = config_manager.create_app_config()
+
+# Store in context for commands
+ctx.obj['config_manager'] = config_manager
+```
+
+**3. Multi-Schema Commands (`src/cli/multi_schema_commands.py`)**
+```python
+# Create AppConfig with specific source/target connections
+config = multi_schema_ctx.config_manager.create_app_config(
+    source_connection=pipeline_config.source,  # e.g., "US_DW_UNIDW_SSH"
+    target_connection=pipeline_config.target   # e.g., "redshift_default"
+)
+```
+
+### Benefits
+
+**1. Separation of Concerns**
+- Configuration structure in YAML (version controlled)
+- Credentials in .env (not version controlled, secure)
+- Clear separation of infrastructure vs secrets
+
+**2. Multi-Environment Support**
+- Single YAML structure
+- Different .env files per environment (dev, staging, prod)
+- Easy environment switching
+
+**3. Centralized Management**
+- All connection details in one place (`connections.yml`)
+- Easy to update infrastructure settings
+- No need to search through .env for connection details
+
+**4. Security**
+- Credentials never hardcoded in YAML
+- Allowlist prevents injection attacks
+- .env stays out of version control
+
+**5. Backward Compatibility**
+- Existing code using `AppConfig` works unchanged
+- No breaking changes to backup strategies
+- Gradual migration path
+
+### Common Patterns
+
+**Pattern 1: Adding New Environment Variable**
+```bash
+# 1. Add to .env
+NEW_DATABASE_PASSWORD=secret456
+
+# 2. Reference in connections.yml
+sources:
+  new_source:
+    password: "${NEW_DATABASE_PASSWORD}"
+
+# 3. Update allowlist if needed (add prefix to safe_prefixes)
+```
+
+**Pattern 2: Adding New Connection**
+```yaml
+connections:
+  sources:
+    new_connection:
+      host: new-host.example.com
+      username: "${DB_USER}"
+      password: "${DB_NEW_PASSWORD}"
+      ssh_tunnel:
+        enabled: true
+        username: "${SSH_BASTION_USER}"
+```
+
+### Troubleshooting Guide
+
+**Problem**: Variable not substituted (shows `${VAR_NAME}`)
+
+**Solutions:**
+1. Check .env file: `grep VAR_NAME .env`
+2. Check allowlist: Look for warning in logs
+3. Add to allowlist: Update `safe_prefixes` or `ALLOWED_ENV_VARS`
+
+**Problem**: `Field required` validation error
+
+**Solutions:**
+1. Check YAML has the field defined
+2. Check ${VAR} was successfully substituted (look for warning logs)
+3. Check .env has the referenced variable
+4. Verify .env is loaded before YAML processing
+
+### Production Status
+
+The YAML-based configuration system is now **production-ready** with:
+- ✅ Proper .env loading before YAML interpolation
+- ✅ Comprehensive environment variable allowlist
+- ✅ No more validation errors after AppConfig creation
+- ✅ Clean output without verbose debug messages
+- ✅ Backward compatible with existing code
+- ✅ Supports multiple connections and environments
+- ✅ Secure credential management
+
+**Location in Documentation:** `Codes_Explain.md:114-627`
+
+## Usually Used Commands
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
+
+python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log  
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --redshift-only
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
+
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool_temp --json-output sync_parcel_detail.json 
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+
+git commit -m "add files from main" --no-verify
+source s3_backup_venv/bin/activate

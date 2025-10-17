@@ -135,7 +135,7 @@ class ConfigurationManager:
     def __init__(self, config_root: str = "config"):
         """
         Initialize configuration manager
-        
+
         Args:
             config_root: Root directory for configuration files
         """
@@ -144,18 +144,25 @@ class ConfigurationManager:
         self.environments: Dict[str, Dict[str, Any]] = {}
         self.templates: Dict[str, Dict[str, Any]] = {}
         self.current_environment = self._detect_environment()
-        
+
         # Configuration cache and metadata
         self._config_cache: Dict[str, Any] = {}
         self._last_reload = None
         self._file_timestamps: Dict[Path, float] = {}
-        
+
+        # NEW: Load connections.yml for system-wide settings
+        self.connections_config: Dict[str, Any] = {}
+
+        # CRITICAL: Load .env file BEFORE interpolating variables in YAML files
+        self._load_dotenv()
+
         # Initialize configuration structure
         self._ensure_config_structure()
+        self._load_connections()  # NEW: Load connections first
         self._load_environments()
         self._load_templates()
         self._load_pipelines()
-        
+
         logger.info(
             f"Configuration manager initialized: "
             f"{len(self.pipelines)} pipelines, "
@@ -163,17 +170,36 @@ class ConfigurationManager:
             f"current environment: {self.current_environment}"
         )
     
+    def _load_dotenv(self):
+        """Load .env file to populate environment variables for YAML interpolation"""
+        try:
+            from dotenv import load_dotenv
+
+            # Try to find .env file in project root (parent of config_root)
+            env_file = Path.cwd() / '.env'
+
+            if env_file.exists():
+                load_dotenv(env_file, override=False)  # Don't override existing env vars
+                logger.debug(f"Loaded .env file from: {env_file}")
+            else:
+                logger.warning(f"No .env file found at: {env_file}")
+
+        except ImportError:
+            logger.warning("python-dotenv not installed, skipping .env loading")
+        except Exception as e:
+            logger.warning(f"Failed to load .env file: {e}")
+
     def _detect_environment(self) -> str:
         """Detect current environment from various sources"""
         # Check environment variable
         env = os.getenv('BACKUP_ENVIRONMENT', '').lower()
         if env in ['development', 'dev', 'staging', 'stage', 'production', 'prod']:
             return 'development' if env in ['dev'] else 'staging' if env in ['stage'] else 'production' if env in ['prod'] else env
-        
+
         # Check for common development indicators
         if os.getenv('DEBUG') == '1' or os.getenv('DEV') == '1':
             return 'development'
-        
+
         # Default to production for safety
         return 'production'
     
@@ -278,7 +304,33 @@ class ConfigurationManager:
                 yaml.dump(dev_env, f, default_flow_style=False, indent=2)
             
             logger.info("Created development environment configuration")
-    
+
+    def _load_connections(self):
+        """Load connections.yml with environment variable substitution"""
+        connections_file = self.config_root / "connections.yml"
+
+        if not connections_file.exists():
+            logger.warning("connections.yml not found, some features may be limited")
+            return
+
+        try:
+            with open(connections_file, 'r') as f:
+                config_data = yaml.safe_load(f) or {}
+
+            # Interpolate environment variables
+            self.connections_config = self._interpolate_environment_variables(config_data)
+            self._file_timestamps[connections_file] = connections_file.stat().st_mtime
+
+            logger.info(
+                f"Loaded connections configuration: "
+                f"{len(self.connections_config.get('connections', {}).get('sources', {}))} sources, "
+                f"{len(self.connections_config.get('connections', {}).get('targets', {}))} targets"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to load connections.yml: {e}")
+            raise ValidationError(f"Failed to load connections configuration: {e}")
+
     def _load_environments(self):
         """Load environment-specific configurations"""
         env_dir = self.config_root / "environments"
@@ -500,22 +552,23 @@ class ConfigurationManager:
             'S3_BUCKET', 'S3_PREFIX', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION',
             # General settings
             'BACKUP_ENVIRONMENT', 'DEBUG', 'DEV', 'ENVIRONMENT',
-            # Custom user-defined variables (with safe prefix)
-            'BACKUP_', 'CONFIG_', 'DB_', 'CONN_'
         }
-        
+
         def is_safe_env_var(var_name: str) -> bool:
             """Check if environment variable is safe to interpolate"""
             # Direct allowlist match
             if var_name in ALLOWED_ENV_VARS:
                 return True
-            
-            # Check safe prefixes
-            safe_prefixes = ['BACKUP_', 'CONFIG_', 'DB_', 'CONN_']
+
+            # Check safe prefixes (infrastructure and connection variables)
+            safe_prefixes = [
+                'BACKUP_', 'CONFIG_', 'DB_', 'DB2_', 'CONN_',
+                'SSH_', 'REDSHIFT_', 'MYSQL_', 'AWS_', 'S3_'
+            ]
             for prefix in safe_prefixes:
                 if var_name.startswith(prefix):
                     return True
-            
+
             return False
         
         def interpolate_value(value):
@@ -523,22 +576,22 @@ class ConfigurationManager:
                 # Replace ${VAR_NAME} patterns with security validation
                 def replace_var(match):
                     var_name = match.group(1) or match.group(2)
-                    
+
                     # Security check: only allow safe environment variables
                     if not is_safe_env_var(var_name):
                         logger.warning(f"Environment variable '{var_name}' not in allowlist, skipping interpolation")
                         return match.group(0)  # Keep original placeholder
-                    
+
                     env_value = os.getenv(var_name)
                     if env_value is None:
                         logger.debug(f"Environment variable {var_name} not found, keeping placeholder")
                         return match.group(0)  # Keep original if not found
-                    
+
                     # Additional security: prevent command injection patterns
                     if self._contains_suspicious_patterns(env_value):
                         logger.error(f"Environment variable '{var_name}' contains suspicious patterns, blocking interpolation")
                         raise ValidationError(f"Security violation: Environment variable '{var_name}' contains potentially dangerous content")
-                    
+
                     return env_value
                 
                 # Handle both ${VAR} and $VAR patterns with strict validation
@@ -985,10 +1038,12 @@ class ConfigurationManager:
         self.pipelines.clear()
         self.environments.clear()
         self.templates.clear()
+        self.connections_config.clear()
         self._config_cache.clear()
         self._file_timestamps.clear()
-        
+
         # Reload everything
+        self._load_connections()
         self._load_environments()
         self._load_templates()
         self._load_pipelines()
@@ -1049,7 +1104,135 @@ class ConfigurationManager:
                 summary['validation_errors'].append(f"{pipeline_name}: Validation failed - {e}")
         
         return summary
-    
+
+    def get_s3_config(self) -> Dict[str, Any]:
+        """Get S3 configuration from connections.yml"""
+        return self.connections_config.get('s3', {})
+
+    def get_backup_config(self) -> Dict[str, Any]:
+        """Get backup configuration from connections.yml"""
+        return self.connections_config.get('backup', {})
+
+    def get_connection(self, connection_name: str) -> Dict[str, Any]:
+        """Get specific connection configuration"""
+        sources = self.connections_config.get('connections', {}).get('sources', {})
+        targets = self.connections_config.get('connections', {}).get('targets', {})
+
+        if connection_name in sources:
+            return sources[connection_name]
+        elif connection_name in targets:
+            return targets[connection_name]
+        else:
+            raise ValidationError(f"Connection '{connection_name}' not found in connections.yml")
+
+    def create_app_config(self, source_connection: Optional[str] = None, target_connection: Optional[str] = None) -> 'AppConfig':
+        """
+        Create AppConfig from connections.yml for backward compatibility.
+
+        This allows existing backup strategies to work without modification
+        while using YAML-based configuration.
+
+        Args:
+            source_connection: Source connection name (defaults to first source)
+            target_connection: Target connection name (defaults to first target)
+
+        Returns:
+            AppConfig instance populated from connections.yml
+        """
+        from src.config.settings import AppConfig
+        import os
+
+        # Get connections
+        sources = self.connections_config.get('connections', {}).get('sources', {})
+        targets = self.connections_config.get('connections', {}).get('targets', {})
+
+        if not sources:
+            raise ValidationError("No source connections defined in connections.yml")
+        if not targets:
+            raise ValidationError("No target connections defined in connections.yml")
+
+        # Use specified or first connection
+        source_name = source_connection or list(sources.keys())[0]
+        target_name = target_connection or list(targets.keys())[0]
+
+        source_config = sources[source_name]
+        target_config = targets[target_name]
+        s3_config = self.connections_config.get('s3', {})
+        backup_config = self.connections_config.get('backup', {})
+
+        logger.debug(f"Creating AppConfig from source={source_name}, target={target_name}")
+
+        # Temporarily set environment variables for AppConfig to pick up
+        # This is the bridge between YAML config and Pydantic BaseSettings
+        # Note: No defaults here - let AppConfig's Pydantic defaults handle missing values
+        env_mapping = {
+            # Database (source)
+            'DB_HOST': source_config.get('host'),
+            'DB_PORT': source_config.get('port'),
+            'DB_USER': source_config.get('username'),
+            'DB_PASSWORD': source_config.get('password'),
+            'DB_DATABASE': source_config.get('database'),
+
+            # SSH tunnel (source)
+            'SSH_BASTION_HOST': source_config.get('ssh_tunnel', {}).get('host'),
+            'SSH_BASTION_USER': source_config.get('ssh_tunnel', {}).get('username'),
+            'SSH_BASTION_KEY_PATH': source_config.get('ssh_tunnel', {}).get('private_key_path'),
+            'SSH_LOCAL_PORT': source_config.get('ssh_tunnel', {}).get('local_port'),
+
+            # Redshift (target)
+            'REDSHIFT_HOST': target_config.get('host'),
+            'REDSHIFT_PORT': target_config.get('port'),
+            'REDSHIFT_USER': target_config.get('username'),
+            'REDSHIFT_PASSWORD': target_config.get('password'),
+            'REDSHIFT_DATABASE': target_config.get('database'),
+            'REDSHIFT_SCHEMA': target_config.get('schema'),
+
+            # S3
+            'S3_BUCKET_NAME': s3_config.get('bucket_name'),
+            'S3_ACCESS_KEY': s3_config.get('access_key_id'),
+            'S3_SECRET_KEY': s3_config.get('secret_access_key'),
+            'S3_REGION': s3_config.get('region'),
+            'S3_INCREMENTAL_PATH': s3_config.get('incremental_path'),
+            'S3_HIGH_WATERMARK_KEY': s3_config.get('high_watermark_key'),
+            'S3_MULTIPART_THRESHOLD': s3_config.get('performance', {}).get('multipart_threshold'),
+            'S3_MULTIPART_CHUNKSIZE': s3_config.get('performance', {}).get('multipart_chunksize'),
+            'S3_MAX_CONCURRENCY': s3_config.get('performance', {}).get('max_concurrency'),
+            'S3_MAX_POOL_CONNECTIONS': s3_config.get('performance', {}).get('max_pool_connections'),
+            'S3_RETRY_MAX_ATTEMPTS': s3_config.get('performance', {}).get('retry_max_attempts'),
+            'S3_RETRY_MODE': s3_config.get('performance', {}).get('retry_mode'),
+
+            # Backup
+            'BACKUP_BATCH_SIZE': backup_config.get('batch_size'),
+            'BACKUP_MAX_WORKERS': backup_config.get('max_workers'),
+            'BACKUP_RETRY_ATTEMPTS': backup_config.get('retry_attempts'),
+            'BACKUP_TIMEOUT_SECONDS': backup_config.get('timeout_seconds'),
+            'BACKUP_MEMORY_LIMIT_MB': backup_config.get('memory_limit_mb'),
+            'BACKUP_GC_THRESHOLD': backup_config.get('gc_threshold'),
+            'BACKUP_MEMORY_CHECK_INTERVAL': backup_config.get('memory_check_interval'),
+            'BACKUP_ENABLE_COMPRESSION': backup_config.get('enable_compression'),
+            'BACKUP_COMPRESSION_LEVEL': backup_config.get('compression_level'),
+            'BACKUP_TARGET_ROWS_PER_CHUNK': backup_config.get('target_rows_per_chunk'),
+            'BACKUP_MAX_ROWS_PER_CHUNK': backup_config.get('max_rows_per_chunk'),
+        }
+
+        # Set environment variables from connections.yml
+        # Since we've already loaded .env via _load_dotenv(), we can just override
+        # the env vars with YAML values (which have ${VAR} already substituted)
+        for key, value in env_mapping.items():
+            if value is not None:  # Only set non-None values
+                os.environ[key] = str(value)  # Convert to string for env vars
+
+        # Create AppConfig - it will see values from connections.yml
+        # Plus DEBUG/LOG_LEVEL from .env
+        app_config = AppConfig()
+
+        logger.info(
+            f"Created AppConfig from connections.yml: "
+            f"source={source_name}, target={target_name}"
+        )
+
+        return app_config
+
     def export_configuration(self, output_path: Optional[str] = None) -> Dict[str, Any]:
         """Export current configuration for backup or analysis"""
         export_data = {

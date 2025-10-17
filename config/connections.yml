@@ -234,11 +234,13 @@ connections:
 
 # S3 configuration (inherited from .env)
 s3:
-  bucket_name: "${S3_BUCKET_NAME}"
-  region: "${S3_REGION}"
+  bucket_name: redshift-dw-qa-uniuni-com
+  region: us-west-2
   access_key_id: "${AWS_ACCESS_KEY_ID}"
   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-  
+  incremental_path: incremental/ 
+  high_watermark_key: watermark/last_run_timestamp.txt 
+
   # Performance optimizations from your current .env
   performance:
     multipart_threshold: 104857600    # 100MB

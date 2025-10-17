@@ -805,10 +805,9 @@ def _sync_legacy_mode(tables: List[str], backup_only: bool, redshift_only: bool,
         # Import the backup strategies and connection manager
         from src.backup.sequential import SequentialBackupStrategy
         from src.core.connections import ConnectionManager
-        from src.config.settings import AppConfig
-        
-        # Use v1.0.0 environment-based connection
-        config = AppConfig()
+
+        # Use YAML-based configuration (migrated from AppConfig)
+        config = multi_schema_ctx.config_manager.create_app_config()
         connection_manager = ConnectionManager(config)
         
         # Execute backup for each table using proper connection context
@@ -865,10 +864,9 @@ def _fallback_to_legacy_sync(table_name: str, backup_only: bool, redshift_only: 
     """Fallback sync function for single table when multi-schema fails"""
     try:
         from src.backup.sequential import SequentialBackupStrategy
-        from src.config.settings import AppConfig
-        
-        # Use v1.0.0 backup strategy with proper configuration
-        config = AppConfig()
+
+        # Use YAML-based configuration (migrated from AppConfig)
+        config = multi_schema_ctx.config_manager.create_app_config()
         backup_strategy = SequentialBackupStrategy(config)
         
         # Execute backup for single table
@@ -978,10 +976,11 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
         # Use v1.0.0 backup strategy with proper configuration
         # The existing backup strategies are designed to work with AppConfig, not direct connections
         try:
-            from src.config.settings import AppConfig
-            
-            # Create a temporary config that uses the same connection settings
-            config = AppConfig()
+            # Use YAML-based configuration (migrated from AppConfig)
+            config = multi_schema_ctx.config_manager.create_app_config(
+                source_connection=pipeline_config.source,
+                target_connection=pipeline_config.target
+            )
             
             # Determine backup strategy based on pipeline configuration  
             strategy_name = pipeline_config.processing.get('strategy', 'sequential')
