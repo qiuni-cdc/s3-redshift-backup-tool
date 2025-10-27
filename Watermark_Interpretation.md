@@ -17,7 +17,7 @@ The watermark system tracks the **state and progress** of data synchronization f
 A watermark consists of **three main sections**:
 
 1. **MySQL State** - Tracks data extraction from source database
-2. **S3 State** - Tracks intermediate storage (unprocessed files)
+2. **S3 State** - Tracks intermediate storage (backup files)
 3. **Redshift State** - Tracks data loading to target warehouse
 
 ## Viewing Watermark Data
@@ -41,7 +41,7 @@ MySQL → S3 Backup Stage:
 
 S3 Storage:
   S3 Files Created: 46
-  📦 Unprocessed S3 Files (awaiting Redshift load): 0 files
+  ⏳ Unprocessed S3 Files (awaiting Redshift load): 0 files
   ✅ Processed S3 Files (loaded to Redshift): 46 files
 
 S3 → Redshift Loading Stage:
@@ -144,17 +144,17 @@ Watermark shows: last_session_rows = 200 ✅
 ### S3 State Fields
 
 #### `s3_file_count`
-**What it means**: **Total S3 files created** for this table (unprocessed + processed).
+**What it means**: **Total S3 files created** for this table (backup + processed).
 
 **Calculation**: `len(backup_s3_files) + len(processed_s3_files)`
 
 **Example**: `46`
-- Could be 46 unprocessed files + 0 processed
-- Or 0 unprocessed files + 46 processed
-- Or 20 unprocessed + 26 processed = 46 total
+- Could be 46 backup files + 0 processed
+- Or 0 backup files + 46 processed
+- Or 20 backup + 26 processed = 46 total
 
 #### `backup_s3_files` (Array)
-**What it means**: S3 parquet files that have been **created but NOT yet loaded to Redshift** (unprocessed files).
+**What it means**: S3 parquet files that have been **created but NOT yet loaded to Redshift**.
 
 **Purpose**: Track files awaiting Redshift load.
 
@@ -233,7 +233,7 @@ MySQL State:
 
 S3 State:
   Files Created: 20
-  Unprocessed Files: 0
+  Backup Files: 0
   Processed Files: 20
 
 Redshift State:
@@ -262,7 +262,7 @@ MySQL State:
 
 S3 State:
   Files Created: 5
-  Unprocessed Files: 5  ← Files awaiting load
+  Backup Files: 5  ← Files awaiting load
   Processed Files: 0
 
 Redshift State:
@@ -298,7 +298,7 @@ MySQL State:
 
 S3 State:
   Files Created: 3
-  Unprocessed Files: 3
+  Backup Files: 3
   Processed Files: 0
 
 Redshift State:
@@ -338,7 +338,7 @@ MySQL State:
 
 S3 State:
   Files Created: 0
-  Unprocessed Files: 0
+  Backup Files: 0
   Processed Files: 10
 
 Redshift State:
@@ -373,7 +373,7 @@ MySQL State:
 
 S3 State:
   Files Created: 10
-  Unprocessed Files: 3  ← Remaining files
+  Backup Files: 3  ← Remaining files
   Processed Files: 7  ← Already loaded
 
 Redshift State:
@@ -394,7 +394,7 @@ Redshift State:
 python -m src.cli.main sync pipeline -p <pipeline> -t <table> --redshift-only
 ```
 
-**Result**: Will load only the 3 remaining unprocessed files
+**Result**: Will load only the 3 remaining backup files
 
 ---
 
@@ -409,7 +409,7 @@ MySQL State:
 
 S3 State:
   Files Created: 10
-  Unprocessed Files: 0
+  Backup Files: 0
   Processed Files: 10
 
 Redshift State:
@@ -459,8 +459,8 @@ MySQL → S3 Backup Stage:
   Rows Extracted This Session: <last_session_rows>  # Current session only
 
 S3 Storage:
-  S3 Files Created: <s3_file_count>        # Total files (unprocessed + processed)
-  📦 Unprocessed S3 Files (awaiting Redshift load): <backup_count> files
+  S3 Files Created: <s3_file_count>        # Total files (backup + processed)
+  📦 Backup S3 Files (awaiting Redshift load): <backup_count> files
   ✅ Processed S3 Files (loaded to Redshift): <processed_count> files
 
 S3 → Redshift Loading Stage:
@@ -477,7 +477,7 @@ python -m src.cli.main watermark get -t <table> -p <pipeline> --show-files
 
 **Output**:
 ```
-📦 Unprocessed S3 Files (awaiting Redshift load): 3 files
+📦 Backup S3 Files (awaiting Redshift load): 3 files
   1. incremental/table=us_dw_unidw_ssh_unidw_dw_parcel_pricing/20250115_143000_chunk_1_batch_1.parquet
   2. incremental/table=us_dw_unidw_ssh_unidw_dw_parcel_pricing/20250115_143000_chunk_1_batch_2.parquet
   3. incremental/table=us_dw_unidw_ssh_unidw_dw_parcel_pricing/20250115_143000_chunk_1_batch_3.parquet
@@ -536,7 +536,7 @@ python -m src.cli.main watermark reset -t <table_name> -p <pipeline_name>
 
 **Symptoms**:
 ```
-Unprocessed Files: 10 files
+Backup Files: 10 files
 Processed Files: 0
 Redshift Status: not_started
 ```
@@ -607,7 +607,7 @@ python -m src.cli.main sync pipeline -p <pipeline> -t <table> --redshift-only
 ```
 Total Rows: 800,000
 Last Session Rows: 0  ← Should show partial progress
-Unprocessed Files: 3  ← Files exist!
+Backup Files: 3  ← Files exist!
 ```
 
 **Status**: **Fixed in current version**
@@ -623,7 +623,7 @@ Unprocessed Files: 3  ← Files exist!
 
 **Symptoms** (OLD BUG - Fixed):
 ```
-Unprocessed Files: 5 files
+Backup Files: 5 files
   - file1.parquet
   - file2.parquet
 Processed Files: 5 files
@@ -657,7 +657,7 @@ python -m src.cli.main watermark get -t <table> -p <pipeline> --show-files
 ### 3. Monitor File States
 ```bash
 # Check for pending loads
-# Unprocessed files > 0 → Run --redshift-only
+# Backup files > 0 → Run --redshift-only
 ```
 
 ### 4. Handle Interruptions Safely
@@ -717,7 +717,7 @@ python -m src.cli.main sync pipeline \
 
 - **`total_rows`** → Lifetime cumulative (historical tracking)
 - **`last_session_rows`** → Current session only (operational visibility)
-- **`backup_s3_files`** → Unprocessed files awaiting Redshift load
+- **`backup_s3_files`** → Files awaiting Redshift load
 - **`processed_s3_files`** → Files already loaded to Redshift
 
 ### Critical Commands:

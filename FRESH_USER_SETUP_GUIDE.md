@@ -81,43 +81,158 @@ python -m src.cli.main --help
 
 **Note**: The system uses `.env` file configuration rather than separate config directories. The CLI will guide you through any missing configuration.
 
-### **2.2 Configure Environment Variables**
+### **2.2 Configure Environment Variables (.env file)**
 
-**CRITICAL**: This is the main configuration step. Create `.env` file in project root:
+**CRITICAL**: The `.env` file contains **only credentials** (passwords, SSH keys, AWS keys). All other settings (S3 bucket, performance tuning) are in YAML configuration files.
+
 ```bash
-# Copy from template (if exists)
+# Copy from template
 cp .env.template .env
 
-# OR create manually
-cat > .env << 'EOF'
-# Environment
-ENVIRONMENT=development
-
-# AWS Configuration
-AWS_REGION=us-west-2
-S3_BUCKET_NAME=your-s3-bucket-name
-
-# Redshift Configuration (via SSH tunnel)
-REDSHIFT_HOST=localhost
-REDSHIFT_PORT=5439
-REDSHIFT_DATABASE=your_redshift_db
-REDSHIFT_USERNAME=your_redshift_user
-REDSHIFT_PASSWORD=your_redshift_password
-REDSHIFT_SCHEMA=public
-
-# SSH Tunnel for Redshift (if needed)
-REDSHIFT_SSH_HOST=your-bastion-host.com
-REDSHIFT_SSH_PORT=22
-REDSHIFT_SSH_USERNAME=your_ssh_user
-REDSHIFT_SSH_KEY_PATH=/path/to/your/ssh/key
-
-# Logging
-LOG_LEVEL=INFO
-LOG_FILE=logs/backup.log
-EOF
+# Edit with your actual credentials
+nano .env
 ```
 
-### **2.3 Verify Configuration**
+**Example `.env` structure (credentials only):**
+```bash
+# ============================================
+# Database Credentials (Multiple Databases)
+# ============================================
+DB_USER=your_db_username
+
+# US Data Warehouse passwords
+DB_US_DW_PASSWORD=your_us_dw_password
+DB_US_DW_RO_PASSWORD=your_us_dw_ro_password
+
+# US Production passwords
+DB_US_PROD_RO_PASSWORD=your_us_prod_password
+
+# Canada Data Warehouse passwords
+DB_CA_DW_RO_PASSWORD=your_ca_dw_password
+
+# QA Environment passwords
+DB_US_QA_PASSWORD=your_qa_password
+
+# ============================================
+# SSH Credentials (Bastion Host)
+# ============================================
+SSH_BASTION_USER=your_ssh_username
+SSH_BASTION_KEY_PATH=/path/to/your/ssh/key.pem
+
+# ============================================
+# Redshift Credentials
+# ============================================
+REDSHIFT_USER=your_redshift_username
+REDSHIFT_PASSWORD=your_redshift_password
+
+# Redshift SSH Tunnel (if behind bastion)
+REDSHIFT_SSH_BASTION_USER=your_redshift_ssh_user
+REDSHIFT_SSH_BASTION_KEY_PATH=/path/to/redshift/ssh/key.pem
+
+# ============================================
+# AWS Credentials
+# ============================================
+AWS_ACCESS_KEY_ID=your_aws_access_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+```
+
+**Important Notes:**
+- **Only add passwords/credentials you actually need** for your databases
+- The system uses `config/connections.yml` for connection details (hosts, ports, database names)
+- S3 bucket names and regions are defined in pipeline YAML files (e.g., `config/pipelines/*.yml`)
+- Performance settings (batch size, workers) are also in pipeline YAML files
+
+**Security:**
+```bash
+# Set proper SSH key permissions
+chmod 600 /path/to/your/ssh/key.pem
+
+# Verify .env is in .gitignore (already configured)
+grep "^\.env" .gitignore
+```
+
+### **2.3 Understanding YAML Configuration Files**
+
+The system uses YAML files for non-sensitive configuration. There are two main types:
+
+#### **A. Connections Configuration** (`config/connections.yml`)
+
+Defines database connections, SSH tunnels, and S3 settings. Uses environment variable substitution for security.
+
+```yaml
+connections:
+  sources:
+    # Source MySQL connections
+    US_DW_UNIDW_SSH:
+      host: us-west-2.ro.db.analysis.uniuni.com.internal
+      port: 3306
+      database: unidw
+      username: "${DB_USER}"              # References .env
+      password: "${DB_US_DW_PASSWORD}"    # References .env
+
+      ssh_tunnel:
+        enabled: true
+        host: 35.83.114.196
+        username: "${SSH_BASTION_USER}"   # References .env
+        private_key_path: "${SSH_BASTION_KEY_PATH}"  # References .env
+        local_port: 0  # Auto-assign
+
+  targets:
+    # Redshift target connection
+    redshift_default:
+      host: your-cluster.redshift.amazonaws.com
+      port: 5439
+      database: dw
+      username: "${REDSHIFT_USER}"        # References .env
+      password: "${REDSHIFT_PASSWORD}"    # References .env
+
+  s3:
+    # S3 configuration (NOT in .env)
+    bucket: your-s3-bucket-name
+    region: us-east-1
+    access_key_id: "${AWS_ACCESS_KEY_ID}"      # References .env
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"  # References .env
+```
+
+#### **B. Pipeline Configuration** (`config/pipelines/*.yml`)
+
+Defines sync pipelines with table-specific settings, S3 paths, and performance tuning.
+
+```yaml
+pipeline:
+  name: "your_pipeline_name"
+  description: "Your pipeline description"
+  source: "US_DW_UNIDW_SSH"     # References connections.yml
+  target: "redshift_default"     # References connections.yml
+  version: "1.2.0"
+
+  processing:
+    strategy: "sequential"       # or "inter-table"
+    batch_size: 10000           # Performance tuning (NOT in .env)
+    timeout_minutes: 60
+    max_parallel_tables: 2
+
+  s3:
+    isolation_prefix: "your_pipeline/"  # S3 path prefix
+    partition_strategy: "table"
+    compression: "snappy"
+
+tables:
+  # Table-specific configurations
+  unidw.your_table:
+    cdc_strategy: "id_and_timestamp"
+    cdc_id_column: "id"
+    cdc_timestamp_column: "updated_at"
+    description: "Your table description"
+```
+
+**Key Points:**
+- `${VARIABLE}` syntax references variables from `.env` file
+- Connection names (e.g., `US_DW_UNIDW_SSH`) are defined in `connections.yml`
+- Pipeline files reference connection names, NOT direct credentials
+- S3 bucket, batch_size, and other non-sensitive configs are directly in YAML
+
+### **2.4 Verify Configuration**
 
 ```bash
 # Test system with your .env configuration
@@ -359,8 +474,13 @@ SELECT HAS_TABLE_PRIVILEGE('your_redshift_user', 'public.test_table', 'INSERT');
 
 ### **For Advanced Usage:**
 1. **Review** `USER_MANUAL.md` for comprehensive CLI commands
-2. **Check** `WATERMARK_CLI_GUIDE.md` for watermark management
-3. **Read** `WATERMARK_BUG_PREVENTION_CHECKLIST.md` for best practices
+2. **Check** `WATERMARK_Interpretation.md` for watermark management
+
+### **For Performance Tuning:**
+1. **Review** `REDSHIFT_OPTIMIZATION_GUIDE.md` for table optimization strategies
+2. **Configure** `redshift_keys.json` for optimal query performance
+3. **Understand** dimension vs fact table optimization patterns
+4. **Learn** AUTO optimization features for adaptive performance
 
 ### **For Production:**
 1. **Scale up** with production tables
@@ -377,11 +497,11 @@ SELECT HAS_TABLE_PRIVILEGE('your_redshift_user', 'public.test_table', 'INSERT');
 # Check system status
 python -m src.cli.main status
 
-# List watermarks
-python -m src.cli.main watermark list
+# Get watermarks
+python -m src.cli.main watermark get -t your_table -p your_pipeline
 
 # Check S3 files
-python -m src.cli.main s3clean list -t your_table
+python -m src.cli.main s3clean list -t your_table -p your_pipeline
 
 # View detailed logs
 tail -f logs/backup.log
@@ -397,5 +517,4 @@ tail -f logs/backup.log
 
 ---
 
-**Last Updated**: September 22, 2025  
-**Compatible with**: v1.2.0 multi-schema architecture + Sparse Sequence Optimizations
+**Last Updated**: October 21, 2025  
