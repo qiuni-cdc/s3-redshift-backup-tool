@@ -77,8 +77,8 @@ def setup_logging(
         structlog.processors.UnicodeDecoder(),
     ]
     
-    # Add caller information if requested
-    if include_caller:
+    # Add caller information if requested (only on Python 3.11+)
+    if include_caller and sys.version_info >= (3, 11):
         processors.append(structlog.processors.CallsiteParameterAdder())
     
     # Add timestamp
