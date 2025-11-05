@@ -358,7 +358,7 @@
       <destinationBCc/>
       <replyto>etl@uniuni.com</replyto>
       <replytoname>etl</replytoname>
-      <subject>Error_US_download_tool_ETL</subject>
+      <subject>Error_US_download_tool_ETL_redshift</subject>
       <include_date>N</include_date>
       <contact_person>ETL</contact_person>
       <contact_phone/>
@@ -387,7 +387,7 @@
       <parallel>N</parallel>
       <draw>Y</draw>
       <nr>0</nr>
-      <xloc>576</xloc>
+      <xloc>560</xloc>
       <yloc>208</yloc>
       <attributes_kjc/>
     </entry>
