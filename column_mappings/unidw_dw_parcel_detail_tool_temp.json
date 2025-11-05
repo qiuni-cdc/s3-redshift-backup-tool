@@ -1,6 +1,6 @@
 {
-  "table_name": "unidw.dw_parcel_detail_tool",
-  "created_at": "2025-11-04T17:17:40.767145",
+  "table_name": "unidw.dw_parcel_detail_tool_temp",
+  "created_at": "2025-11-04T16:54:06.878469",
   "mappings": {
     "190_time": "col_190_time"
   },

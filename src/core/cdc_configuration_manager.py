@@ -122,8 +122,20 @@ class CDCConfigurationManager:
 
     def _resolve_batch_size(self, table_config: Dict[str, Any]) -> int:
         """Resolve batch size using proper hierarchy"""
-        from src.utils.validation import resolve_batch_size
+        # Check if batch_size is already set in table_config (highest priority)
+        # This happens when multi_schema_commands.py manually resolves it
+        batch_size = table_config.get('batch_size')
+        if batch_size is not None:
+            return int(batch_size)
 
+        # Also check nested processing.batch_size structure
+        processing_config = table_config.get('processing', {})
+        batch_size = processing_config.get('batch_size')
+        if batch_size is not None:
+            return int(batch_size)
+
+        # Fall back to standard resolution if not set
+        from src.utils.validation import resolve_batch_size
         return resolve_batch_size(
             table_config=table_config,
             pipeline_config=None  # CDC manager doesn't have pipeline context

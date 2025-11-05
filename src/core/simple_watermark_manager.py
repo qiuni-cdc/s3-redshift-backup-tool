@@ -230,8 +230,9 @@ class SimpleWatermarkManager:
         """
         Update Redshift row count from external source (like GeminiRedshiftLoader).
 
-        CUMULATIVE LOGIC: Just like MySQL rows_extracted, Redshift rows are accumulated
-        across sessions. This provides a clear total of all rows ever loaded to Redshift.
+        DUAL TRACKING: Tracks both cumulative total and last session rows (like MySQL).
+        - total_rows: Cumulative count across all sessions
+        - last_session_rows: Rows loaded in this specific session only
 
         This method allows the loader to provide the actual count after successful
         operations, maintaining the separation of concerns while ensuring accuracy.
@@ -244,10 +245,11 @@ class SimpleWatermarkManager:
             new_total = current_rows + actual_count
 
             watermark['redshift_state']['total_rows'] = new_total
+            watermark['redshift_state']['last_session_rows'] = actual_count  # Session-only tracking
             watermark['redshift_state']['last_updated'] = datetime.now(timezone.utc).isoformat()
 
             self._save_watermark(table_name, watermark)
-            logger.info(f"Redshift rows cumulative update: {current_rows} + {actual_count} = {new_total}")
+            logger.info(f"Redshift rows update: session={actual_count}, cumulative={current_rows} + {actual_count} = {new_total}")
 
         except Exception as e:
             logger.error(f"Failed to update Redshift count for {table_name}: {e}")
@@ -326,6 +328,7 @@ class SimpleWatermarkManager:
             'mysql_last_updated': mysql_state.get('last_updated'),
             # Redshift stats
             'redshift_total_rows': redshift_state.get('total_rows', 0),
+            'redshift_last_session_rows': redshift_state.get('last_session_rows', 0),
             'redshift_status': redshift_state.get('status', 'pending'),
             'redshift_last_updated': redshift_state.get('last_updated'),
             # File stats
@@ -457,7 +460,8 @@ class SimpleWatermarkManager:
             },
 
             'redshift_state': {
-                'total_rows': 0,  # ALWAYS 0 on reset
+                'total_rows': 0,  # ALWAYS 0 on reset - cumulative total
+                'last_session_rows': 0,  # Rows loaded in last session only
                 'last_updated': None,
                 'status': 'pending',
                 'error': None,

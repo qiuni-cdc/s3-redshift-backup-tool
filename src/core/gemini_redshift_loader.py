@@ -637,14 +637,15 @@ class GeminiRedshiftLoader:
         """Context manager for Redshift database connections"""
         try:
             # Use Redshift SSH tunnel if configured
-            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.bastion_host:
+            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
                 with self.connection_manager.redshift_ssh_tunnel() as local_port:
                     conn = psycopg2.connect(
                         host='localhost',
                         port=local_port,
                         database=self.config.redshift.database,
                         user=self.config.redshift.user,
-                        password=self.config.redshift.password.get_secret_value()
+                        password=self.config.redshift.password.get_secret_value(),
+                        options=f'-c search_path={self.config.redshift.schema}'
                     )
                     logger.debug("Connected to Redshift via SSH tunnel")
                     conn.autocommit = True
@@ -657,7 +658,8 @@ class GeminiRedshiftLoader:
                     port=self.config.redshift.port,
                     database=self.config.redshift.database,
                     user=self.config.redshift.user,
-                    password=self.config.redshift.password.get_secret_value()
+                    password=self.config.redshift.password.get_secret_value(),
+                    options=f'-c search_path={self.config.redshift.schema}'
                 )
                 logger.debug("Connected to Redshift directly")
                 conn.autocommit = True
@@ -782,14 +784,15 @@ class GeminiRedshiftLoader:
         """Context manager for Redshift database connections"""
         try:
             # Use Redshift SSH tunnel if configured
-            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.bastion_host:
+            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
                 with self.connection_manager.redshift_ssh_tunnel() as local_port:
                     conn = psycopg2.connect(
                         host='localhost',
                         port=local_port,
                         database=self.config.redshift.database,
                         user=self.config.redshift.user,
-                        password=self.config.redshift.password.get_secret_value()
+                        password=self.config.redshift.password.get_secret_value(),
+                        options=f'-c search_path={self.config.redshift.schema}'
                     )
                     logger.debug("Connected to Redshift via SSH tunnel")
                     conn.autocommit = True
@@ -802,7 +805,8 @@ class GeminiRedshiftLoader:
                     port=self.config.redshift.port,
                     database=self.config.redshift.database,
                     user=self.config.redshift.user,
-                    password=self.config.redshift.password.get_secret_value()
+                    password=self.config.redshift.password.get_secret_value(),
+                    options=f'-c search_path={self.config.redshift.schema}'
                 )
                 logger.debug("Connected to Redshift directly")
                 conn.autocommit = True

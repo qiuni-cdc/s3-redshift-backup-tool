@@ -34,6 +34,13 @@
 - **Table Name Scoping**: Handles both scoped and unscoped table names correctly
 - **Persistence Verification**: Always confirms watermark writes to S3
 - **Production Stable**: Eliminates watermark tracking bugs completely
+- **Dual Metrics Tracking**: Both session-only and cumulative row counts for MySQL and Redshift
+
+### 📊 **Metrics Tracking** ⭐ **UPDATED**
+- **Session-Only Metrics**: JSON output and CLI summaries show rows processed in current sync only
+- **Cumulative Tracking**: Watermarks store total cumulative rows for audit and verification
+- **Consistent Format**: Both backup (MySQL→S3) and Redshift (S3→Redshift) use session metrics
+- **Per-Table Tracking**: Individual table results with detailed success/failure information
 
 ## ⚠️ **CRITICAL TESTING RULES - NEVER VIOLATE**
 

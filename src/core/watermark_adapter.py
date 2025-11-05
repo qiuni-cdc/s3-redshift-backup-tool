@@ -45,7 +45,8 @@ class LegacyWatermarkObject:
         self.mysql_last_session_rows = mysql_state.get('last_session_rows', 0)  # Last session only
 
         # Redshift fields (legacy names)
-        self.redshift_rows_loaded = redshift_state.get('total_rows', 0)
+        self.redshift_rows_loaded = redshift_state.get('total_rows', 0)  # Total cumulative
+        self.redshift_last_session_rows = redshift_state.get('last_session_rows', 0)  # Last session only
         self.redshift_status = redshift_state.get('status', 'pending')
         self.redshift_load_time = redshift_state.get('last_updated')
         self.last_redshift_load_time = redshift_state.get('last_updated')  # Add missing field

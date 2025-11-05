@@ -212,13 +212,13 @@ class ConnectionManager:
         """
         tunnel = None
         try:
-            logger.info("Establishing Redshift SSH tunnel", bastion_host=self.config.redshift_ssh.bastion_host)
-            
+            logger.info("Establishing Redshift SSH tunnel", bastion_host=self.config.redshift_ssh.host)
+
             # Create SSH tunnel for Redshift
             tunnel = SSHTunnelForwarder(
-                (self.config.redshift_ssh.bastion_host, 22),
-                ssh_username=self.config.redshift_ssh.bastion_user,
-                ssh_pkey=self.config.redshift_ssh.bastion_key_path,
+                (self.config.redshift_ssh.host, 22),
+                ssh_username=self.config.redshift_ssh.username,
+                ssh_pkey=self.config.redshift_ssh.private_key_path,
                 remote_bind_address=(self.config.redshift.host, self.config.redshift.port),
                 local_bind_address=('127.0.0.1', self.config.redshift_ssh.local_port)
             )
@@ -263,7 +263,7 @@ class ConnectionManager:
                 except:
                     pass
             error_msg = f"Failed to establish Redshift SSH tunnel: {e}"
-            logger.error(error_msg, bastion_host=self.config.redshift_ssh.bastion_host)
+            logger.error(error_msg, bastion_host=self.config.redshift_ssh.host)
             raise_connection_error("redshift_ssh_tunnel", error_msg)
         
         finally:
@@ -632,14 +632,15 @@ class ConnectionManager:
                 import psycopg2
                 
                 # Use Redshift SSH tunnel if configured
-                if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.bastion_host:
+                if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
                     with self.redshift_ssh_tunnel() as local_port:
                         conn = psycopg2.connect(
                             host='localhost',
                             port=local_port,
                             database=self.config.redshift.database,
                             user=self.config.redshift.user,
-                            password=self.config.redshift.password.get_secret_value()
+                            password=self.config.redshift.password.get_secret_value(),
+                            options=f'-c search_path={self.config.redshift.schema}'
                         )
                         cursor = conn.cursor()
                         cursor.execute("SELECT 1")
@@ -654,7 +655,8 @@ class ConnectionManager:
                         port=self.config.redshift.port,
                         database=self.config.redshift.database,
                         user=self.config.redshift.user,
-                        password=self.config.redshift.password.get_secret_value()
+                        password=self.config.redshift.password.get_secret_value(),
+                        options=f'-c search_path={self.config.redshift.schema}'
                     )
                     cursor = conn.cursor()
                     cursor.execute("SELECT 1")

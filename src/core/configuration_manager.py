@@ -1187,6 +1187,12 @@ class ConfigurationManager:
             'REDSHIFT_DATABASE': target_config.get('database'),
             'REDSHIFT_SCHEMA': target_config.get('schema'),
 
+            # Redshift SSH tunnel (target)
+            'REDSHIFT_SSH_HOST': target_config.get('ssh_tunnel', {}).get('host'),
+            'REDSHIFT_SSH_USERNAME': target_config.get('ssh_tunnel', {}).get('username'),
+            'REDSHIFT_SSH_PRIVATE_KEY_PATH': target_config.get('ssh_tunnel', {}).get('private_key_path'),
+            'REDSHIFT_SSH_LOCAL_PORT': target_config.get('ssh_tunnel', {}).get('local_port'),
+
             # S3
             'S3_BUCKET_NAME': s3_config.get('bucket_name'),
             'S3_ACCESS_KEY': s3_config.get('access_key_id'),

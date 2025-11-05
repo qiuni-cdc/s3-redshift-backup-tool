@@ -27,6 +27,7 @@ from src.backup.inter_table import InterTableBackupStrategy
 from src.utils.logging import setup_logging, configure_logging_from_config
 from src.utils.exceptions import BackupSystemError, ConfigurationError
 from src.core.connections import ConnectionManager
+from src.cli.airflow_integration import SyncExecutionTracker
 
 
 def _load_pipeline_config_for_tables(tables: List[str]) -> Optional[Dict[str, Any]]:
@@ -816,12 +817,19 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
     
     # Execute sync pipeline
     try:
+        # Initialize execution tracker for JSON output
+        tracker = SyncExecutionTracker()
+        tracker.set_pipeline_info(pipeline or "default", tables)
+        table_results = {}  # Track per-table results
+
         click.echo(f"▶️  Starting {operation.lower()}...")
         click.echo(f"   Tables: {', '.join(tables)}")
         click.echo(f"   Workers: {config.backup.max_workers}")
         click.echo(f"   Batch size: {config.backup.batch_size}")
+        if json_output:
+            click.echo(f"   Execution ID: {tracker.execution_id}")
         click.echo()
-        
+
         start_time = time.time()
         overall_success = True
         
@@ -951,11 +959,11 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
                     
                     if table_success:
                         loaded_tables += 1
-                        # Get row count from watermark
+                        # Get row count from watermark (session-only, not cumulative)
                         watermark = watermark_manager.get_table_watermark(table_name)
-                        table_rows = watermark.redshift_rows_loaded if watermark else 0
+                        table_rows = watermark.redshift_last_session_rows if watermark else 0
                         total_redshift_rows += table_rows
-                        click.echo(f"   ✅ {table_name}: Loaded successfully ({table_rows:,} rows)")
+                        click.echo(f"   ✅ {table_name}: Loaded successfully ({table_rows:,} rows this session)")
                     else:
                         click.echo(f"   ❌ {table_name}: All loading attempts failed")
                         redshift_success = False
@@ -994,38 +1002,52 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
         
         # Final summary
         duration = time.time() - start_time
-        
-        # Prepare summary data for JSON output
-        sync_result = {
-            "success": overall_success,
-            "duration_seconds": duration,
-            "tables_processed": len(tables),
-            "strategy": strategy,
-            "stages": {
-                "backup": {
-                    "executed": not redshift_only,
-                    "success": backup_success if not redshift_only else None,
-                    "summary": backup_summary if not redshift_only else None
-                },
-                "redshift": {
-                    "executed": not backup_only,
-                    "success": redshift_success if not backup_only else None,
-                    "summary": redshift_summary if not backup_only else None
+
+        # Record table results in tracker
+        # Note: In the current implementation, backup/redshift work on all tables together
+        # For better tracking, we populate results based on overall success
+        for table_name in tables:
+            if overall_success:
+                # Get actual metrics from backup summary if available
+                rows_processed = 0
+                files_created = 0
+
+                if backup_summary:
+                    # Try to get per-table metrics if available
+                    per_table = backup_summary.get('per_table_metrics', {})
+                    if table_name in per_table:
+                        rows_processed = per_table[table_name].get('rows', 0)
+                        files_created = per_table[table_name].get('batches', 0)
+                    else:
+                        # Fall back to average across all tables
+                        rows_processed = backup_summary.get('total_rows', 0) // len(tables)
+                        files_created = backup_summary.get('total_batches', 0) // len(tables)
+
+                tracker.record_table_success(
+                    table_name,
+                    rows_processed=rows_processed,
+                    files_created=files_created,
+                    duration=duration / len(tables)  # Average duration per table
+                )
+                table_results[table_name] = {
+                    "success": True,
+                    "rows_processed": rows_processed,
+                    "files_created": files_created
                 }
-            },
-            "options": {
-                "backup_only": backup_only,
-                "redshift_only": redshift_only,
-                "chunk_size": chunk_size,
-                "max_total_rows": max_total_rows,
-                "verify_data": verify_data
-            }
-        }
-        
+            else:
+                error_msg = "Backup failed" if not backup_success else "Redshift loading failed"
+                tracker.record_table_failure(table_name, error_msg)
+                table_results[table_name] = {
+                    "success": False,
+                    "error_message": error_msg
+                }
+
+        # Finalize tracker and get final metadata
+        overall_status, final_metadata = tracker.finalize()
+
         if json_output:
-            # Output structured JSON for automation
-            import json
-            print(json.dumps(sync_result, indent=2))
+            # Output structured JSON for automation (Airflow-enhanced format)
+            print(json.dumps(final_metadata, indent=2))
             sys.exit(0 if overall_success else 1)
         
         if overall_success:

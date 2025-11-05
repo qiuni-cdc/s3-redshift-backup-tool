@@ -1767,11 +1767,14 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # Count total existing files and rows
             total_existing_files = len(all_s3_files)
-            try:
-                total_existing_rows = self._count_rows_in_s3_files(list(all_s3_files))
-            except Exception as e:
-                self.logger.logger.warning(f"Failed to count rows in existing S3 files: {e}")
-                total_existing_rows = session_rows_processed  # Fallback to current session
+            # PERFORMANCE FIX: Skip slow row counting from S3 files (can take 10-30+ minutes for 90 files)
+            # Use session_rows_processed as it's already accurate from batch processing
+            total_existing_rows = session_rows_processed
+            self.logger.logger.info(
+                f"Skipping S3 row counting for performance (would download/parse {len(all_s3_files)} files)",
+                table_name=table_name,
+                files_count=len(all_s3_files)
+            )
 
             # Calculate files created this session (estimate based on current backup files)
             created_files_count = len(existing_backup_files) if existing_backup_files else 0

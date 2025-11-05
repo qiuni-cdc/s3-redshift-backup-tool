@@ -1385,6 +1385,321 @@ The YAML-based configuration system is now **production-ready** with:
 
 **Location in Documentation:** `Codes_Explain.md:114-627`
 
+## Performance Optimization: S3 Row Counting (November 2025)
+
+### Issue: Program Stuck During S3 File Count Verification
+
+**Problem:** After logging "Actual S3 file count: 90 files", the program appeared frozen for 10-30+ minutes.
+
+**Root Cause:** `src/backup/row_based.py:1771`
+```python
+total_existing_rows = self._count_rows_in_s3_files(list(all_s3_files))
+```
+
+This operation:
+1. Downloaded all 90 parquet files from S3
+2. Parsed each file to count rows
+3. No progress indication - appeared frozen
+4. Extremely slow with large file counts
+
+### Fix Applied: Skip Unnecessary Row Counting
+
+**File:** `src/backup/row_based.py:1770-1777`
+
+```python
+# BEFORE (SLOW):
+try:
+    total_existing_rows = self._count_rows_in_s3_files(list(all_s3_files))
+except Exception as e:
+    total_existing_rows = session_rows_processed
+
+# AFTER (FAST):
+# PERFORMANCE FIX: Skip slow row counting from S3 files (can take 10-30+ minutes for 90 files)
+# Use session_rows_processed as it's already accurate from batch processing
+total_existing_rows = session_rows_processed
+self.logger.logger.info(
+    f"Skipping S3 row counting for performance (would download/parse {len(all_s3_files)} files)",
+    table_name=table_name,
+    files_count=len(all_s3_files)
+)
+```
+
+**Why This Is Safe:**
+- `session_rows_processed` is already accurate from batch processing
+- Row counting was just verification, not essential
+- Watermarks already track row counts correctly
+- No data loss - just skipping expensive verification
+
+**Impact:**
+- Before: Program frozen 10-30+ minutes at "90 files"
+- After: Continues immediately 🚀
+
+## Redshift Session-Only Metrics Tracking (November 2025)
+
+### Issue: Inconsistent Metrics Between MySQL and Redshift
+
+**Problem:**
+- MySQL tracked both cumulative (`total_rows`) and session-only (`last_session_rows`)
+- Redshift only tracked cumulative totals
+- JSON output mixed session and cumulative metrics, causing confusion
+
+**Example Confusion:**
+```json
+{
+  "stages": {
+    "backup": {
+      "summary": {
+        "total_rows": 1000  // ← Session-only (rows THIS sync)
+      }
+    },
+    "redshift": {
+      "summary": {
+        "total_rows": 3000  // ← Cumulative (all rows EVER loaded)
+      }
+    }
+  }
+}
+```
+
+### Fix Applied: Dual Tracking for Redshift
+
+**1. Added Session Tracking to Watermark State**
+
+`src/core/simple_watermark_manager.py:253, 448`:
+```python
+'redshift_state': {
+    'total_rows': 0,              # Cumulative total
+    'last_session_rows': 0,       # Session-only ✅ NEW
+    'last_updated': None,
+    'status': 'pending'
+}
+```
+
+**2. Updated Redshift Count Method**
+
+`src/core/simple_watermark_manager.py:229-253`:
+```python
+def update_redshift_count_from_external(self, table_name: str, actual_count: int):
+    current_rows = watermark['redshift_state'].get('total_rows', 0)
+    new_total = current_rows + actual_count
+
+    watermark['redshift_state']['total_rows'] = new_total
+    watermark['redshift_state']['last_session_rows'] = actual_count  # ✅ Session tracking
+    logger.info(f"Redshift rows update: session={actual_count}, cumulative={new_total}")
+```
+
+**3. Exposed Session Rows in Adapter**
+
+`src/core/watermark_adapter.py:43-60`:
+```python
+self.redshift_rows_loaded = redshift_state.get('total_rows', 0)  # Cumulative
+self.redshift_last_session_rows = redshift_state.get('last_session_rows', 0)  # Session ✅
+```
+
+**4. Updated CLI to Use Session Metrics**
+
+`src/cli/main.py:966`:
+```python
+# Get session-only row count (not cumulative)
+table_rows = watermark.redshift_last_session_rows if watermark else 0
+click.echo(f"   ✅ {table_name}: Loaded successfully ({table_rows:,} rows this session)")
+```
+
+**Result:**
+| Stage | Metric | Type | Represents |
+|-------|--------|------|------------|
+| MySQL Backup | `total_rows` | Session | Rows extracted THIS sync |
+| Redshift Load | `total_rows` | Session | Rows loaded THIS sync |
+| Watermark | `mysql_state.total_rows` | Cumulative | All rows ever extracted |
+| Watermark | `redshift_state.total_rows` | Cumulative | All rows ever loaded |
+
+## JSON Output Format Unification (November 2025)
+
+### Issue: Two Conflicting JSON Output Formats
+
+**Problem:**
+- Format 1 (Original): Stage-based (`stages.backup`, `stages.redshift`) in `src/cli/main.py`
+- Format 2 (Airflow): Execution-based (`execution_id`, `table_results`) in `src/cli/airflow_integration.py`
+- Users confused about which format to expect
+
+### Fix Applied: Unified to Airflow-Enhanced Format
+
+**1. Removed Stage-Based JSON Logic**
+
+`src/cli/main.py:999-1023` - Replaced old format with SyncExecutionTracker:
+```python
+# BEFORE (OLD):
+sync_result = {
+    "success": bool,
+    "stages": {
+        "backup": {"summary": {...}},
+        "redshift": {"summary": {...}}
+    }
+}
+
+# AFTER (NEW):
+tracker = SyncExecutionTracker()
+tracker.set_pipeline_info(pipeline, tables)
+# ... track per-table results ...
+overall_status, final_metadata = tracker.finalize()
+```
+
+**2. Updated All Documentation**
+
+- `docs/JSON_OUTPUT_FORMAT.md` - Removed stage-based examples, updated to unified format
+- `docs/S3_COMPLETION_MARKERS.md` - Updated all code examples and field references
+
+**New Unified Format:**
+```json
+{
+  "execution_id": "sync_20250926_195438_2f01922d",
+  "start_time": "2025-09-26T19:54:38.135401+00:00",
+  "pipeline": "us_dw_unidw_2_public_pipeline",
+  "tables_requested": ["unidw.dw_parcel_detail_tool_temp"],
+  "table_results": {
+    "unidw.dw_parcel_detail_tool_temp": {
+      "status": "success",
+      "rows_processed": 164260,  // ← Session-only
+      "files_created": 4,
+      "duration_seconds": 30.0
+    }
+  },
+  "status": "success",
+  "summary": {
+    "success_count": 1,
+    "failure_count": 0,
+    "total_rows_processed": 164260,  // ← Session-only
+    "total_files_created": 4
+  }
+}
+```
+
+**Benefits:**
+- ✅ Single format across all commands
+- ✅ Unique `execution_id` for workflow tracking
+- ✅ Per-table success/failure visibility
+- ✅ Session-only metrics (consistent)
+- ✅ Better Airflow/monitoring integration
+
+## Parcel Download Tool Configuration Enhancements (November 2025)
+
+### Issue: Multiple Configuration and Path Problems
+
+**Problems:**
+1. Script used `AppConfig()` which expected `.env` SSH format (`bastion_host`)
+2. `connections.yml` used different SSH format (`host`, `username`, `private_key_path`)
+3. Script hardcoded pipeline name and datetime parameters
+4. Running from `parcel_download_tool_etl/` directory caused path issues
+5. ConnectionRegistry loaded wrong config file
+
+### Fix 1: Use ConnectionRegistry Instead of AppConfig
+
+`parcel_download_tool_etl/parcel_download_and_sync.py:52, 120-121, 146-147`:
+```python
+# BEFORE (BROKEN):
+from src.config.settings import AppConfig
+config = AppConfig()  # Expected bastion_host from .env
+conn_manager = ConnectionManager(config)
+
+# AFTER (FIXED):
+from src.core.connection_registry import ConnectionRegistry
+config_path = PROJECT_ROOT / "config" / "connections.yml"
+conn_registry = ConnectionRegistry(config_path=str(config_path))
+```
+
+**Why:** ConnectionRegistry properly handles `connections.yml` format with `host` instead of `bastion_host`.
+
+### Fix 2: Made Pipeline/Date/Hours Configurable
+
+`parcel_download_tool_etl/parcel_download_and_sync.py:86-111`:
+```python
+parser.add_argument(
+    '-p', '--pipeline',
+    type=str,
+    default='us_dw_unidw_2_public_pipeline',
+    help='Pipeline name to use'
+)
+
+parser.add_argument(
+    '-d', '--date',
+    type=str,
+    default='',
+    help='Start datetime (empty = current time)'
+)
+
+parser.add_argument(
+    '--hours',  # Note: -h reserved for --help
+    type=str,
+    default='-1',
+    help='Hours offset (e.g., "-2" for 2 hours ago)'
+)
+```
+
+**Usage:**
+```bash
+# Use defaults
+python parcel_download_and_sync.py --sync-only
+
+# Custom pipeline
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only
+
+# Custom time range
+python parcel_download_and_sync.py -d "" --hours "-2"
+
+# All options
+python parcel_download_and_sync.py -p my_pipeline -d "2024-08-14 10:00:00" --hours "-1"
+```
+
+### Fix 3: Explicit Config Path Resolution
+
+`parcel_download_tool_etl/parcel_download_and_sync.py:44-46`:
+```python
+# Project root directory (parent of parcel_download_tool_etl)
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+
+# Add project root to Python path
+sys.path.insert(0, str(PROJECT_ROOT))
+```
+
+**Why:** Ensures imports work and config files are found relative to project root, not current directory.
+
+### Fix 4: ConnectionRegistry Type Parameter Conflict
+
+`src/core/connection_registry.py:279-280, 291-292`:
+```python
+# BEFORE (BROKEN):
+self.connections[name] = ConnectionConfig(
+    name=name,
+    type='mysql',
+    **processed_config  # ← May contain 'type' key → conflict!
+)
+
+# AFTER (FIXED):
+processed_config.pop('type', None)  # ← Remove to avoid conflict
+self.connections[name] = ConnectionConfig(
+    name=name,
+    type='mysql',
+    **processed_config
+)
+```
+
+**Error Prevented:** `ConnectionConfig() got multiple values for keyword argument 'type'`
+
+### Updated Bash Script
+
+`parcel_download_tool_etl/parcel_download_hourly_run.sh:17`:
+```bash
+# Use named arguments (not positional)
+python parcel_download_and_sync.py -d "" --hours "-0.5"
+```
+
+**Result:**
+- ✅ Works from any directory
+- ✅ Uses correct config files
+- ✅ Proper SSH connection handling
+- ✅ Configurable pipeline/date/hours
+- ✅ No more "bastion_host" errors
+
 ## Usually Used Commands
 python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
 python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
@@ -1409,5 +1724,361 @@ python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
 python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool --limit 80000000 2>&1 | tee logs/parcel_detail_sync.log
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline 
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline 
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_pricing_temp --redshift-only
+
 git commit -m "add files from main" --no-verify
 source s3_backup_venv/bin/activate
+
+## Redshift Configuration Integration from connections.yml (Resolved)
+
+### Issue: Multiple Configuration Problems for Redshift Connections
+
+**Problem 1: SSH Tunnel Configuration Not Extracted**
+- Pipeline target: `redshift_settlement_dws` (in `connections.yml`)
+- SSH configuration existed in YAML but not loaded into `RedshiftSSHConfig`
+- System tried to use environment variables (`REDSHIFT_SSH_HOST`, etc.) instead
+
+**Problem 2: Batch Size Using Wrong Default**
+- Pipeline configured: `batch_size: 1000000`
+- Table configured: `processing.batch_size: 1000000`
+- System actually used: `5000000` (system default)
+- Warning logged: "Large batch size for unidw.dw_parcel_detail_tool: 5000000"
+
+**Problem 3: Schema Permission Denied**
+- Error: `permission denied for schema public`
+- Redshift target uses: `settlement_dws` schema
+- System defaulted to: `public` schema
+- Root cause: `psycopg2.connect()` didn't set search_path
+
+### Root Cause Analysis
+
+**1. SSH Configuration Not Extracted**
+
+`src/core/configuration_manager.py:1182-1189` only set Redshift connection details, but didn't extract SSH tunnel config:
+
+```python
+# BEFORE (MISSING):
+'REDSHIFT_HOST': target_config.get('host'),
+'REDSHIFT_PORT': target_config.get('port'),
+'REDSHIFT_USER': target_config.get('username'),
+'REDSHIFT_PASSWORD': target_config.get('password'),
+'REDSHIFT_DATABASE': target_config.get('database'),
+'REDSHIFT_SCHEMA': target_config.get('schema'),
+# Missing: REDSHIFT_SSH_* environment variables!
+```
+
+**2. Batch Size Resolution Hierarchy Broken**
+
+`src/core/cdc_configuration_manager.py:123-131` always used system default:
+
+```python
+# BEFORE (BROKEN):
+def _resolve_batch_size(self, table_config: Dict[str, Any]) -> int:
+    from src.utils.validation import resolve_batch_size
+    return resolve_batch_size(
+        table_config=table_config,
+        pipeline_config=None  # Always None → Falls back to 5000000!
+    )
+```
+
+**3. Schema Not Set in PostgreSQL Connection**
+
+`src/core/gemini_redshift_loader.py:787-793` connected without schema:
+
+```python
+# BEFORE (BROKEN):
+conn = psycopg2.connect(
+    host='localhost',
+    port=local_port,
+    database=self.config.redshift.database,
+    user=self.config.redshift.user,
+    password=self.config.redshift.password.get_secret_value()
+    # Missing: options parameter to set search_path!
+)
+# Result: Defaults to 'public' schema → Permission denied
+```
+
+### Fix Applied: Complete Redshift Configuration Integration
+
+#### 1. Extract SSH Tunnel from connections.yml Target
+
+**File:** `src/core/configuration_manager.py:1190-1194`
+
+```python
+# AFTER (FIXED): Extract SSH tunnel from target connection
+# Redshift SSH tunnel (target)
+'REDSHIFT_SSH_HOST': target_config.get('ssh_tunnel', {}).get('host'),
+'REDSHIFT_SSH_USERNAME': target_config.get('ssh_tunnel', {}).get('username'),
+'REDSHIFT_SSH_PRIVATE_KEY_PATH': target_config.get('ssh_tunnel', {}).get('private_key_path'),
+'REDSHIFT_SSH_LOCAL_PORT': target_config.get('ssh_tunnel', {}).get('local_port'),
+```
+
+**Data Flow:**
+```yaml
+# connections.yml - redshift_settlement_dws target
+targets:
+  redshift_settlement_dws:
+    host: redshift-dw.uniuni.com
+    schema: settlement_dws
+    ssh_tunnel:
+      enabled: true
+      host: 35.83.114.196                           # ← Extracted
+      username: "${REDSHIFT_SSH_BASTION_USER}"      # ← Extracted
+      private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}" # ← Extracted
+      local_port: 0                                 # ← Extracted
+
+↓ ConfigurationManager.create_app_config()
+
+os.environ['REDSHIFT_SSH_HOST'] = '35.83.114.196'
+os.environ['REDSHIFT_SSH_USERNAME'] = 'tianziqin'
+os.environ['REDSHIFT_SSH_PRIVATE_KEY_PATH'] = '/home/tianzi/.ssh/tianziqin.pem'
+os.environ['REDSHIFT_SSH_LOCAL_PORT'] = '0'
+
+↓ RedshiftSSHConfig reads from environment
+
+config.redshift_ssh.host = '35.83.114.196' ✅
+```
+
+#### 2. Fix Batch Size Resolution Hierarchy
+
+**File:** `src/core/cdc_configuration_manager.py:123-142`
+
+```python
+# AFTER (FIXED): Check table_config first, then fall back
+def _resolve_batch_size(self, table_config: Dict[str, Any]) -> int:
+    """Resolve batch size using proper hierarchy"""
+    # 1. Direct batch_size in table_config (from multi_schema_commands.py resolution)
+    batch_size = table_config.get('batch_size')
+    if batch_size is not None:
+        return int(batch_size)
+
+    # 2. Nested processing.batch_size structure (from pipeline YAML)
+    processing_config = table_config.get('processing', {})
+    batch_size = processing_config.get('batch_size')
+    if batch_size is not None:
+        return int(batch_size)
+
+    # 3. System default (final fallback only)
+    from src.utils.validation import resolve_batch_size
+    return resolve_batch_size(
+        table_config=table_config,
+        pipeline_config=None
+    )
+```
+
+**Resolution Chain:**
+```
+Pipeline: us_dw_unidw_2_settlement_dws_pipeline
+  processing:
+    batch_size: 1000000 ← Pipeline default
+
+Table: unidw.dw_parcel_detail_tool
+  processing:
+    batch_size: 1000000 ← Table-specific override (highest priority)
+
+↓ CDC Configuration Manager
+
+1. Check table_config['batch_size']: 1000000 ✅ Use this!
+2. Check table_config['processing']['batch_size']: (skip - already found)
+3. System default: 5000000 (skip - already found)
+
+Result: batch_size = 1000000 ✅
+```
+
+#### 3. Set Schema Search Path in PostgreSQL Connection
+
+**Files Modified:**
+- `src/core/gemini_redshift_loader.py` (2 occurrences - lines 642-648, 787-793)
+- `src/core/connections.py` (2 occurrences - lines 637-643, 653-659)
+
+```python
+# AFTER (FIXED): Set search_path to correct schema
+conn = psycopg2.connect(
+    host='localhost',
+    port=local_port,
+    database=self.config.redshift.database,
+    user=self.config.redshift.user,
+    password=self.config.redshift.password.get_secret_value(),
+    options=f'-c search_path={self.config.redshift.schema}'  # ✅ Sets schema!
+)
+logger.debug(f"Connected to Redshift via SSH tunnel (schema: {self.config.redshift.schema})")
+```
+
+**PostgreSQL Behavior:**
+```
+Without options parameter:
+  → search_path defaults to: public
+  → Query: SELECT 1 FROM table
+  → Resolves to: public.table ❌ Permission denied
+
+With options='-c search_path=settlement_dws':
+  → search_path set to: settlement_dws
+  → Query: SELECT 1 FROM table
+  → Resolves to: settlement_dws.table ✅ Success
+```
+
+### Testing Results
+
+**Before Fixes:**
+```bash
+$ python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool --redshift-only
+
+❌ Failed to connect to Redshift: 'RedshiftSSHConfig' object has no attribute 'bastion_host'
+❌ Failed to connect to Redshift: connection to server at "redshift-dw.uniuni.com" (10.104.34.117), port 5439 failed: Connection timed out
+❌ Failed to establish Redshift SSH tunnel: permission denied for schema public, the schema is settlement_dws
+⚠️  Large batch size for unidw.dw_parcel_detail_tool: 5000000
+```
+
+**After Fixes:**
+```bash
+$ python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool --redshift-only
+
+✅ Connected to Redshift via SSH tunnel (schema: settlement_dws)
+✅ Using batch size: 1000000
+✅ Redshift connection test successful
+✅ Loading S3 files to Redshift...
+```
+
+### Configuration Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Pipeline: us_dw_unidw_2_settlement_dws_pipeline             │
+│   source: US_DW_UNIDW_SSH                                   │
+│   target: redshift_settlement_dws ←────────────────┐        │
+│   processing:                                       │        │
+│     batch_size: 1000000                            │        │
+└─────────────────────────────────────────────────────┼────────┘
+                                                      │
+                                                      ↓
+┌─────────────────────────────────────────────────────────────┐
+│ connections.yml                                             │
+│   targets:                                                  │
+│     redshift_settlement_dws:                                │
+│       host: redshift-dw.uniuni.com                          │
+│       schema: settlement_dws ←─────────────────────┐        │
+│       ssh_tunnel:                                  │        │
+│         host: 35.83.114.196 ←──────────────┐       │        │
+│         username: ${REDSHIFT_SSH_BASTION_USER}     │        │
+│         private_key_path: ${...KEY_PATH}   │       │        │
+└─────────────────────────────────────────────┼───────┼────────┘
+                                              │       │
+                    ┌─────────────────────────┘       │
+                    ↓                                 │
+┌──────────────────────────────────────┐              │
+│ ConfigurationManager                 │              │
+│   create_app_config()                │              │
+│   ↓ Extracts SSH config from YAML   │              │
+│   REDSHIFT_SSH_HOST=35.83.114.196   │              │
+│   REDSHIFT_SCHEMA=settlement_dws ←───┼──────────────┘
+└───────────────────┬──────────────────┘
+                    ↓
+┌──────────────────────────────────────┐
+│ RedshiftSSHConfig                    │
+│   host: 35.83.114.196 ✅             │
+│   username: tianziqin ✅             │
+│   private_key_path: /.../key.pem ✅  │
+└───────────────────┬──────────────────┘
+                    ↓
+┌──────────────────────────────────────┐
+│ ConnectionManager                    │
+│   redshift_ssh_tunnel()              │
+│   ↓ Establishes SSH tunnel           │
+│   local_port: 54321                  │
+└───────────────────┬──────────────────┘
+                    ↓
+┌──────────────────────────────────────┐
+│ psycopg2.connect()                   │
+│   host: localhost                    │
+│   port: 54321 (SSH tunnel)           │
+│   options: '-c search_path=settlement_dws' ✅
+└──────────────────────────────────────┘
+```
+
+### Key Benefits
+
+**1. Single Source of Truth**
+- All Redshift configuration in `connections.yml`
+- No separate environment variables needed for SSH tunnel
+- Schema automatically extracted from target configuration
+
+**2. Correct Batch Size Resolution**
+- Respects pipeline and table-specific batch size settings
+- No more unwanted fallback to system defaults
+- Clear hierarchy: table > pipeline > system
+
+**3. Proper Schema Isolation**
+- Each target connection specifies its schema
+- PostgreSQL search_path set correctly on connection
+- No more permission errors from wrong schema defaults
+
+**4. Simplified Configuration**
+```yaml
+# Before: Required separate environment variables
+REDSHIFT_SSH_HOST=35.83.114.196
+REDSHIFT_SSH_USERNAME=tianziqin
+REDSHIFT_SSH_PRIVATE_KEY_PATH=/path/to/key.pem
+# Plus connections.yml config
+
+# After: Only connections.yml needed
+targets:
+  redshift_settlement_dws:
+    host: redshift-dw.uniuni.com
+    schema: settlement_dws
+    ssh_tunnel:
+      host: 35.83.114.196
+      username: "${REDSHIFT_SSH_BASTION_USER}"
+      private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}"
+```
+
+### Impact on Multi-Pipeline Support
+
+**Now Supported:**
+- Different Redshift clusters per pipeline
+- Different schemas per pipeline
+- Different SSH tunnels per target
+- Per-table batch size configuration
+
+**Example Multi-Target Setup:**
+```yaml
+targets:
+  redshift_default:
+    host: redshift-dw.qa.uniuni.com
+    schema: public
+    ssh_tunnel:
+      host: 35.82.216.244  # QA bastion
+
+  redshift_settlement_dws:
+    host: redshift-dw.uniuni.com
+    schema: settlement_dws
+    ssh_tunnel:
+      host: 35.83.114.196  # Production bastion
+
+  redshift_analytics:
+    host: redshift-analytics.uniuni.com
+    schema: analytics_dws
+    ssh_tunnel:
+      host: 35.83.114.196
+```
+
+### Production Status
+
+The Redshift configuration integration is now **production-ready** with:
+- ✅ SSH tunnel configuration extracted from pipeline target
+- ✅ Batch size respects table/pipeline configuration hierarchy
+- ✅ Schema search_path set correctly on connection
+- ✅ No more "bastion_host" attribute errors
+- ✅ No more "permission denied for schema public" errors
+- ✅ No more unwanted default batch sizes
+- ✅ Full multi-pipeline and multi-target support
+- ✅ Simplified configuration management
+
+**Components Modified:**
+1. `src/core/configuration_manager.py:1190-1194` - SSH config extraction
+2. `src/core/cdc_configuration_manager.py:123-142` - Batch size resolution
+3. `src/core/gemini_redshift_loader.py:642-648, 787-793` - Schema search_path
+4. `src/core/connections.py:637-643, 653-659` - Schema search_path

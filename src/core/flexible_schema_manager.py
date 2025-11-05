@@ -439,33 +439,25 @@ class FlexibleSchemaManager:
         else:
             # Use default optimization logic if no custom configuration
             logger.debug(f"No custom optimizations found for {mysql_table_name}, using defaults")
-            
-            # Add DISTKEY for even distribution - prioritize tracking_number for settle_orders
-            dist_key_set = False
-            
-            # For settle_orders table, prefer tracking_number as DISTKEY
+
+            # Special handling for settle_orders table only
             if 'settle_orders' in clean_table_name.lower():
+                # For settle_orders, use explicit DISTKEY and SORTKEY
+                dist_key_set = False
+
+                # Prefer tracking_number as DISTKEY
                 for col in schema_info:
                     if col['COLUMN_NAME'].lower() == 'tracking_number':
                         safe_col_name = self._sanitize_column_name_for_redshift(col['COLUMN_NAME'])
                         optimization_clauses.append(f"DISTKEY({safe_col_name})")
                         dist_key_set = True
                         break
-            
-            # Fallback to primary key or parcel columns if tracking_number not found
-            if not dist_key_set:
-                if primary_key_candidates:
+
+                # Fallback to primary key if tracking_number not found
+                if not dist_key_set and primary_key_candidates:
                     optimization_clauses.append(f"DISTKEY({primary_key_candidates[0]})")
-                elif 'parcel' in clean_table_name.lower():
-                    # Look for parcel-related columns
-                    for col in schema_info:
-                        if 'parcel' in col['COLUMN_NAME'].lower():
-                            optimization_clauses.append(f"DISTKEY({col['COLUMN_NAME']})")
-                            break
-            
-            # Add SORTKEY for query performance - enhanced for settle_orders
-            if 'settle_orders' in clean_table_name.lower():
-                # For settle_orders, prioritize tracking_number and timestamps
+
+                # Add SORTKEY - prioritize tracking_number and timestamps
                 settle_sort_keys = []
                 for col in schema_info:
                     col_name_lower = col['COLUMN_NAME'].lower()
@@ -473,13 +465,20 @@ class FlexibleSchemaManager:
                         settle_sort_keys.insert(0, col['COLUMN_NAME'])  # First priority
                     elif col_name_lower in ['create_at', 'update_at', 'created_at', 'updated_at']:
                         settle_sort_keys.append(col['COLUMN_NAME'])
-                
+
                 if settle_sort_keys:
                     sort_keys = ', '.join(settle_sort_keys[:2])  # Max 2 sort keys
                     optimization_clauses.append(f"SORTKEY({sort_keys})")
-            elif sort_key_candidates:
-                sort_keys = ', '.join(sort_key_candidates[:2])  # Max 2 sort keys
-                optimization_clauses.append(f"SORTKEY({sort_keys})")
+                else:
+                    # Even for settle_orders, use AUTO if no sortkey candidates found
+                    optimization_clauses.append("SORTKEY AUTO")
+
+                logger.info(f"Applied special optimization for settle_orders table")
+            else:
+                # For all other tables, use AUTO for both DISTKEY and SORTKEY
+                optimization_clauses.append("DISTSTYLE AUTO")
+                optimization_clauses.append("SORTKEY AUTO")
+                logger.info(f"Using AUTO optimization (DISTSTYLE AUTO, SORTKEY AUTO) for {mysql_table_name}")
         
         if optimization_clauses:
             ddl_lines.append("\n" + "\n".join(optimization_clauses))

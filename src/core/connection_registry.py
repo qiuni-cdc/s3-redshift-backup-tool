@@ -276,16 +276,20 @@ class ConnectionRegistry:
             # Load source connections (MySQL)
             for name, conn_config in connections_config.get('sources', {}).items():
                 processed_config = self._interpolate_environment_variables(conn_config)
+                # Remove 'type' from processed_config to avoid conflict with explicit type parameter
+                processed_config.pop('type', None)
                 self.connections[name] = ConnectionConfig(
                     name=name,
                     type='mysql',
                     **processed_config
                 )
                 logger.debug(f"Loaded source connection: {name}")
-            
+
             # Load target connections (Redshift)
             for name, conn_config in connections_config.get('targets', {}).items():
                 processed_config = self._interpolate_environment_variables(conn_config)
+                # Remove 'type' from processed_config to avoid conflict with explicit type parameter
+                processed_config.pop('type', None)
                 self.connections[name] = ConnectionConfig(
                     name=name,
                     type='redshift',

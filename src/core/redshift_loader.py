@@ -59,11 +59,11 @@ class RedshiftLoader:
         
         try:
             # Setup SSH tunnel if Redshift needs it
-            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.bastion_host:
+            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
                 tunnel = SSHTunnelForwarder(
-                    (self.config.redshift_ssh.bastion_host, 22),
-                    ssh_username=self.config.redshift_ssh.bastion_user,
-                    ssh_pkey=self.config.redshift_ssh.bastion_key_path,
+                    (self.config.redshift_ssh.host, 22),
+                    ssh_username=self.config.redshift_ssh.username,
+                    ssh_pkey=self.config.redshift_ssh.private_key_path,
                     remote_bind_address=(self.config.redshift.host, self.config.redshift.port),
                     local_bind_address=('127.0.0.1', 0)
                 )

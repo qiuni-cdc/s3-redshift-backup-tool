@@ -94,21 +94,21 @@ class S3Config(BaseSettings):
 
 class RedshiftSSHConfig(BaseSettings):
     """SSH bastion host configuration for Redshift"""
-    bastion_host: str = Field(..., description="Redshift SSH bastion host address")
-    bastion_user: str = Field(..., description="Redshift SSH username")
-    bastion_key_path: str = Field(..., description="Path to Redshift SSH private key")
+    host: Optional[str] = Field(None, description="Redshift SSH bastion host address")
+    username: Optional[str] = Field(None, description="Redshift SSH username")
+    private_key_path: Optional[str] = Field(None, description="Path to Redshift SSH private key")
     local_port: int = Field(0, description="Local port for Redshift SSH tunnel (0 for dynamic)")
-    
+
     class Config:
         env_prefix = "REDSHIFT_SSH_"
         env_file = ".env"
         env_file_encoding = "utf-8"
         extra = "ignore"
-    
-    @validator('bastion_key_path')
+
+    @validator('private_key_path')
     def validate_key_path(cls, v):
         """Validate SSH key file exists"""
-        if not Path(v).exists():
+        if v and not Path(v).exists():
             raise ValueError(f"Redshift SSH key file not found: {v}")
         return v
 
@@ -329,9 +329,9 @@ class AppConfig(BaseSettings):
                 'local_port': self.ssh.local_port,
             },
             'redshift_ssh': {
-                'bastion_host': self.redshift_ssh.bastion_host,
-                'bastion_user': self.redshift_ssh.bastion_user,
-                'bastion_key_path': self.redshift_ssh.bastion_key_path,
+                'bastion_host': self.redshift_ssh.host,
+                'bastion_user': self.redshift_ssh.username,
+                'bastion_key_path': self.redshift_ssh.private_key_path,
                 'local_port': self.redshift_ssh.local_port,
             }
         }

@@ -1,16 +1,15 @@
 # US Data Warehouse Unidw to Redshift Public Pipeline
-# Clear naming: us_dw_unidw_2_public_pipeline
 
 pipeline:
-  name: "us_dw_unidw_2_public"
-  description: "US Data Warehouse Unidw DB → Redshift Public Schema"
+  name: "us_dw_unidw_2_settlement_dws"
+  description: "US Data Warehouse Unidw DB → Redshift Settlement DWS Schema"
   source: "US_DW_UNIDW_SSH"        # unidw database
-  target: "redshift_default"       # public schema
+  target: "redshift_settlement_dws"      # settlement dws schema
   version: "1.2.0"
   
   processing:
     strategy: "sequential"
-    batch_size: 100000
+    batch_size: 1000000
     timeout_minutes: 300
     max_parallel_tables: 4
   
@@ -43,29 +42,9 @@ tables:
     cdc_strategy: "id_only"
     cdc_id_column: "id"
     description: "Parcel detail tool temp data with ID-only strategy" 
-    target_name: "dw_parcel_detail_tool_new"  # Map to different target table name
+    target_name: "dw_parcel_detail_tool"  # Map to different target table name
     processing:
       batch_size: 100000
     validation:
       enable_data_quality_checks: true
       max_null_percentage: 5.0
-
-  unidw.dw_parcel_pricing_temp:
-    cdc_strategy: "hybrid"
-    cdc_timestamp_column: "create_at"
-    cdc_id_column: "id"
-    description: "Parcel pricing temp data with hybrid strategy"
-    processing:
-      batch_size: 100
-    validation:
-      enable_data_quality_checks: true
-      max_null_percentage: 5.0
-
-  # Removed duplicate - keeping only the original dw_parcel_detail_tool
-
-
-  # Add more unidw tables here as needed
-  # other_unidw_table:
-  #   cdc_strategy: "timestamp_only" 
-  #   cdc_timestamp_column: "updated_at"
-  #   description: "Another unidw table"

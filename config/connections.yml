@@ -230,7 +230,35 @@ connections:
         host: 35.82.216.244
         username: "${REDSHIFT_SSH_BASTION_USER}"
         private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}"
-        local_port: 0  # Auto-assign
+        local_port: 0  # Auto-assign 
+
+    redshift_settlement_dws:  
+      host: redshift-dw.uniuni.com
+      port: 5439
+      database: dw
+      username: "${REDSHIFT_PRO_USER}"
+      password: "${REDSHIFT_PRO_PASSWORD}" 
+      schema: settlement_dws
+
+      # Redshift SSH tunnel (your separate bastion)
+      ssh_tunnel:
+        enabled: true
+        host: 35.83.114.196
+        username: "${REDSHIFT_SSH_BASTION_USER}"
+        private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}"
+        local_port: 0  # Auto-assign 
+    
+    redshift_settlement_dws_direct: 
+      host: redshift-dw.uniuni.com
+      port: 5439
+      database: dw
+      username: "${REDSHIFT_PRO_USER}"
+      password: "${REDSHIFT_PRO_PASSWORD}" 
+      schema: settlement_dws
+
+      # Redshift SSH tunnel (your separate bastion)
+      ssh_tunnel:
+        enabled: false
 
 # S3 configuration (inherited from .env)
 s3:
@@ -252,7 +280,7 @@ s3:
 
 # Backup performance settings (from your optimized .env)
 backup:
-  batch_size: 50000
+  batch_size: 1000000
   max_workers: 4
   timeout_seconds: 600
   

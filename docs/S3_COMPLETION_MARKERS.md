@@ -50,33 +50,28 @@ Complete JSON output from the sync operation:
 
 ```json
 {
-  "success": true,
-  "duration_seconds": 45.23,
-  "tables_processed": 1,
-  "strategy": "sequential", 
-  "pipeline_name": "us_dw_hybrid_v1_2",
-  "table_name": "settlement.settle_orders",
-  "execution_timestamp": "2025-09-12T14:30:22Z",
-  "stages": {
-    "backup": {
-      "executed": true,
-      "success": true,
-      "summary": {
-        "total_rows": 15000,
-        "total_batches": 3,
-        "total_mb": 1.95,
-        "avg_rows_per_second": 331.8
-      }
-    },
-    "redshift": {
-      "executed": true,
-      "success": true,
-      "summary": {
-        "total_rows_loaded": 15000,
-        "files_processed": 3,
-        "load_duration_seconds": 12.4
-      }
+  "execution_id": "sync_20250912_143022_a3f8e1b2",
+  "start_time": "2025-09-12T14:30:22.135401+00:00",
+  "pipeline": "us_dw_hybrid_v1_2",
+  "tables_requested": ["settlement.settle_orders"],
+  "total_tables": 1,
+  "table_results": {
+    "settlement.settle_orders": {
+      "status": "success",
+      "rows_processed": 15000,
+      "files_created": 3,
+      "duration_seconds": 45.2,
+      "completed_at": "2025-09-12T14:31:07.466043+00:00"
     }
+  },
+  "status": "success",
+  "end_time": "2025-09-12T14:31:07.567890+00:00",
+  "duration_seconds": 45.43,
+  "summary": {
+    "success_count": 1,
+    "failure_count": 0,
+    "total_rows_processed": 15000,
+    "total_files_created": 3
   }
 }
 ```
@@ -179,9 +174,9 @@ process_data = BashOperator(
     bash_command="""
     # Read completion marker for metrics
     aws s3 cp s3://airflow-completion-markers/completion_markers/us_dw_hybrid_v1_2/settlement.settle_orders/{{ ds_nodash }}_*/execution_metadata.json /tmp/
-    
+
     # Extract row count for validation
-    ROWS_SYNCED=$(cat /tmp/execution_metadata.json | jq '.stages.backup.summary.total_rows')
+    ROWS_SYNCED=$(cat /tmp/execution_metadata.json | jq '.summary.total_rows_processed')
     echo "Processing $ROWS_SYNCED rows"
     
     # Continue with downstream processing...
@@ -252,14 +247,14 @@ def publish_sync_metrics(completion_marker_s3_path):
     metadata = json.loads(response['Body'].read())
     
     # Extract metrics
-    pipeline = metadata.get('pipeline_name', 'unknown')
-    table = metadata.get('table_name', 'unknown')
-    success = metadata.get('success', False)
+    pipeline = metadata.get('pipeline', 'unknown')
+    table = metadata.get('tables_requested', [])[0] if metadata.get('tables_requested') else 'unknown'
+    status = metadata.get('status', 'unknown')
+    success = (status == 'success')
     duration = metadata.get('duration_seconds', 0)
-    
-    backup_summary = metadata.get('stages', {}).get('backup', {}).get('summary', {})
-    rows_processed = backup_summary.get('total_rows', 0)
-    throughput = backup_summary.get('avg_rows_per_second', 0)
+
+    summary = metadata.get('summary', {})
+    rows_processed = summary.get('total_rows_processed', 0)
     
     # Publish metrics
     cloudwatch.put_metric_data(
@@ -312,16 +307,17 @@ def send_sync_notification(completion_marker_s3_path, webhook_url):
     metadata = json.loads(response['Body'].read())
     
     # Format message
-    pipeline = metadata.get('pipeline_name', 'Unknown')
-    table = metadata.get('table_name', 'Unknown')
-    success = metadata.get('success', False)
+    pipeline = metadata.get('pipeline', 'Unknown')
+    table = metadata.get('tables_requested', [])[0] if metadata.get('tables_requested') else 'Unknown'
+    status = metadata.get('status', 'unknown')
+    success = (status == 'success')
     duration = metadata.get('duration_seconds', 0)
-    
+
     if success:
-        backup_summary = metadata.get('stages', {}).get('backup', {}).get('summary', {})
-        rows = backup_summary.get('total_rows', 0)
-        throughput = backup_summary.get('avg_rows_per_second', 0)
-        
+        summary = metadata.get('summary', {})
+        rows = summary.get('total_rows_processed', 0)
+        files = summary.get('total_files_created', 0)
+
         message = {
             "text": f"✅ Sync Completed Successfully",
             "attachments": [{
@@ -331,7 +327,7 @@ def send_sync_notification(completion_marker_s3_path, webhook_url):
                     {"title": "Table", "value": table, "short": True},
                     {"title": "Duration", "value": f"{duration:.1f}s", "short": True},
                     {"title": "Rows", "value": f"{rows:,}", "short": True},
-                    {"title": "Throughput", "value": f"{throughput:.1f} rows/sec", "short": True}
+                    {"title": "Files", "value": f"{files}", "short": True}
                 ]
             }]
         }
