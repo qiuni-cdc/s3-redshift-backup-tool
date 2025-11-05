@@ -22,8 +22,8 @@ The `order_details` table (71M+ rows, AUTO_INCREMENT=71714083) presented a criti
 ```python
 # Break endless loops for sparse sequences
 if table_config and table_config.get('cdc_strategy') == 'id_only':
-    if current_chunk_size > 1000 and rows_in_chunk < (current_chunk_size * 0.1):
-        # End sync when efficiency < 10%
+    if current_chunk_size > 1000 and rows_in_chunk < (current_chunk_size * 0.01):
+        # End sync when efficiency < 1%
         break
 ```
 

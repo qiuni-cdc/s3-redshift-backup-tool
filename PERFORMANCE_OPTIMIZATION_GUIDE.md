@@ -16,8 +16,8 @@ Automatically detects and optimizes tables with sparse ID sequences (gaps in ID 
 
 ### **How It Works**
 ```python
-# Automatic detection when chunk efficiency drops below 10%
-if rows_found < (chunk_size * 0.10):
+# Automatic detection when chunk efficiency drops below 1%
+if rows_found < (chunk_size * 0.01):
     logger.info("Sparse ID sequence detected - ending sync for efficiency")
     break  # Smart early termination
 ```
@@ -147,7 +147,7 @@ python -m src.cli.main watermark list
 **Review detection logs:**
 ```json
 {
-  "efficiency_percent": 8.5,  // Below 10% threshold
+  "efficiency_percent": 0.5,  // Below 1% threshold
   "recommendation": "Consider implementing row accumulation buffer"
 }
 ```

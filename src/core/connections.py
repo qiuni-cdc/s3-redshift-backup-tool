@@ -607,22 +607,29 @@ class ConnectionManager:
         except Exception as e:
             health['s3'] = f'ERROR: {str(e)}'
         
-        # Test SSH connectivity using default connection
+        # Test SSH connectivity using configured connection
         try:
-            with self.ssh_tunnel('mysql_default') as local_port:
-                health['ssh'] = 'OK'
+            # Use the connection config that was populated by create_app_config
+            if hasattr(self.config, 'ssh') and self.config.ssh.bastion_host:
+                with self.ssh_tunnel() as local_port:
+                    health['ssh'] = 'OK'
+            else:
+                health['ssh'] = 'SKIPPED: No SSH tunnel configured'
         except Exception as e:
             health['ssh'] = f'ERROR: {str(e)}'
-        
-        # Test database connectivity (through SSH) using default connection
+
+        # Test database connectivity (through SSH)
         try:
-            with self.ssh_tunnel('mysql_default') as local_port:
-                with self.database_connection(local_port, 'mysql_default') as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT 1")
-                    cursor.fetchone()
-                    cursor.close()
-                    health['database'] = 'OK'
+            if hasattr(self.config, 'database') and self.config.database.host:
+                with self.ssh_tunnel() as local_port:
+                    with self.database_connection(local_port) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                        cursor.close()
+                        health['database'] = 'OK'
+            else:
+                health['database'] = 'SKIPPED: No database configured'
         except Exception as e:
             health['database'] = f'ERROR: {str(e)}'
         

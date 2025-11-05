@@ -16,12 +16,12 @@ Production sync jobs suffer from **severe performance degradation** when process
 ### **Implementation Details**:
 ```python
 # Added to src/backup/row_based.py line ~369
-SPARSE_EFFICIENCY_THRESHOLD = 0.10  # 10%
+SPARSE_EFFICIENCY_THRESHOLD = 0.01  # 1%
 MIN_CHUNK_SIZE_FOR_SPARSE_CHECK = 1000
 
-if (current_chunk_size > MIN_CHUNK_SIZE_FOR_SPARSE_CHECK and 
+if (current_chunk_size > MIN_CHUNK_SIZE_FOR_SPARSE_CHECK and
     rows_in_chunk < (current_chunk_size * SPARSE_EFFICIENCY_THRESHOLD)):
-    
+
     self.logger.info(
         "Sparse ID sequence detected - ending sync for efficiency",
         efficiency_percent=round((rows_in_chunk / current_chunk_size) * 100, 1),
@@ -146,8 +146,8 @@ class SparseSequenceAnalyzer:
         self.efficiency_window.append(efficiency)
         if len(self.efficiency_window) > self.window_size:
             self.efficiency_window.pop(0)
-        
-        if efficiency < 0.10:
+
+        if efficiency < 0.01:
             self.consecutive_sparse_chunks += 1
         else:
             self.consecutive_sparse_chunks = 0
@@ -193,7 +193,7 @@ class SparseSequenceAnalyzer:
 sparse_sequence_optimization:
   enabled: true
   detection:
-    efficiency_threshold: 0.10  # 10%
+    efficiency_threshold: 0.01  # 1%
     min_chunk_size_check: 1000
     consecutive_sparse_limit: 2
   

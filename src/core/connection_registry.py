@@ -211,22 +211,22 @@ class ConnectionRegistry:
             self._create_default_config()
     
     def _create_default_config(self):
-        """Create default configuration for v1.0.0 compatibility"""
+        """Create default configuration template (v1.2.0 style - no 'default' connections)"""
         default_config = {
             'connections': {
                 'sources': {
-                    'default': {
+                    'mysql_source': {
                         'type': 'mysql',
                         'host': '${MYSQL_HOST}',
                         'port': 3306,
                         'database': '${MYSQL_DATABASE}',
                         'username': '${MYSQL_USERNAME}',
                         'password': '${MYSQL_PASSWORD}',
-                        'description': 'Default v1.0.0 compatibility MySQL connection'
+                        'description': 'Example MySQL source connection - rename and configure as needed'
                     }
                 },
                 'targets': {
-                    'default': {
+                    'redshift_target': {
                         'type': 'redshift',
                         'host': '${REDSHIFT_HOST}',
                         'port': 5439,
@@ -241,7 +241,7 @@ class ConnectionRegistry:
                             'username': '${SSH_USER}',
                             'private_key_path': '${SSH_KEY_PATH}'
                         },
-                        'description': 'Default v1.0.0 compatibility Redshift connection'
+                        'description': 'Example Redshift target connection - rename and configure as needed'
                     }
                 }
             },
@@ -376,7 +376,7 @@ class ConnectionRegistry:
                     raise ValidationError(f"Missing SSH tunnel field '{field}' for {config.name}")
     
     @contextmanager
-    def get_mysql_connection(self, connection_name: str = "default"):
+    def get_mysql_connection(self, connection_name: str):
         """
         Get MySQL connection with automatic pooling, retry logic, and proper cleanup
         
@@ -449,7 +449,7 @@ class ConnectionRegistry:
                 except Exception as e:
                     logger.warning(f"Error returning MySQL connection to pool: {e}")
     
-    def get_mysql_connection_direct(self, connection_name: str = "default") -> mysql.connector.MySQLConnection:
+    def get_mysql_connection_direct(self, connection_name: str) -> mysql.connector.MySQLConnection:
         """
         Get MySQL connection directly (for backward compatibility - use context manager version when possible)
         
@@ -607,7 +607,7 @@ class ConnectionRegistry:
                 raise ConnectionError(f"MySQL pool creation failed for {name}: {e}")
     
     @contextmanager
-    def get_redshift_connection(self, connection_name: str = "default"):
+    def get_redshift_connection(self, connection_name: str):
         """
         Get Redshift connection with SSH tunnel support
         

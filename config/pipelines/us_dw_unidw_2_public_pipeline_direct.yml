@@ -2,11 +2,11 @@
 # Clear naming: us_dw_unidw_2_public_pipeline
 
 pipeline:
-  name: "us_dw_unidw_2_public"
+  name: "us_dw_unidw_2_public_direct"
   description: "US Data Warehouse Unidw DB → Redshift Public Schema"
-  source: "US_DW_UNIDW_SSH"        # unidw database
-  target: "redshift_default"       # public schema
-  s3_config: "s3_qa"               # QA S3 bucket
+  source: "US_DW_UNIDW_DIRECT"        # unidw database
+  target: "redshift_default_direct"       # public schema
+  s3_config: "s3_qa"                  # QA S3 bucket
   version: "1.2.0"
   
   processing:

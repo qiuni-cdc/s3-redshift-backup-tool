@@ -385,12 +385,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 # QUICK FIX: Sparse sequence detection
                 # If chunk efficiency is very low, this indicates sparse ID sequences
-                SPARSE_EFFICIENCY_THRESHOLD = 0.10  # 10%
+                SPARSE_EFFICIENCY_THRESHOLD = 0.01  # 1%
                 MIN_CHUNK_SIZE_FOR_SPARSE_CHECK = 1000
-                
-                if (current_chunk_size > MIN_CHUNK_SIZE_FOR_SPARSE_CHECK and 
+
+                if (current_chunk_size > MIN_CHUNK_SIZE_FOR_SPARSE_CHECK and
                     rows_in_chunk < (current_chunk_size * SPARSE_EFFICIENCY_THRESHOLD)):
-                    
+
                     efficiency_percent = round((rows_in_chunk / current_chunk_size) * 100, 1)
                     self.logger.logger.info(
                         "Sparse ID sequence detected - ending sync for efficiency",
@@ -398,7 +398,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                         efficiency_percent=efficiency_percent,
                         rows_found=rows_in_chunk,
                         chunk_size_requested=current_chunk_size,
-                        sparse_threshold_percent=10,
+                        sparse_threshold_percent=1,
                         optimization="quick_fix_early_termination",
                         recommendation="Consider implementing row accumulation buffer for better performance"
                     )

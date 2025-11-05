@@ -979,7 +979,8 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             # Use YAML-based configuration (migrated from AppConfig)
             config = multi_schema_ctx.config_manager.create_app_config(
                 source_connection=pipeline_config.source,
-                target_connection=pipeline_config.target
+                target_connection=pipeline_config.target,
+                s3_config_name=pipeline_config.s3_config  # Pass S3 config from pipeline
             )
             
             # Determine backup strategy based on pipeline configuration  

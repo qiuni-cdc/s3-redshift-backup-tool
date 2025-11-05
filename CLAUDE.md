@@ -6,7 +6,7 @@
 
 ### 🚀 **Performance Optimizations** ⭐ **NEW**
 - **Sparse Sequence Detection**: Automatically identifies inefficient ID sequences (96% query reduction)
-- **Smart Early Termination**: Stops processing when efficiency drops below 10%
+- **Smart Early Termination**: Stops processing when efficiency drops below 1%
 - **Watermark Ceiling Protection**: Prevents infinite sync during continuous data injection
 - **Dual Safety Mechanisms**: Comprehensive protection for production workloads
 - **Real-world Tested**: Verified with production tables processing 19M+ records

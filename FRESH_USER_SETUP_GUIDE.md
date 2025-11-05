@@ -9,7 +9,7 @@ This guide will help you set up a complete test environment from scratch with th
 ### ⚡ **Performance Enhancements**
 - **Sparse Sequence Detection**: Automatically optimizes tables with sparse ID sequences (96% query reduction)
 - **Infinite Sync Prevention**: Watermark ceiling protection prevents runaway sync jobs
-- **Smart Termination**: Early detection when chunk efficiency drops below 10%
+- **Smart Termination**: Early detection when chunk efficiency drops below 1%
 
 ### 🛡️ **Reliability Improvements**  
 - **Unified Watermark System**: KISS-based implementation with verified persistence

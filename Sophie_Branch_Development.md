@@ -1700,6 +1700,249 @@ python parcel_download_and_sync.py -d "" --hours "-0.5"
 - ✅ Configurable pipeline/date/hours
 - ✅ No more "bastion_host" errors
 
+## Multi-S3 Bucket Configuration (November 2025)
+
+### Issue: Single S3 Bucket for Both QA and Production
+
+**Problem:**
+- All pipelines used a single hardcoded S3 bucket (`redshift-dw-qa-uniuni-com`)
+- No separation between QA and Production data storage
+- Impossible to configure different buckets per pipeline
+- Legacy `s3` section in connections.yml was global and not flexible
+
+### Solution: Named S3 Configurations
+
+Added support for multiple named S3 configurations, allowing each pipeline to choose its target bucket.
+
+### Implementation
+
+#### 1. Named S3 Configs in connections.yml
+
+`config/connections.yml`:
+```yaml
+# NEW: Multiple named S3 configurations
+s3_configs:
+  s3_qa:
+    bucket_name: redshift-dw-qa-uniuni-com
+    region: us-west-2
+    access_key_id: "${AWS_ACCESS_KEY_ID}"
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+    incremental_path: incremental/
+    high_watermark_key: watermark/last_run_timestamp.txt
+    description: "QA environment S3 bucket"
+
+    performance:
+      multipart_threshold: 104857600    # 100MB
+      multipart_chunksize: 52428800     # 50MB
+      max_concurrency: 10
+      max_pool_connections: 20
+      retry_max_attempts: 3
+      retry_mode: adaptive
+
+  s3_prod:
+    bucket_name: redshift-dw-uniuni-com
+    region: us-west-2
+    access_key_id: "${AWS_ACCESS_KEY_ID}"
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+    incremental_path: incremental/
+    high_watermark_key: watermark/last_run_timestamp.txt
+    description: "Production environment S3 bucket"
+
+    performance:
+      multipart_threshold: 104857600
+      multipart_chunksize: 52428800
+      max_concurrency: 10
+      max_pool_connections: 20
+      retry_max_attempts: 3
+      retry_mode: adaptive
+```
+
+**Note:** Legacy `s3` section removed to eliminate redundancy.
+
+#### 2. Pipeline-Level S3 Config Selection
+
+`config/pipelines/us_dw_unidw_2_public_pipeline.yml`:
+```yaml
+pipeline:
+  name: "us_dw_unidw_2_public"
+  source: "US_DW_UNIDW_SSH"
+  target: "redshift_default"
+  s3_config: "s3_qa"  # ← NEW: Select QA bucket
+  version: "1.2.0"
+
+  s3:  # ← Still configures data organization
+    isolation_prefix: "us_dw_unidw/"
+    partition_strategy: "table"
+    compression: "snappy"
+```
+
+`config/pipelines/us_dw_unidw_2_settlement_dws_pipeline.yml`:
+```yaml
+pipeline:
+  name: "us_dw_unidw_2_settlement_dws"
+  source: "US_DW_UNIDW_SSH"
+  target: "redshift_settlement_dws"
+  s3_config: "s3_qa"  # ← NEW: Select Production bucket
+  version: "1.2.0"
+
+  s3:
+    isolation_prefix: "us_dw_unidw/"
+    partition_strategy: "table"
+    compression: "snappy"
+```
+
+#### 3. PipelineConfig Enhancement
+
+`src/core/configuration_manager.py:92`:
+```python
+@dataclass
+class PipelineConfig:
+    name: str
+    version: str
+    source: str
+    target: str
+    s3: Dict[str, Any]
+    s3_config: Optional[str] = None  # ← NEW: Reference to named S3 config
+    # ... other fields
+```
+
+#### 4. ConfigurationManager Updates
+
+`src/core/configuration_manager.py:1109-1132`:
+```python
+def get_s3_config(self, s3_config_name: str) -> Dict[str, Any]:
+    """
+    Get S3 configuration from connections.yml
+
+    Args:
+        s3_config_name: Name of S3 config to retrieve (required)
+
+    Returns:
+        S3 configuration dictionary
+
+    Raises:
+        ValidationError: If s3_config_name not found
+    """
+    s3_configs = self.connections_config.get('s3_configs', {})
+    if s3_config_name not in s3_configs:
+        available = ', '.join(s3_configs.keys()) if s3_configs else 'none'
+        raise ValidationError(
+            f"S3 config '{s3_config_name}' not found in connections.yml. "
+            f"Available: {available}"
+        )
+
+    config = s3_configs[s3_config_name]
+    logger.info(f"Using S3 config '{s3_config_name}': {config.get('bucket_name')}")
+    return config
+```
+
+`src/core/configuration_manager.py:1163`:
+```python
+def create_app_config(
+    self,
+    source_connection: Optional[str] = None,
+    target_connection: Optional[str] = None,
+    s3_config_name: Optional[str] = None  # ← NEW parameter
+) -> 'AppConfig':
+    # ...
+    s3_name = s3_config_name or list(s3_configs.keys())[0]  # Default to first
+    s3_config = self.get_s3_config(s3_name)
+    # ...
+```
+
+#### 5. CLI Integration
+
+`src/cli/multi_schema_commands.py:980-984`:
+```python
+config = multi_schema_ctx.config_manager.create_app_config(
+    source_connection=pipeline_config.source,
+    target_connection=pipeline_config.target,
+    s3_config_name=pipeline_config.s3_config  # ← Pass S3 config from pipeline
+)
+```
+
+#### 6. Environment Variables
+
+`.env.template`:
+```bash
+# AWS Access Key ID for S3 access (shared across QA and Production)
+AWS_ACCESS_KEY_ID=your-aws-access-key-id
+
+# AWS Secret Access Key for S3 access (shared across QA and Production)
+AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
+
+# Production S3 Bucket Name
+# Used by pipelines with s3_config: "s3_prod" in pipeline YAML
+S3_PROD_BUCKET_NAME=your-production-bucket-name
+```
+
+### How S3 Path Construction Works
+
+**From `s3_config`** (bucket-level):
+- `bucket_name`: Which S3 bucket
+- `region`: AWS region
+- `access_key_id` / `secret_access_key`: Credentials
+- `incremental_path`: Base path (e.g., `incremental/`)
+
+**From `s3` section** (pipeline-level):
+- `isolation_prefix`: Subfolder for this pipeline (e.g., `us_dw_unidw/`)
+- `partition_strategy`: How to organize files
+- `compression`: Compression format
+
+**Final S3 Path:**
+```
+s3://{bucket_name}/{incremental_path}/{isolation_prefix}/{table_name}/file.parquet
+        ↑                 ↑                    ↑               ↑
+   from s3_config    from s3_config     from pipeline s3   table name
+```
+
+**Example:**
+```
+s3://redshift-dw-qa-uniuni-com/incremental/us_dw_unidw/dw_parcel_detail_tool/part-0001.parquet
+```
+
+### Migration Notes
+
+**Before:**
+- All data stored in: `s3://redshift-dw-qa-uniuni-com/...`
+
+**After:**
+- QA pipelines: `s3://redshift-dw-qa-uniuni-com/...` (same location)
+- Prod pipelines: `s3://redshift-dw-uniuni-com/...` (new location)
+
+**No data migration needed** - Existing data remains in QA bucket, accessible to QA pipelines.
+
+### Usage
+
+**List available S3 configs:**
+```python
+config_manager = ConfigurationManager()
+s3_configs = config_manager.list_s3_configs()
+# Returns: {'s3_qa': 'QA environment S3 bucket', 's3_prod': 'Production environment S3 bucket'}
+```
+
+**Run sync with specific S3 config:**
+```bash
+# Uses s3_config from pipeline YAML
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws
+```
+
+**Logs show which S3 config is used:**
+```
+[info] Using S3 config 's3_prod': redshift-dw-uniuni-com
+[debug] Creating AppConfig from source=US_DW_UNIDW_SSH, target=redshift_settlement_dws, s3_config=s3_prod
+```
+
+### Result
+
+- ✅ **Separate QA and Production buckets** for data isolation
+- ✅ **Pipeline-level S3 selection** via `s3_config` field
+- ✅ **Environment-based configuration** with `${VAR}` interpolation
+- ✅ **No legacy code** - removed redundant `s3` section from connections.yml
+- ✅ **Backward compatible** - defaults to first S3 config if not specified
+- ✅ **Better error messages** - shows available S3 configs when validation fails
+- ✅ **Logging visibility** - clearly shows which bucket/config is being used
+
 ## Usually Used Commands
 python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
 python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 

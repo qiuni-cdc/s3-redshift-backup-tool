@@ -89,6 +89,7 @@ class PipelineConfig:
     s3: Dict[str, Any]
     default_table_config: Dict[str, Any]
     tables: Dict[str, TableConfig]
+    s3_config: Optional[str] = None  # Reference to named S3 config in connections.yml
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
@@ -1105,9 +1106,43 @@ class ConfigurationManager:
         
         return summary
 
-    def get_s3_config(self) -> Dict[str, Any]:
-        """Get S3 configuration from connections.yml"""
-        return self.connections_config.get('s3', {})
+    def get_s3_config(self, s3_config_name: str) -> Dict[str, Any]:
+        """
+        Get S3 configuration from connections.yml
+
+        Args:
+            s3_config_name: Name of S3 config to retrieve (required)
+
+        Returns:
+            S3 configuration dictionary
+
+        Raises:
+            ValidationError: If s3_config_name not found
+        """
+        s3_configs = self.connections_config.get('s3_configs', {})
+        if s3_config_name not in s3_configs:
+            available = ', '.join(s3_configs.keys()) if s3_configs else 'none'
+            raise ValidationError(
+                f"S3 config '{s3_config_name}' not found in connections.yml. "
+                f"Available: {available}"
+            )
+
+        config = s3_configs[s3_config_name]
+        logger.info(f"Using S3 config '{s3_config_name}': {config.get('bucket_name', 'unknown-bucket')}")
+        return config
+
+    def list_s3_configs(self) -> Dict[str, str]:
+        """
+        List all available S3 configurations
+
+        Returns:
+            Dictionary mapping S3 config names to their descriptions
+        """
+        s3_configs = self.connections_config.get('s3_configs', {})
+        return {
+            name: config.get('description', 'No description')
+            for name, config in s3_configs.items()
+        }
 
     def get_backup_config(self) -> Dict[str, Any]:
         """Get backup configuration from connections.yml"""
@@ -1125,7 +1160,7 @@ class ConfigurationManager:
         else:
             raise ValidationError(f"Connection '{connection_name}' not found in connections.yml")
 
-    def create_app_config(self, source_connection: Optional[str] = None, target_connection: Optional[str] = None) -> 'AppConfig':
+    def create_app_config(self, source_connection: Optional[str] = None, target_connection: Optional[str] = None, s3_config_name: Optional[str] = None) -> 'AppConfig':
         """
         Create AppConfig from connections.yml for backward compatibility.
 
@@ -1135,6 +1170,7 @@ class ConfigurationManager:
         Args:
             source_connection: Source connection name (defaults to first source)
             target_connection: Target connection name (defaults to first target)
+            s3_config_name: S3 config name (defaults to first available s3 config)
 
         Returns:
             AppConfig instance populated from connections.yml
@@ -1145,22 +1181,26 @@ class ConfigurationManager:
         # Get connections
         sources = self.connections_config.get('connections', {}).get('sources', {})
         targets = self.connections_config.get('connections', {}).get('targets', {})
+        s3_configs = self.connections_config.get('s3_configs', {})
 
         if not sources:
             raise ValidationError("No source connections defined in connections.yml")
         if not targets:
             raise ValidationError("No target connections defined in connections.yml")
+        if not s3_configs:
+            raise ValidationError("No S3 configurations defined in connections.yml")
 
         # Use specified or first connection
         source_name = source_connection or list(sources.keys())[0]
         target_name = target_connection or list(targets.keys())[0]
+        s3_name = s3_config_name or list(s3_configs.keys())[0]
 
         source_config = sources[source_name]
         target_config = targets[target_name]
-        s3_config = self.connections_config.get('s3', {})
+        s3_config = self.get_s3_config(s3_name)
         backup_config = self.connections_config.get('backup', {})
 
-        logger.debug(f"Creating AppConfig from source={source_name}, target={target_name}")
+        logger.debug(f"Creating AppConfig from source={source_name}, target={target_name}, s3_config={s3_name}")
 
         # Temporarily set environment variables for AppConfig to pick up
         # This is the bridge between YAML config and Pydantic BaseSettings

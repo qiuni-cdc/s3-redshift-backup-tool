@@ -1,10 +1,11 @@
 # US Data Warehouse Unidw to Redshift Public Pipeline
 
 pipeline:
-  name: "us_dw_unidw_2_settlement_dws"
+  name: "us_dw_unidw_2_settlement_dws_direct"
   description: "US Data Warehouse Unidw DB → Redshift Settlement DWS Schema"
-  source: "US_DW_UNIDW_SSH"        # unidw database
-  target: "redshift_settlement_dws"      # settlement dws schema
+  source: "US_DW_UNIDW_DIRECT"        # unidw database
+  target: "redshift_settlement_dws_direct"      # settlement dws schema
+  s3_config: "s3_prod"                # Production S3 bucket
   version: "1.2.0"
   
   processing:
@@ -42,7 +43,7 @@ tables:
     cdc_strategy: "id_only"
     cdc_id_column: "id"
     description: "Parcel detail tool temp data with ID-only strategy" 
-    target_name: "dw_parcel_detail_tool"  # Map to different target table name
+    target_name: "dw_parcel_detail_tool_new"  # Map to different target table name
     processing:
       batch_size: 100000
     validation:

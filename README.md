@@ -11,7 +11,7 @@
 ### ⚡ **Sparse Sequence Protection**
 - **96% query reduction** for tables with sparse ID sequences
 - **87% faster processing** - Automatically detects and terminates inefficient sync operations
-- **Smart termination** when chunk efficiency drops below 10%
+- **Smart termination** when chunk efficiency drops below 1%
 
 ### 🛡️ **Infinite Sync Prevention** 
 - **Watermark ceiling protection** prevents infinite loops during continuous data injection
