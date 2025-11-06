@@ -49,24 +49,6 @@ class MultiSchemaContext:
             click.echo("💡 Tip: Run 'python -m src.cli.main config setup' to create default configuration")
             sys.exit(1)
     
-    def is_v1_0_0_mode(self) -> bool:
-        """Check if we should operate in v1.0.0 compatibility mode"""
-        # Check if multi-schema configuration exists
-        config_path = Path("config/connections.yml")
-        if not config_path.exists():
-            return True
-        
-        # Check if only default connections are configured
-        try:
-            if self.connection_registry:
-                connections = self.connection_registry.list_connections()
-                return set(connections.keys()) == {"default"}
-        except:
-            return True
-        
-        return False
-
-
 # Global context
 multi_schema_ctx = MultiSchemaContext()
 
@@ -84,22 +66,22 @@ def add_multi_schema_commands(cli):
     @click.option('--max-chunks', type=int, help='Maximum number of chunks to process (total rows = limit × max-chunks)')
     @click.pass_context
     def sync_command(ctx, table: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int]):
-        """Sync data with multi-schema support and v1.0.0 compatibility"""
-        
+        """Sync data - requires pipeline specification (v1.2.0 multi-pipeline system)"""
+
         if ctx.invoked_subcommand is None:
-            # Handle direct sync command (v1.0.0 compatibility)
-            if table:
-                multi_schema_ctx.ensure_initialized()
-                
-                if multi_schema_ctx.is_v1_0_0_mode():
-                    # Use v1.0.0 compatibility mode
-                    _sync_legacy_mode(table, backup_only, redshift_only, limit, max_workers, max_chunks)
-                else:
-                    # Use default pipeline
-                    _sync_with_default_pipeline(table, backup_only, redshift_only, limit, max_workers, max_chunks)
-            else:
-                # Show help for new syntax options
-                _show_sync_help()
+            # No subcommand provided - show help
+            click.echo("❌ Pipeline or connection specification required")
+            click.echo()
+            click.echo("Usage:")
+            click.echo("  python -m src.cli.main sync pipeline -p <pipeline_name> [-t table1 -t table2 ...]")
+            click.echo("  python -m src.cli.main sync connection -c <connection_name> -t <table1> [-t table2 ...]")
+            click.echo()
+            click.echo("Examples:")
+            click.echo("  python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline")
+            click.echo("  python -m src.cli.main sync connection -c US_DW_UNIDW -t unidw.table_name")
+            click.echo()
+            click.echo("💡 Use 'python -m src.cli.main config list-pipelines' to see available pipelines")
+            sys.exit(1)
     
     @sync_command.command(name="pipeline")
     @click.option('--pipeline', '-p', required=True, help='Pipeline configuration name')
@@ -778,151 +760,19 @@ def add_multi_schema_commands(cli):
 
 
 def _show_sync_help():
-    """Show help for sync command options"""
-    click.echo("📚 Multi-Schema Sync Options (v1.1.0):")
+    """Show help for sync command options (v1.2.0 multi-pipeline system)"""
+    click.echo("📚 Multi-Pipeline Sync Options (v1.2.0):")
     click.echo("")
-    click.echo("Pipeline-based sync (recommended):")
-    click.echo("  python -m src.cli.main sync pipeline --pipeline PIPELINE_NAME --table TABLE1 TABLE2")
+    click.echo("Pipeline-based sync (required):")
+    click.echo("  python -m src.cli.main sync pipeline -p PIPELINE_NAME -t TABLE1 -t TABLE2")
     click.echo("")
     click.echo("Connection-based sync:")
-    click.echo("  python -m src.cli.main sync connections --source SOURCE_CONN --target TARGET_CONN --table TABLE1")
-    click.echo("")
-    click.echo("Legacy v1.0.0 syntax (still supported):")
-    click.echo("  python -m src.cli.main sync --table settlement.table_name")
+    click.echo("  python -m src.cli.main sync connection -c SOURCE_CONN -t TABLE1 -t TABLE2")
     click.echo("")
     click.echo("💡 Tips:")
     click.echo("  • List pipelines: python -m src.cli.main config list-pipelines")
     click.echo("  • List connections: python -m src.cli.main connections list")
     click.echo("  • Setup configuration: python -m src.cli.main config setup")
-
-
-def _sync_legacy_mode(tables: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int]):
-    """Handle v1.0.0 legacy sync mode"""
-    click.echo("🔄 v1.0.0 Compatibility Mode")
-    
-    # Use the existing v1.0.0 sync logic with proper integration
-    try:
-        # Import the backup strategies and connection manager
-        from src.backup.sequential import SequentialBackupStrategy
-        from src.core.connections import ConnectionManager
-
-        # Use YAML-based configuration (migrated from AppConfig)
-        config = multi_schema_ctx.config_manager.create_app_config()
-        connection_manager = ConnectionManager(config)
-        
-        # Execute backup for each table using proper connection context
-        success_count = 0
-        for table_name in tables:
-            try:
-                click.echo(f"📋 Processing table: {table_name}")
-                
-                # Create v1.0.0 style backup strategy with connection manager
-                backup_strategy = SequentialBackupStrategy(config)
-                
-                # TODO: Apply max_workers and max_chunks configuration to backup strategy
-                # if max_workers:
-                #     backup_strategy.set_max_workers(max_workers)
-                # if max_chunks:
-                #     backup_strategy.set_max_chunks(max_chunks)
-                
-                # Execute backup with the same logic as v1.0.0
-                # SequentialBackupStrategy handles its own connection management
-                tables_list = [table_name]
-                result = backup_strategy.execute(
-                    tables_list, 
-                    chunk_size=limit if limit else config.backup.target_rows_per_chunk,
-                    max_total_rows=limit if limit else None
-                )
-                
-                if result:
-                    click.echo(f"  ✅ {table_name} completed successfully")
-                    success_count += 1
-                else:
-                    click.echo(f"  ❌ {table_name} failed")
-                    
-            except Exception as e:
-                click.echo(f"  ❌ {table_name} failed: {e}")
-                logger.error(f"Legacy sync failed for {table_name}: {e}")
-        
-        # Summary
-        total_tables = len(tables)
-        if success_count == total_tables:
-            click.echo(f"✅ Legacy sync completed successfully: {success_count}/{total_tables} tables")
-        else:
-            click.echo(f"⚠️  Legacy sync completed with issues: {success_count}/{total_tables} tables successful")
-            
-    except ImportError as e:
-        click.echo(f"❌ Legacy sync components not available: {e}")
-        click.echo("💡 Consider upgrading to pipeline-based syntax")
-        return _fallback_to_legacy_sync_simple(tables, backup_only, redshift_only, limit)
-    except Exception as e:
-        click.echo(f"❌ Legacy sync failed: {e}")
-        logger.error(f"Legacy sync mode failed: {e}")
-
-
-def _fallback_to_legacy_sync(table_name: str, backup_only: bool, redshift_only: bool, limit: Optional[int]) -> bool:
-    """Fallback sync function for single table when multi-schema fails"""
-    try:
-        from src.backup.sequential import SequentialBackupStrategy
-
-        # Use YAML-based configuration (migrated from AppConfig)
-        config = multi_schema_ctx.config_manager.create_app_config()
-        backup_strategy = SequentialBackupStrategy(config)
-        
-        # Execute backup for single table
-        tables_list = [table_name]
-        result = backup_strategy.execute(
-            tables_list, 
-            chunk_size=limit if limit else config.backup.target_rows_per_chunk,
-            max_total_rows=limit if limit else None
-        )
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Fallback legacy sync failed for {table_name}: {e}")
-        return False
-
-
-def _fallback_to_legacy_sync_simple(tables: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int]):
-    """Simple fallback when all else fails"""
-    click.echo("⚠️  Using basic fallback mode")
-    
-    for table_name in tables:
-        success = _fallback_to_legacy_sync(table_name, backup_only, redshift_only, limit)
-        if success:
-            click.echo(f"  ✅ {table_name} completed")
-        else:
-            click.echo(f"  ❌ {table_name} failed")
-
-
-def _sync_with_default_pipeline(tables: List[str], backup_only: bool, redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int]):
-    """Handle sync with default pipeline configuration"""
-    click.echo("📋 Using default pipeline configuration")
-    
-    # Get default pipeline and execute with new multi-schema system
-    pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config("default")
-    
-    # Register tables dynamically if needed
-    for table_name in tables:
-        if table_name not in pipeline_config.tables:
-            multi_schema_ctx.config_manager.register_table_dynamically("default", table_name)
-    
-    # Execute sync using pipeline system
-    success_count = 0
-    for table_name in tables:
-        table_config = pipeline_config.tables[table_name]
-        success = _execute_table_sync(
-            pipeline_config, table_config,
-            backup_only, redshift_only, limit, False, max_workers, max_chunks
-        )
-        if success:
-            success_count += 1
-    
-    if success_count == len(tables):
-        click.echo(f"✅ Sync completed: {success_count}/{len(tables)} tables")
-    else:
-        click.echo(f"⚠️  Sync completed with issues: {success_count}/{len(tables)} tables")
 
 
 def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool):
@@ -1206,12 +1056,14 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             }
             
     except ImportError as e:
-        # Fall back to v1.0.0 style sync
-        logger.warning(f"Multi-schema backup strategies not available, falling back to v1.0.0 mode: {e}")
-        legacy_result = _fallback_to_legacy_sync(table_config.full_name, backup_only, redshift_only, limit)
+        # v1.0.0 compatibility removed - fail with clear error message
+        error_msg = f"Required backup strategies not available: {e}. Ensure all dependencies are installed."
+        click.echo(f"  ❌ {table_config.full_name} failed: {error_msg}")
+        logger.error(f"ImportError during table sync for {table_config.full_name}: {e}")
         return {
-            "success": legacy_result,
-            "rows_processed": 0,  # Legacy mode doesn't provide metrics
+            "success": False,
+            "error_message": error_msg,
+            "rows_processed": 0,
             "files_created": 0,
             "duration": 0
         }
