@@ -5,7 +5,7 @@ pipeline:
   description: "US Data Warehouse Unidw DB → Redshift Settlement DWS Schema"
   source: "US_DW_UNIDW_DIRECT"        # unidw database
   target: "redshift_settlement_dws_direct"      # settlement dws schema
-  s3_config: "s3_prod"                # Production S3 bucket
+  s3_config: "s3_qa"                # Production S3 bucket
   version: "1.2.0"
   
   processing:
