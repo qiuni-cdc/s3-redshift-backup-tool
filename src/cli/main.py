@@ -1623,7 +1623,9 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                     s3_config_name=pipeline_s3_config
                 )
             except Exception as e:
+                import traceback
                 click.echo(f"⚠️  Warning: Failed to load pipeline config: {e}")
+                click.echo(f"Debug traceback:\n{traceback.format_exc()}", err=True)
 
         if not config:
             click.echo("❌ Failed to create configuration from pipeline", err=True)
