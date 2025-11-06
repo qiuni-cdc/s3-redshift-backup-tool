@@ -436,6 +436,7 @@ class ConfigurationManager:
             s3=pipeline_section.get('s3', {}),
             default_table_config=pipeline_section.get('default_table_config', {}),
             tables=table_configs,
+            s3_config=pipeline_section.get('s3_config'),  # Read S3 config from pipeline YAML
             metadata=pipeline_section.get('metadata', {})
         )
     
