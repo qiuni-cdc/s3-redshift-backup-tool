@@ -341,16 +341,16 @@ class AppConfig(BaseSettings):
                 'compression_level': self.backup.compression_level,
             },
             'ssh': {
-                'bastion_host': self.ssh.bastion_host,
-                'bastion_user': self.ssh.bastion_user,
-                'bastion_key_path': self.ssh.bastion_key_path,
-                'local_port': self.ssh.local_port,
+                'bastion_host': self.ssh.bastion_host if self.ssh is not None else None,
+                'bastion_user': self.ssh.bastion_user if self.ssh is not None else None,
+                'bastion_key_path': self.ssh.bastion_key_path if self.ssh is not None else None,
+                'local_port': self.ssh.local_port if self.ssh is not None else 0,
             },
             'redshift_ssh': {
-                'bastion_host': self.redshift_ssh.host,
-                'bastion_user': self.redshift_ssh.username,
-                'bastion_key_path': self.redshift_ssh.private_key_path,
-                'local_port': self.redshift_ssh.local_port,
+                'bastion_host': self.redshift_ssh.host if self.redshift_ssh is not None else None,
+                'bastion_user': self.redshift_ssh.username if self.redshift_ssh is not None else None,
+                'bastion_key_path': self.redshift_ssh.private_key_path if self.redshift_ssh is not None else None,
+                'local_port': self.redshift_ssh.local_port if self.redshift_ssh is not None else 0,
             }
         }
     

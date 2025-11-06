@@ -237,13 +237,17 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
     
     def _ensure_shared_ssh_tunnel(self):
         """Ensure shared SSH tunnel is established and available for all threads"""
+        # Skip SSH tunnel if SSH is disabled
+        if self.config.ssh is None:
+            raise RuntimeError("SSH tunnel is not configured but _ensure_shared_ssh_tunnel was called")
+
         with self._connection_lock:
             if self._shared_ssh_tunnel is None or not self._shared_ssh_tunnel.is_active:
                 self.logger.logger.info("Establishing shared SSH tunnel for intra-table parallel processing")
-                
+
                 # Create SSH tunnel
                 from sshtunnel import SSHTunnelForwarder
-                
+
                 self._shared_ssh_tunnel = SSHTunnelForwarder(
                     (self.config.ssh.bastion_host, 22),
                     ssh_username=self.config.ssh.bastion_user,

@@ -132,14 +132,14 @@ class ConnectionManager:
     @contextmanager
     def ssh_tunnel(self, connection_name: Optional[str] = None) -> Generator[int, None, None]:
         """
-        Create SSH tunnel and return local port.
-        
+        Create SSH tunnel and return local port (or None for direct connection).
+
         Args:
             connection_name: Optional connection name to use specific SSH configuration
-        
+
         Yields:
-            Local port number for the established tunnel
-            
+            Local port number for the established tunnel, or None for direct connection
+
         Raises:
             ConnectionError: If tunnel establishment fails
         """
@@ -148,8 +148,22 @@ class ConnectionManager:
             # Get connection configuration (from registry or fallback)
             conn_config_obj = self.get_connection_config(connection_name)
             ssh_config = conn_config_obj.ssh_tunnel
-            
-            logger.info("Establishing SSH tunnel", 
+
+            # Check if SSH is disabled
+            if not ssh_config.get('enabled', True):
+                logger.info("SSH tunnel disabled, using direct connection",
+                           connection_name=connection_name or "default")
+                yield None
+                return
+
+            # Check if global SSH config is None (when ssh_tunnel.enabled: false)
+            if self.config.ssh is None:
+                logger.info("SSH tunnel disabled (global config is None), using direct connection",
+                           connection_name=connection_name or "default")
+                yield None
+                return
+
+            logger.info("Establishing SSH tunnel",
                        bastion_host=ssh_config.get('host', self.config.ssh.bastion_host),
                        connection_name=connection_name or "default")
             
@@ -212,13 +226,17 @@ class ConnectionManager:
     def redshift_ssh_tunnel(self) -> Generator[int, None, None]:
         """
         Create SSH tunnel for Redshift connection and return local port.
-        
+
         Yields:
             Local port number for the established Redshift tunnel
-            
+
         Raises:
             ConnectionError: If tunnel establishment fails
         """
+        # Guard: this method should only be called when Redshift SSH is configured
+        if self.config.redshift_ssh is None:
+            raise RuntimeError("Redshift SSH is not configured but redshift_ssh_tunnel was called")
+
         tunnel = None
         try:
             logger.info("Establishing Redshift SSH tunnel", bastion_host=self.config.redshift_ssh.host)
@@ -311,18 +329,34 @@ class ConnectionManager:
         try:
             # Get connection configuration (from registry or fallback)
             conn_config_obj = self.get_connection_config(connection_name)
-            
-            logger.info(
-                "Establishing database connection", 
-                local_port=local_port,
-                connection_name=connection_name or "default",
-                database=conn_config_obj.database
-            )
-            
+
+            # Determine host and port based on whether SSH tunnel is used
+            if local_port is None:
+                # Direct connection (no SSH tunnel)
+                host = conn_config_obj.host
+                port = conn_config_obj.port
+                logger.info(
+                    "Establishing direct database connection",
+                    host=host,
+                    port=port,
+                    connection_name=connection_name or "default",
+                    database=conn_config_obj.database
+                )
+            else:
+                # Connection through SSH tunnel
+                host = '127.0.0.1'
+                port = local_port
+                logger.info(
+                    "Establishing database connection through SSH tunnel",
+                    local_port=local_port,
+                    connection_name=connection_name or "default",
+                    database=conn_config_obj.database
+                )
+
             # Connection configuration
             conn_config = {
-                'host': '127.0.0.1',
-                'port': local_port,
+                'host': host,
+                'port': port,
                 'user': conn_config_obj.username,
                 'password': conn_config_obj.password,
                 'database': conn_config_obj.database,
@@ -619,7 +653,7 @@ class ConnectionManager:
         # Test SSH connectivity using configured connection
         try:
             # Use the connection config that was populated by create_app_config
-            if hasattr(self.config, 'ssh') and self.config.ssh.bastion_host:
+            if hasattr(self.config, 'ssh') and self.config.ssh is not None and self.config.ssh.bastion_host:
                 with self.ssh_tunnel() as local_port:
                     health['ssh'] = 'OK'
             else:

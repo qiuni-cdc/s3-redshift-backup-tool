@@ -1111,7 +1111,10 @@ def status(ctx):
         click.echo("📋 Configuration:")
         click.echo(f"   Database: {config.database.host}:{config.database.port}")
         click.echo(f"   S3 Bucket: {config.s3.bucket_name}")
-        click.echo(f"   SSH Host: {config.ssh.bastion_host}")
+        if config.ssh is not None:
+            click.echo(f"   SSH Host: {config.ssh.bastion_host}")
+        else:
+            click.echo(f"   SSH Host: Direct connection (no SSH tunnel)")
         click.echo(f"   Log Level: {config.log_level}")
         click.echo()
         
@@ -1150,12 +1153,15 @@ def status(ctx):
             
             # Test SSH configuration
             try:
-                from pathlib import Path
-                ssh_key_path = Path(config.ssh.bastion_key_path)
-                if ssh_key_path.exists():
-                    click.echo(f"   ✅ SSH Key: OK (file exists)")
+                if config.ssh is not None:
+                    from pathlib import Path
+                    ssh_key_path = Path(config.ssh.bastion_key_path)
+                    if ssh_key_path.exists():
+                        click.echo(f"   ✅ SSH Key: OK (file exists)")
+                    else:
+                        click.echo(f"   ❌ SSH Key: File not found at {config.ssh.bastion_key_path}")
                 else:
-                    click.echo(f"   ❌ SSH Key: File not found at {config.ssh.bastion_key_path}")
+                    click.echo(f"   ⚠️  SSH Key: Direct connection (SSH disabled)")
             except Exception as ssh_error:
                 click.echo(f"   ⚠️  SSH Key: {ssh_error}")
         
@@ -1382,9 +1388,9 @@ def config(ctx, output: str):
             'database': config.database.database
         },
         'ssh': {
-            'bastion_host': config.ssh.bastion_host,
-            'bastion_user': config.ssh.bastion_user,
-            'bastion_key_path': config.ssh.bastion_key_path
+            'bastion_host': config.ssh.bastion_host if config.ssh is not None else None,
+            'bastion_user': config.ssh.bastion_user if config.ssh is not None else None,
+            'bastion_key_path': config.ssh.bastion_key_path if config.ssh is not None else None
         },
         's3': {
             'bucket_name': config.s3.bucket_name,

@@ -59,7 +59,7 @@ class RedshiftLoader:
         
         try:
             # Setup SSH tunnel if Redshift needs it
-            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
+            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh is not None and self.config.redshift_ssh.host:
                 tunnel = SSHTunnelForwarder(
                     (self.config.redshift_ssh.host, 22),
                     ssh_username=self.config.redshift_ssh.username,
