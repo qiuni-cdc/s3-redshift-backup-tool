@@ -636,8 +636,9 @@ class GeminiRedshiftLoader:
     def _redshift_connection(self):
         """Context manager for Redshift database connections"""
         try:
-            # Use Redshift SSH tunnel if configured (skip if None or placeholder)
+            # Use Redshift SSH tunnel if configured and not None
             if (hasattr(self.config, 'redshift_ssh') and
+                self.config.redshift_ssh is not None and
                 self.config.redshift_ssh.host and
                 self.config.redshift_ssh.host not in ['None', '', 'null']):
                 with self.connection_manager.redshift_ssh_tunnel() as local_port:
@@ -785,8 +786,9 @@ class GeminiRedshiftLoader:
     def _redshift_connection(self):
         """Context manager for Redshift database connections"""
         try:
-            # Use Redshift SSH tunnel if configured (skip if None or placeholder)
+            # Use Redshift SSH tunnel if configured and not None
             if (hasattr(self.config, 'redshift_ssh') and
+                self.config.redshift_ssh is not None and
                 self.config.redshift_ssh.host and
                 self.config.redshift_ssh.host not in ['None', '', 'null']):
                 with self.connection_manager.redshift_ssh_tunnel() as local_port:

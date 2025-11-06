@@ -1203,75 +1203,88 @@ class ConfigurationManager:
 
         logger.debug(f"Creating AppConfig from source={source_name}, target={target_name}, s3_config={s3_name}")
 
-        # Temporarily set environment variables for AppConfig to pick up
-        # This is the bridge between YAML config and Pydantic BaseSettings
-        # Note: No defaults here - let AppConfig's Pydantic defaults handle missing values
-        env_mapping = {
-            # Database (source)
-            'DB_HOST': source_config.get('host'),
-            'DB_PORT': source_config.get('port'),
-            'DB_USER': source_config.get('username'),
-            'DB_PASSWORD': source_config.get('password'),
-            'DB_DATABASE': source_config.get('database'),
+        # Import config classes
+        from src.config.settings import DatabaseConfig, SSHConfig, S3Config, RedshiftConfig, RedshiftSSHConfig, BackupConfig
+        from pydantic import SecretStr
 
-            # SSH tunnel (source)
-            'SSH_BASTION_HOST': source_config.get('ssh_tunnel', {}).get('host'),
-            'SSH_BASTION_USER': source_config.get('ssh_tunnel', {}).get('username'),
-            'SSH_BASTION_KEY_PATH': source_config.get('ssh_tunnel', {}).get('private_key_path'),
-            'SSH_LOCAL_PORT': source_config.get('ssh_tunnel', {}).get('local_port'),
-
-            # Redshift (target)
-            'REDSHIFT_HOST': target_config.get('host'),
-            'REDSHIFT_PORT': target_config.get('port'),
-            'REDSHIFT_USER': target_config.get('username'),
-            'REDSHIFT_PASSWORD': target_config.get('password'),
-            'REDSHIFT_DATABASE': target_config.get('database'),
-            'REDSHIFT_SCHEMA': target_config.get('schema'),
-
-            # Redshift SSH tunnel (target)
-            'REDSHIFT_SSH_HOST': target_config.get('ssh_tunnel', {}).get('host'),
-            'REDSHIFT_SSH_USERNAME': target_config.get('ssh_tunnel', {}).get('username'),
-            'REDSHIFT_SSH_PRIVATE_KEY_PATH': target_config.get('ssh_tunnel', {}).get('private_key_path'),
-            'REDSHIFT_SSH_LOCAL_PORT': target_config.get('ssh_tunnel', {}).get('local_port'),
-
-            # S3
-            'S3_BUCKET_NAME': s3_config.get('bucket_name'),
-            'S3_ACCESS_KEY': s3_config.get('access_key_id'),
-            'S3_SECRET_KEY': s3_config.get('secret_access_key'),
-            'S3_REGION': s3_config.get('region'),
-            'S3_INCREMENTAL_PATH': s3_config.get('incremental_path'),
-            'S3_HIGH_WATERMARK_KEY': s3_config.get('high_watermark_key'),
-            'S3_MULTIPART_THRESHOLD': s3_config.get('performance', {}).get('multipart_threshold'),
-            'S3_MULTIPART_CHUNKSIZE': s3_config.get('performance', {}).get('multipart_chunksize'),
-            'S3_MAX_CONCURRENCY': s3_config.get('performance', {}).get('max_concurrency'),
-            'S3_MAX_POOL_CONNECTIONS': s3_config.get('performance', {}).get('max_pool_connections'),
-            'S3_RETRY_MAX_ATTEMPTS': s3_config.get('performance', {}).get('retry_max_attempts'),
-            'S3_RETRY_MODE': s3_config.get('performance', {}).get('retry_mode'),
-
-            # Backup
-            'BACKUP_BATCH_SIZE': backup_config.get('batch_size'),
-            'BACKUP_MAX_WORKERS': backup_config.get('max_workers'),
-            'BACKUP_RETRY_ATTEMPTS': backup_config.get('retry_attempts'),
-            'BACKUP_TIMEOUT_SECONDS': backup_config.get('timeout_seconds'),
-            'BACKUP_MEMORY_LIMIT_MB': backup_config.get('memory_limit_mb'),
-            'BACKUP_GC_THRESHOLD': backup_config.get('gc_threshold'),
-            'BACKUP_MEMORY_CHECK_INTERVAL': backup_config.get('memory_check_interval'),
-            'BACKUP_ENABLE_COMPRESSION': backup_config.get('enable_compression'),
-            'BACKUP_COMPRESSION_LEVEL': backup_config.get('compression_level'),
-            'BACKUP_TARGET_ROWS_PER_CHUNK': backup_config.get('target_rows_per_chunk'),
-            'BACKUP_MAX_ROWS_PER_CHUNK': backup_config.get('max_rows_per_chunk'),
-        }
-
-        # Set environment variables from connections.yml
-        # Since we've already loaded .env via _load_dotenv(), we can just override
-        # the env vars with YAML values (which have ${VAR} already substituted)
-        for key, value in env_mapping.items():
-            if value is not None:  # Only set non-None values
-                os.environ[key] = str(value)  # Convert to string for env vars
-
-        # Create AppConfig - it will see values from connections.yml
-        # Plus DEBUG/LOG_LEVEL from .env
+        # Build AppConfig directly from YAML data (no env var bridge)
         app_config = AppConfig()
+
+        # Database config (source)
+        app_config._database = DatabaseConfig(
+            host=source_config.get('host'),
+            port=source_config.get('port', 3306),
+            user=source_config.get('username'),
+            password=SecretStr(source_config.get('password')) if source_config.get('password') else None,
+            database=source_config.get('database')
+        )
+
+        # SSH config (source) - only if enabled
+        source_ssh = source_config.get('ssh_tunnel', {})
+        if source_ssh.get('enabled', False):
+            app_config._ssh = SSHConfig(
+                bastion_host=source_ssh.get('host'),
+                bastion_user=source_ssh.get('username'),
+                bastion_key_path=source_ssh.get('private_key_path'),
+                local_port=source_ssh.get('local_port', 0)
+            )
+        else:
+            # No SSH tunnel - set to None or create placeholder that won't be used
+            app_config._ssh = None
+
+        # Redshift config (target)
+        app_config._redshift = RedshiftConfig(
+            host=target_config.get('host'),
+            port=target_config.get('port', 5439),
+            user=target_config.get('username'),
+            password=SecretStr(target_config.get('password')) if target_config.get('password') else None,
+            database=target_config.get('database'),
+            schema=target_config.get('schema', 'public')
+        )
+
+        # Redshift SSH config (target) - only if enabled
+        target_ssh = target_config.get('ssh_tunnel', {})
+        if target_ssh.get('enabled', False):
+            app_config._redshift_ssh = RedshiftSSHConfig(
+                host=target_ssh.get('host'),
+                username=target_ssh.get('username'),
+                private_key_path=target_ssh.get('private_key_path'),
+                local_port=target_ssh.get('local_port', 0)
+            )
+        else:
+            # No SSH tunnel - set to None
+            app_config._redshift_ssh = None
+
+        # S3 config
+        app_config._s3 = S3Config(
+            bucket_name=s3_config.get('bucket_name'),
+            access_key=s3_config.get('access_key_id'),
+            secret_key=SecretStr(s3_config.get('secret_access_key')) if s3_config.get('secret_access_key') else None,
+            region=s3_config.get('region', 'us-west-2'),
+            incremental_path=s3_config.get('incremental_path', 'incremental/'),
+            high_watermark_key=s3_config.get('high_watermark_key', 'high_watermark'),
+            multipart_threshold=s3_config.get('performance', {}).get('multipart_threshold', 8388608),
+            multipart_chunksize=s3_config.get('performance', {}).get('multipart_chunksize', 8388608),
+            max_concurrency=s3_config.get('performance', {}).get('max_concurrency', 10),
+            max_pool_connections=s3_config.get('performance', {}).get('max_pool_connections', 10),
+            retry_max_attempts=s3_config.get('performance', {}).get('retry_max_attempts', 3),
+            retry_mode=s3_config.get('performance', {}).get('retry_mode', 'standard')
+        )
+
+        # Backup config
+        app_config._backup = BackupConfig(
+            batch_size=backup_config.get('batch_size', 10000),
+            max_workers=backup_config.get('max_workers', 4),
+            retry_attempts=backup_config.get('retry_attempts', 3),
+            timeout_seconds=backup_config.get('timeout_seconds', 300),
+            memory_limit_mb=backup_config.get('memory_limit_mb', 512),
+            gc_threshold=backup_config.get('gc_threshold', 100),
+            memory_check_interval=backup_config.get('memory_check_interval', 10),
+            enable_compression=backup_config.get('enable_compression', True),
+            compression_level=backup_config.get('compression_level', 6),
+            target_rows_per_chunk=backup_config.get('target_rows_per_chunk', 50000),
+            max_rows_per_chunk=backup_config.get('max_rows_per_chunk', 100000)
+        )
 
         logger.info(
             f"Created AppConfig from connections.yml: "
