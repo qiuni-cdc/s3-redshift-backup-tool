@@ -1301,7 +1301,7 @@ class ConfigurationManager:
 
         logger.info(
             f"Created AppConfig from connections.yml: "
-            f"source={source_name}, target={target_name}"
+            f"source={source_connection}, target={target_connection}"
         )
 
         return app_config
