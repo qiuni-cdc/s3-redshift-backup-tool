@@ -24,7 +24,7 @@ from src.config.settings import AppConfig
 from src.backup.sequential import SequentialBackupStrategy
 from src.backup.inter_table import InterTableBackupStrategy
 # from src.backup.intra_table import IntraTableBackupStrategy  # Disabled: complex with bugs
-from src.utils.logging import setup_logging, configure_logging_from_config
+from src.utils.logging import setup_logging, configure_logging_from_config, BackupLogger
 from src.utils.exceptions import BackupSystemError, ConfigurationError
 from src.core.connections import ConnectionManager
 from src.cli.airflow_integration import SyncExecutionTracker
