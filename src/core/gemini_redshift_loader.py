@@ -576,15 +576,33 @@ class GeminiRedshiftLoader:
         cursor = None
         try:
             cursor = conn.cursor()
-            
-            # Check if table has column mappings
+
+            # Get source columns from schema manager to build explicit column list
+            # This allows Redshift table to have extra columns (like created_at with DEFAULT)
             column_list = ""
-            if full_table_name and self.column_mapper.has_mapping(full_table_name):
-                # Get the parquet schema to know source columns
-                # For now, we'll rely on Redshift's automatic column matching
-                # In a full implementation, we'd read the parquet schema
-                logger.info(f"Table {full_table_name} has column mappings - using automatic matching")
-            
+            if full_table_name and hasattr(self, 'schema_manager'):
+                try:
+                    # Get the schema from MySQL source (what's actually in the Parquet file)
+                    pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
+                    if pyarrow_schema:
+                        # Build column list from source schema
+                        source_columns = [field.name for field in pyarrow_schema]
+
+                        # Apply column mappings if they exist
+                        if self.column_mapper.has_mapping(full_table_name):
+                            mapped_columns = []
+                            for col in source_columns:
+                                mapped_col = self.column_mapper.get_target_column(full_table_name, col)
+                                mapped_columns.append(mapped_col)
+                            column_list = f" ({', '.join(mapped_columns)})"
+                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns")
+                        else:
+                            column_list = f" ({', '.join(source_columns)})"
+                            logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
+                except Exception as e:
+                    logger.warning(f"Failed to build column list from schema: {e}, using default matching")
+                    column_list = ""
+
             # Build COPY command for direct parquet loading
             copy_command = f"""
                 COPY {self.config.redshift.schema}.{table_name}{column_list}
@@ -726,15 +744,33 @@ class GeminiRedshiftLoader:
         cursor = None
         try:
             cursor = conn.cursor()
-            
-            # Check if table has column mappings
+
+            # Get source columns from schema manager to build explicit column list
+            # This allows Redshift table to have extra columns (like created_at with DEFAULT)
             column_list = ""
-            if full_table_name and self.column_mapper.has_mapping(full_table_name):
-                # Get the parquet schema to know source columns
-                # For now, we'll rely on Redshift's automatic column matching
-                # In a full implementation, we'd read the parquet schema
-                logger.info(f"Table {full_table_name} has column mappings - using automatic matching")
-            
+            if full_table_name and hasattr(self, 'schema_manager'):
+                try:
+                    # Get the schema from MySQL source (what's actually in the Parquet file)
+                    pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
+                    if pyarrow_schema:
+                        # Build column list from source schema
+                        source_columns = [field.name for field in pyarrow_schema]
+
+                        # Apply column mappings if they exist
+                        if self.column_mapper.has_mapping(full_table_name):
+                            mapped_columns = []
+                            for col in source_columns:
+                                mapped_col = self.column_mapper.get_target_column(full_table_name, col)
+                                mapped_columns.append(mapped_col)
+                            column_list = f" ({', '.join(mapped_columns)})"
+                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns")
+                        else:
+                            column_list = f" ({', '.join(source_columns)})"
+                            logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
+                except Exception as e:
+                    logger.warning(f"Failed to build column list from schema: {e}, using default matching")
+                    column_list = ""
+
             # Build COPY command for direct parquet loading
             copy_command = f"""
                 COPY {self.config.redshift.schema}.{table_name}{column_list}
