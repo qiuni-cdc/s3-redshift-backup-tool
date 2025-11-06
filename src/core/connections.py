@@ -107,21 +107,18 @@ class ConnectionManager:
     
     def _validate_config(self):
         """Validate connection configuration (lazy validation for SSH)"""
+        # Skip all SSH validation if SSH is disabled (config.ssh is None)
+        if self.config.ssh is None:
+            return
+
         # Skip SSH validation for placeholder/template values
         ssh_key_path_str = self.config.ssh.bastion_key_path
         if ssh_key_path_str.startswith('/path/to/'):
-            # Placeholder value - skip validation
-            logger.debug("Skipping SSH validation for placeholder path")
             return
 
         # Only validate SSH key if it exists (lazy validation)
         ssh_key_path = Path(ssh_key_path_str)
         if not ssh_key_path.exists():
-            # Don't raise error - just log warning
-            # Actual validation will happen when SSH tunnel is created
-            logger.warning(
-                f"SSH key file not found: {ssh_key_path} (will fail if SSH tunnel is used)"
-            )
             return
 
         # Validate SSH key permissions (should be 600)
