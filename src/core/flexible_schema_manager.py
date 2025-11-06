@@ -859,10 +859,12 @@ class FlexibleSchemaManager:
                     redshift_type = "VARCHAR(65535)"
                 
                 columns.append(f"    {safe_column_name} {redshift_type}")
-            
+
+            # Join columns outside f-string (can't use backslash inside f-string expression)
+            columns_str = ',\n'.join(columns)
             ddl = f"""
 CREATE TABLE IF NOT EXISTS {clean_name} (
-{',\\n'.join(columns)}
+{columns_str}
 );
             """.strip()
             
