@@ -132,7 +132,25 @@ Examples:
     return parser.parse_args()
 
 
-def get_mysql_table_count(table_name: str) -> int:
+def get_source_connection_from_pipeline(pipeline_name: str) -> str:
+    """Get the source connection name from a pipeline configuration"""
+    import yaml
+
+    pipeline_path = PROJECT_ROOT / "config" / "pipelines" / f"{pipeline_name}.yml"
+    if not pipeline_path.exists():
+        raise FileNotFoundError(f"Pipeline configuration not found: {pipeline_path}")
+
+    with open(pipeline_path, 'r') as f:
+        pipeline_config = yaml.safe_load(f)
+
+    source_connection = pipeline_config.get('pipeline', {}).get('source')
+    if not source_connection:
+        raise ValueError(f"Pipeline '{pipeline_name}' missing 'source' configuration")
+
+    return source_connection
+
+
+def get_mysql_table_count(table_name: str, connection_name: str) -> int:
     """Get the row count from a MySQL table using existing connection infrastructure"""
     try:
         # Initialize connection registry (uses project root's connections.yml)
@@ -140,9 +158,10 @@ def get_mysql_table_count(table_name: str) -> int:
         conn_registry = ConnectionRegistry(config_path=str(config_path))
 
         logger.info(f"🔍 Querying MySQL table count for: {table_name}")
+        logger.info(f"📡 Using connection: {connection_name}")
 
-        # Use existing MySQL connection logic (using US_DW_UNIDW_SSH connection)
-        with conn_registry.get_mysql_connection('US_DW_UNIDW_SSH') as conn:
+        # Use the connection specified by the pipeline
+        with conn_registry.get_mysql_connection(connection_name) as conn:
             cursor = conn.cursor()
             query = f"SELECT COUNT(*) FROM {table_name}"
             logger.info(f"📊 Executing MySQL query: {query}")
@@ -158,7 +177,7 @@ def get_mysql_table_count(table_name: str) -> int:
         raise
 
 
-def delete_mysql_table_records(table_name: str) -> bool:
+def delete_mysql_table_records(table_name: str, connection_name: str) -> bool:
     """Delete all records from a MySQL table using existing connection infrastructure"""
     try:
         # Initialize connection registry (uses project root's connections.yml)
@@ -166,9 +185,10 @@ def delete_mysql_table_records(table_name: str) -> bool:
         conn_registry = ConnectionRegistry(config_path=str(config_path))
 
         logger.info(f"🗑️ Deleting all records from MySQL table: {table_name}")
+        logger.info(f"📡 Using connection: {connection_name}")
 
-        # Use existing MySQL connection logic (using US_DW_UNIDW_SSH connection)
-        with conn_registry.get_mysql_connection('US_DW_UNIDW_SSH') as conn:
+        # Use the connection specified by the pipeline
+        with conn_registry.get_mysql_connection(connection_name) as conn:
             cursor = conn.cursor()
 
             # First get count before deletion for logging
@@ -321,7 +341,7 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
         return False, "", str(e)
 
 
-def run_sync_command(table_name, pipeline, limit=None, backup_only=False, redshift_only=False):
+def run_sync_command(table_name, pipeline, connection_name, limit=None, backup_only=False, redshift_only=False):
     """
     Run the sync command with JSON output
 
@@ -433,7 +453,7 @@ def run_sync_command(table_name, pipeline, limit=None, backup_only=False, redshi
 
                 # Special validation for unidw.dw_parcel_detail_tool_temp table
                 if table_name == "unidw.dw_parcel_detail_tool_temp":
-                    return validate_parcel_detail_sync(table_name, table_results, overall_status, json_data, json_filename)
+                    return validate_parcel_detail_sync(table_name, table_results, overall_status, json_data, json_filename, connection_name)
 
                 # Determine success based on overall status for other tables
                 if overall_status == 'success':
@@ -460,7 +480,7 @@ def run_sync_command(table_name, pipeline, limit=None, backup_only=False, redshi
         return False, {}, ""
 
 
-def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_status: str, json_data: dict, json_filename: str) -> tuple:
+def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_status: str, json_data: dict, json_filename: str, connection_name: str) -> tuple:
     """
     Special validation for unidw.dw_parcel_detail_tool_temp table.
 
@@ -474,6 +494,7 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
         overall_status: Overall sync status
         json_data: Complete JSON data
         json_filename: JSON output filename
+        connection_name: MySQL connection name from pipeline configuration
 
     Returns:
         tuple: (success: bool, json_data: dict, json_filename: str)
@@ -500,7 +521,7 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
 
         # Get actual count from MySQL source table
         try:
-            mysql_count = get_mysql_table_count(table_name)
+            mysql_count = get_mysql_table_count(table_name, connection_name)
         except Exception as e:
             logger.error(f"❌ Failed to query MySQL table count: {e}")
             logger.error(f"❌ {table_name} sync validation failed:")
@@ -545,6 +566,14 @@ def main():
     # Get pipeline from args (with default)
     PIPELINE = args.pipeline
 
+    # Get source connection from pipeline configuration
+    try:
+        SOURCE_CONNECTION = get_source_connection_from_pipeline(PIPELINE)
+        logger.info(f"📡 Source connection from pipeline: {SOURCE_CONNECTION}")
+    except Exception as e:
+        logger.error(f"❌ Failed to get source connection from pipeline '{PIPELINE}': {e}")
+        sys.exit(1)
+
     # Determine execution mode
     if args.sync_only:
         logger.info("🚀 Starting Sync-Only Pipeline")
@@ -585,7 +614,8 @@ def main():
     logger.info(f"🔄 Phase {phase_number}: Running sync command")
     sync_success, sync_data, json_file = run_sync_command(
         table_name=TABLE_NAME,
-        pipeline=PIPELINE
+        pipeline=PIPELINE,
+        connection_name=SOURCE_CONNECTION
     )
 
     # Report pipeline status
@@ -611,7 +641,7 @@ def main():
     delete_success = True  # Default to true if we skip deletion
     if sync_success:
         logger.info(f"🗑️ Step 1: Deleting all records from {TABLE_NAME}")
-        delete_success = delete_mysql_table_records(TABLE_NAME)
+        delete_success = delete_mysql_table_records(TABLE_NAME, SOURCE_CONNECTION)
     else:
         logger.info("⏭️ Step 1: Skipping MySQL record deletion (sync failed)")
 
