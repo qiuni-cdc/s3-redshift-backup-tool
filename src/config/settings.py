@@ -35,9 +35,18 @@ class SSHConfig(BaseSettings):
     
     @validator('bastion_key_path')
     def validate_key_path(cls, v):
-        """Validate SSH key file exists"""
-        if not Path(v).exists():
-            raise ValueError(f"SSH key file not found: {v}")
+        """Validate SSH key file exists (skip validation for placeholder paths)"""
+        # Skip validation for placeholder/template values
+        if v and v.startswith('/path/to/'):
+            # Placeholder value from template - will be validated when actually used
+            return v
+
+        # Only validate real paths
+        if v and not Path(v).exists():
+            # Don't raise error - just return the path
+            # Validation will happen when connection is actually used
+            import logging
+            logging.warning(f"SSH key file not found: {v} (will fail if this connection is used)")
         return v
 
 
@@ -107,9 +116,18 @@ class RedshiftSSHConfig(BaseSettings):
 
     @validator('private_key_path')
     def validate_key_path(cls, v):
-        """Validate SSH key file exists"""
+        """Validate SSH key file exists (skip validation for placeholder paths)"""
+        # Skip validation for placeholder/template values
+        if v and v.startswith('/path/to/'):
+            # Placeholder value from template - will be validated when actually used
+            return v
+
+        # Only validate real paths
         if v and not Path(v).exists():
-            raise ValueError(f"Redshift SSH key file not found: {v}")
+            # Don't raise error - just return the path
+            # Validation will happen when connection is actually used
+            import logging
+            logging.warning(f"Redshift SSH key file not found: {v} (will fail if this connection is used)")
         return v
 
 

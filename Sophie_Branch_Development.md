@@ -1700,6 +1700,144 @@ python parcel_download_and_sync.py -d "" --hours "-0.5"
 - ✅ Configurable pipeline/date/hours
 - ✅ No more "bastion_host" errors
 
+## Path Resolution with .resolve() - Symlink Handling (November 2025)
+
+### 核心问题：符号链接（Symlink）
+
+**问题：** 当脚本通过符号链接访问时，使用 `.absolute()` 无法找到项目真实位置，导致 `ModuleNotFoundError: No module named 'src'`
+
+**原因：** `.absolute()` 只将路径转为绝对路径，但**不解析符号链接**
+
+### `.absolute()` vs `.resolve()` 的关键区别
+
+**`.absolute()`** - 将路径转为绝对路径，但**不解析符号链接**
+
+**`.resolve()`** - 将路径转为绝对路径，**并且解析所有符号链接**
+
+### 实际部署场景分析
+
+#### 使用 `.absolute()` 时（有问题）：
+```bash
+# ETL 服务器上有符号链接
+/opt/etl/scripts/parcel_download_and_sync.py → /home/tianzi/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_and_sync.py
+
+# 会发生什么：
+__file__ = '/opt/etl/scripts/parcel_download_and_sync.py'
+PROJECT_ROOT = /opt/etl  # ❌ 错误 - 这里没有 'src/' 目录！
+```
+
+#### 使用 `.resolve()` 时（正确）：
+```bash
+# 同样的符号链接
+/opt/etl/scripts/parcel_download_and_sync.py → /home/tianzi/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_and_sync.py
+
+# 会发生什么：
+__file__ = '/opt/etl/scripts/parcel_download_and_sync.py'
+SCRIPT_PATH.resolve() = '/home/tianzi/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_and_sync.py'
+PROJECT_ROOT = /home/tianzi/s3-redshift-backup-tool  # ✅ 正确 - 有 'src/' 目录！
+```
+
+### 为什么生产环境常用符号链接？
+
+ETL 服务器经常使用符号链接的原因：
+
+1. **版本管理**: `/opt/app/current → /opt/app/releases/v1.2.3`
+2. **共享脚本**: 多个用户访问同一代码库
+3. **环境隔离**: 不同环境指向同一份代码
+4. **便于回滚**: 只需改变符号链接，而不是移动文件
+
+### 具体例子
+
+假设你的 ETL 服务器部署结构是这样的：
+
+```bash
+# 实际代码在这里
+/home/tianzi/s3-redshift-backup-tool/
+├── src/
+│   └── core/
+│       └── connection_registry.py
+└── parcel_download_tool_etl/
+    └── parcel_download_and_sync.py
+
+# 但你创建了符号链接方便执行
+/opt/etl/scripts/parcel_download_and_sync.py → /home/tianzi/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_and_sync.py
+```
+
+**使用 `.absolute()` 时：**
+- `__file__` 是 `/opt/etl/scripts/parcel_download_and_sync.py`
+- `.parent` 是 `/opt/etl/scripts`
+- `.parent.parent` 是 `/opt/etl`
+- 尝试导入 `/opt/etl/src` → **找不到！❌**
+
+**使用 `.resolve()` 时：**
+- `__file__` 是 `/opt/etl/scripts/parcel_download_and_sync.py`
+- `.resolve()` **跟踪符号链接** → `/home/tianzi/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_and_sync.py`
+- `.parent` 是 `/home/tianzi/s3-redshift-backup-tool/parcel_download_tool_etl`
+- `.parent.parent` 是 `/home/tianzi/s3-redshift-backup-tool`
+- 尝试导入 `/home/tianzi/s3-redshift-backup-tool/src` → **找到了！✅**
+
+### Fix Applied
+
+**File:** `parcel_download_tool_etl/parcel_download_and_sync.py:44-73`
+
+```python
+# BEFORE (BROKEN):
+PROJECT_ROOT = Path(__file__).absolute().parent.parent
+
+# AFTER (FIXED):
+SCRIPT_PATH = Path(__file__).resolve()  # ← .resolve() 解析符号链接
+SCRIPT_DIR = SCRIPT_PATH.parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+
+# Added verification
+if not (PROJECT_ROOT / 'src').exists():
+    print(f"ERROR: Cannot find 'src' directory at {PROJECT_ROOT}")
+    print(f"Script location: {SCRIPT_PATH}")
+    print(f"Script directory: {SCRIPT_DIR}")
+    print(f"Project root: {PROJECT_ROOT}")
+    print(f"Contents of project root: {list(PROJECT_ROOT.iterdir())}")
+    sys.exit(1)
+
+# Add project root to Python path
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import with error handling
+try:
+    from src.core.connection_registry import ConnectionRegistry
+except ModuleNotFoundError as e:
+    print(f"ERROR: Failed to import ConnectionRegistry: {e}")
+    print(f"Python path: {sys.path}")
+    print(f"Project root: {PROJECT_ROOT}")
+    print(f"src directory exists: {(PROJECT_ROOT / 'src').exists()}")
+    sys.exit(1)
+```
+
+### 额外的诊断信息
+
+修复还添加了验证代码，如果仍然失败，这些信息可以帮助你**精确诊断**问题，看到底是不是符号链接导致的：
+
+```python
+if not (PROJECT_ROOT / 'src').exists():
+    print(f"ERROR: Cannot find 'src' directory at {PROJECT_ROOT}")
+    print(f"Script location: {SCRIPT_PATH}")  # 显示是否使用了符号链接
+    print(f"Script directory: {SCRIPT_DIR}")
+    print(f"Project root: {PROJECT_ROOT}")
+```
+
+### Key Benefits
+
+- ✅ **"追根溯源"**: 无论脚本通过什么路径、什么符号链接访问，都能找到真实文件位置
+- ✅ **生产环境兼容**: 支持符号链接部署模式（版本管理、共享脚本等）
+- ✅ **准确的路径解析**: 始终基于真实文件位置计算项目根目录
+- ✅ **详细的诊断信息**: 出错时显示完整路径信息，方便快速定位问题
+- ✅ **防止 ModuleNotFoundError**: 确保 `src/` 模块能被正确导入
+
+### 总结
+
+**`.resolve()` 的作用就是"追根溯源"**，无论你的脚本是通过什么路径、什么符号链接访问的，它都会找到**真实的文件位置**，从而确保项目结构被正确识别。这就是为什么这个修复能让你的脚本在 ETL 服务器上正常工作！
+
+**Bottom Line**: Symlinks are common in production deployments, and `.resolve()` ensures your script works correctly by following symlinks to the real file location, preventing path-related import errors.
+
 ## Multi-S3 Bucket Configuration (November 2025)
 
 ### Issue: Single S3 Bucket for Both QA and Production

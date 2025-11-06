@@ -1,7 +1,14 @@
 #!/bin/bash
 
-# Set absolute paths
-PROJECT_ROOT="$HOME/s3-redshift-backup-tool"
+# Detect environment and set paths accordingly
+if [ -d "/home/ubuntu/data-integration" ]; then
+    # ETL Server (ubuntu user)
+    PROJECT_ROOT="/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool"
+else
+    # Dev Machine (tianzi user)
+    PROJECT_ROOT="$HOME/s3-redshift-backup-tool"
+fi
+
 SCRIPT_DIR="$PROJECT_ROOT/parcel_download_tool_etl"
 VENV_PATH="$PROJECT_ROOT/s3_backup_venv"
 LOG_DIR="$SCRIPT_DIR/parcel_download_hourly_log"
