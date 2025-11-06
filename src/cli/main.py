@@ -291,10 +291,10 @@ def _load_pipeline_config(pipeline_name: str) -> Optional[Dict[str, Any]]:
 def _get_canonical_connection_for_pipeline(pipeline_name: str) -> Optional[str]:
     """
     Get canonical connection name for a pipeline to enable unified watermark scoping.
-    
+
     Args:
         pipeline_name: Name of the pipeline to lookup
-        
+
     Returns:
         Canonical connection name, or None if pipeline not found/no mapping
     """
@@ -303,23 +303,52 @@ def _get_canonical_connection_for_pipeline(pipeline_name: str) -> Optional[str]:
         config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
         if not config_path.exists():
             return None
-            
+
         # Load pipeline configuration to get source connection
         import yaml
         with open(config_path, 'r') as f:
             pipeline_config = yaml.safe_load(f)
-            
+
         pipeline_info = pipeline_config.get('pipeline', {})
         source_connection = pipeline_info.get('source')
-        
+
         if source_connection:
             # Return the canonical connection name for unified scoping
             return source_connection
         else:
             return None
-            
+
+
+def _get_s3_config_for_pipeline(pipeline_name: str) -> Optional[str]:
+    """
+    Get S3 config name for a pipeline.
+
+    Args:
+        pipeline_name: Name of the pipeline to lookup
+
+    Returns:
+        S3 config name (e.g., 's3_qa', 's3_prod'), or None if pipeline not found
+    """
+    try:
+        config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
+        if not config_path.exists():
+            return None
+
+        # Load pipeline configuration to get s3_config
+        import yaml
+        with open(config_path, 'r') as f:
+            pipeline_config = yaml.safe_load(f)
+
+        pipeline_info = pipeline_config.get('pipeline', {})
+        s3_config = pipeline_info.get('s3_config')
+
+        if s3_config:
+            return s3_config
+        else:
+            return None
+
     except Exception as e:
-        # Fallback gracefully - if we can't resolve, let pipeline scoping work as before
+        logger.warning(f"Failed to load S3 config from pipeline {pipeline_name}: {e}")
         return None
 
 
@@ -2082,31 +2111,24 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
         s3-backup s3clean clean -t settlement.settlement_return_detail --force
     """
     config = ctx.obj['config']
+    config_manager = ctx.obj.get('config_manager')
     backup_logger = ctx.obj['backup_logger']
-    
+
     try:
         import boto3
         from datetime import datetime, timedelta
         import re
-        
-        # Initialize S3 client
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=config.s3.access_key,
-            aws_secret_access_key=config.s3.secret_key.get_secret_value(),
-            region_name=config.s3.region
-        )
-        
+
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
         effective_table_name = table
         canonical_scope = None
         scope_info = "Default scope"
-        
+
         # Auto-detect pipeline with conflict validation (smart approach)
         effective_pipeline = pipeline
         if table and not pipeline and not connection:
             detected_pipeline, all_matches, is_ambiguous = _auto_detect_pipeline_for_table(table)
-            
+
             if is_ambiguous:
                 click.echo(f"⚠️  Multiple pipelines could handle table '{table}':", err=True)
                 for match in all_matches:
@@ -2119,7 +2141,42 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                 click.echo(f"🔍 Auto-detected pipeline: {effective_pipeline} for table {table}")
             else:
                 click.echo(f"⚠️  No pipeline found for table '{table}', using default scope")
-        
+
+        # IMPORTANT: Recreate config with correct S3 config from pipeline
+        if effective_pipeline and config_manager:
+            pipeline_s3_config = _get_s3_config_for_pipeline(effective_pipeline)
+            if pipeline_s3_config:
+                # Recreate AppConfig with the correct S3 config from pipeline
+                try:
+                    # Get pipeline configuration to extract source and target
+                    config_path = Path("config/pipelines") / f"{effective_pipeline}.yml"
+                    if config_path.exists():
+                        import yaml
+                        with open(config_path, 'r') as f:
+                            pipeline_config = yaml.safe_load(f)
+
+                        pipeline_info = pipeline_config.get('pipeline', {})
+                        source_name = pipeline_info.get('source')
+                        target_name = pipeline_info.get('target')
+
+                        # Recreate config with correct S3 config
+                        config = config_manager.create_app_config(
+                            source_connection=source_name,
+                            target_connection=target_name,
+                            s3_config_name=pipeline_s3_config
+                        )
+                        logger.info(f"Recreated AppConfig with S3 config '{pipeline_s3_config}' from pipeline '{effective_pipeline}'")
+                except Exception as e:
+                    logger.warning(f"Failed to recreate config with pipeline S3 config: {e}, using default")
+
+        # Initialize S3 client
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=config.s3.access_key,
+            aws_secret_access_key=config.s3.secret_key.get_secret_value(),
+            region_name=config.s3.region
+        )
+
         if table and (effective_pipeline or connection):
             if effective_pipeline and connection:
                 click.echo("❌ Cannot specify both --pipeline and --connection", err=True)
