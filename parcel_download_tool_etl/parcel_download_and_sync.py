@@ -45,13 +45,32 @@ from pathlib import Path
 import logging
 
 # Project root directory (parent of parcel_download_tool_etl)
-PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+# Get the absolute path to this script
+SCRIPT_PATH = Path(__file__).resolve()
+SCRIPT_DIR = SCRIPT_PATH.parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+
+# Verify the project structure
+if not (PROJECT_ROOT / 'src').exists():
+    print(f"ERROR: Cannot find 'src' directory at {PROJECT_ROOT}")
+    print(f"Script location: {SCRIPT_PATH}")
+    print(f"Script directory: {SCRIPT_DIR}")
+    print(f"Project root: {PROJECT_ROOT}")
+    print(f"Contents of project root: {list(PROJECT_ROOT.iterdir())}")
+    sys.exit(1)
 
 # Add project root to Python path so we can import from src/
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import existing connection management
-from src.core.connection_registry import ConnectionRegistry
+try:
+    from src.core.connection_registry import ConnectionRegistry
+except ModuleNotFoundError as e:
+    print(f"ERROR: Failed to import ConnectionRegistry: {e}")
+    print(f"Python path: {sys.path}")
+    print(f"Project root: {PROJECT_ROOT}")
+    print(f"src directory exists: {(PROJECT_ROOT / 'src').exists()}")
+    sys.exit(1)
 
 # Configure logging
 logging.basicConfig(
