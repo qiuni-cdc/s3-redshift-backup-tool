@@ -580,13 +580,10 @@ class GeminiRedshiftLoader:
             # Get source columns from schema manager to build explicit column list
             # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
             column_list = ""
-            logger.info(f"🔍 Building column list - full_table_name='{full_table_name}', has_schema_manager={hasattr(self, 'schema_manager')}")
             if full_table_name and hasattr(self, 'schema_manager'):
                 try:
                     # Get the schema from MySQL source (what's actually in the Parquet file)
-                    logger.info(f"🔍 Getting schema for {full_table_name}")
                     pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
-                    logger.info(f"🔍 Schema retrieved: {pyarrow_schema is not None}, fields: {len(pyarrow_schema) if pyarrow_schema else 0}")
                     if pyarrow_schema:
                         # Build column list from source schema
                         source_columns = [field.name for field in pyarrow_schema]
@@ -595,32 +592,19 @@ class GeminiRedshiftLoader:
                         # E.g., "us_dw_unidw_direct:unidw.dw_parcel_detail_tool_temp" vs "unidw.dw_parcel_detail_tool_temp"
                         unscoped_table_name = full_table_name.split(':', 1)[1] if ':' in full_table_name else full_table_name
 
-                        has_mapping = False
-                        mapping_table_name = None
+                        # Use existing ColumnMapper method - tries scoped first, then unscoped
+                        mapped_list = self.column_mapper.get_copy_column_list(full_table_name, source_columns)
+                        if not mapped_list:
+                            mapped_list = self.column_mapper.get_copy_column_list(unscoped_table_name, source_columns)
 
-                        # Try scoped name first, then unscoped
-                        if self.column_mapper.has_mapping(full_table_name):
-                            has_mapping = True
-                            mapping_table_name = full_table_name
-                        elif self.column_mapper.has_mapping(unscoped_table_name):
-                            has_mapping = True
-                            mapping_table_name = unscoped_table_name
-
-                        # Apply column mappings if they exist
-                        if has_mapping:
-                            mapped_columns = []
-                            for col in source_columns:
-                                mapped_col = self.column_mapper.get_target_column(mapping_table_name, col)
-                                mapped_columns.append(mapped_col)
-                            column_list = f" ({', '.join(mapped_columns)})"
-                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns (from {mapping_table_name})")
+                        if mapped_list:
+                            column_list = f" {mapped_list}"
+                            logger.info(f"Using explicit column list with mappings: {len(source_columns)} columns")
                         else:
                             column_list = f" ({', '.join(source_columns)})"
                             logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
                 except Exception as e:
                     logger.warning(f"Failed to build column list from schema: {e}, using default matching")
-                    import traceback
-                    logger.warning(f"Traceback: {traceback.format_exc()}")
                     column_list = ""
 
             # Build COPY command for direct parquet loading
@@ -632,7 +616,6 @@ class GeminiRedshiftLoader:
                 FORMAT AS PARQUET;
             """
 
-            logger.info(f"🔍 Final column_list: '{column_list}'")
             logger.info(f"Executing COPY command for {s3_uri}")
             
             # Execute COPY command
@@ -769,13 +752,10 @@ class GeminiRedshiftLoader:
             # Get source columns from schema manager to build explicit column list
             # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
             column_list = ""
-            logger.info(f"🔍 Building column list - full_table_name='{full_table_name}', has_schema_manager={hasattr(self, 'schema_manager')}")
             if full_table_name and hasattr(self, 'schema_manager'):
                 try:
                     # Get the schema from MySQL source (what's actually in the Parquet file)
-                    logger.info(f"🔍 Getting schema for {full_table_name}")
                     pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
-                    logger.info(f"🔍 Schema retrieved: {pyarrow_schema is not None}, fields: {len(pyarrow_schema) if pyarrow_schema else 0}")
                     if pyarrow_schema:
                         # Build column list from source schema
                         source_columns = [field.name for field in pyarrow_schema]
@@ -784,32 +764,19 @@ class GeminiRedshiftLoader:
                         # E.g., "us_dw_unidw_direct:unidw.dw_parcel_detail_tool_temp" vs "unidw.dw_parcel_detail_tool_temp"
                         unscoped_table_name = full_table_name.split(':', 1)[1] if ':' in full_table_name else full_table_name
 
-                        has_mapping = False
-                        mapping_table_name = None
+                        # Use existing ColumnMapper method - tries scoped first, then unscoped
+                        mapped_list = self.column_mapper.get_copy_column_list(full_table_name, source_columns)
+                        if not mapped_list:
+                            mapped_list = self.column_mapper.get_copy_column_list(unscoped_table_name, source_columns)
 
-                        # Try scoped name first, then unscoped
-                        if self.column_mapper.has_mapping(full_table_name):
-                            has_mapping = True
-                            mapping_table_name = full_table_name
-                        elif self.column_mapper.has_mapping(unscoped_table_name):
-                            has_mapping = True
-                            mapping_table_name = unscoped_table_name
-
-                        # Apply column mappings if they exist
-                        if has_mapping:
-                            mapped_columns = []
-                            for col in source_columns:
-                                mapped_col = self.column_mapper.get_target_column(mapping_table_name, col)
-                                mapped_columns.append(mapped_col)
-                            column_list = f" ({', '.join(mapped_columns)})"
-                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns (from {mapping_table_name})")
+                        if mapped_list:
+                            column_list = f" {mapped_list}"
+                            logger.info(f"Using explicit column list with mappings: {len(source_columns)} columns")
                         else:
                             column_list = f" ({', '.join(source_columns)})"
                             logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
                 except Exception as e:
                     logger.warning(f"Failed to build column list from schema: {e}, using default matching")
-                    import traceback
-                    logger.warning(f"Traceback: {traceback.format_exc()}")
                     column_list = ""
 
             # Build COPY command for direct parquet loading
@@ -821,7 +788,6 @@ class GeminiRedshiftLoader:
                 FORMAT AS PARQUET;
             """
 
-            logger.info(f"🔍 Final column_list: '{column_list}'")
             logger.info(f"Executing COPY command for {s3_uri}")
             
             # Execute COPY command
