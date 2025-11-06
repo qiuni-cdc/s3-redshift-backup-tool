@@ -530,18 +530,29 @@ except ImportError:
 @click.option('--estimate', is_flag=True, 
               help='Estimate completion time')
 @click.pass_context
-def backup(ctx, tables: List[str], strategy: str, max_workers: int, 
+def backup(ctx, tables: List[str], strategy: str, max_workers: int,
            batch_size: int, dry_run: bool, estimate: bool):
     """
-    Run incremental backup for specified tables.
-    
+    [DEPRECATED - v1.0.0 command removed]
+
+    This command has been removed in v1.2.0. Please use the multi-pipeline sync command instead.
+
+    Migration:
+        Old: s3-backup backup -t settlement.table_name
+        New: python -m src.cli.main sync pipeline -p <pipeline_name> -t table_name
+
     Examples:
-        s3-backup backup -t settlement.settlement_normal_delivery_detail -s sequential
-        s3-backup backup -t table1 -t table2 -s inter-table --max-workers 8
-        s3-backup backup -t table1 -s sequential --estimate
+        python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.table_name
+        python -m src.cli.main config list-pipelines  # See available pipelines
     """
-    config = ctx.obj['config']
-    backup_logger = ctx.obj['backup_logger']
+    click.echo("❌ DEPRECATED: The 'backup' command has been removed in v1.2.0", err=True)
+    click.echo("", err=True)
+    click.echo("Please use the multi-pipeline sync command instead:", err=True)
+    click.echo("  python -m src.cli.main sync pipeline -p <pipeline_name> -t <table_name>", err=True)
+    click.echo("", err=True)
+    click.echo("To see available pipelines:", err=True)
+    click.echo("  python -m src.cli.main config list-pipelines", err=True)
+    sys.exit(1)
     
     # Override config with CLI options if provided
     if max_workers:
@@ -689,45 +700,44 @@ def backup(ctx, tables: List[str], strategy: str, max_workers: int,
 @click.option('--connection', '-c', help='Connection name for multi-schema support (v1.2.0)')
 @click.option('--json-output', is_flag=True, help='Output sync results in JSON format for automation')
 @click.pass_context
-def sync(ctx, tables: List[str], strategy: str, max_workers: int, 
+def sync(ctx, tables: List[str], strategy: str, max_workers: int,
          batch_size: int, dry_run: bool, backup_only: bool, redshift_only: bool, verify_data: bool, limit: int, max_chunks: int, pipeline: str, connection: str, json_output: bool):
     """
-    Complete MySQL → S3 → Redshift synchronization with flexible schema discovery.
-    
-    This command performs the full pipeline:
-    1. Extracts data from MySQL to S3 (parquet format) with dynamic schema discovery
-    2. Loads S3 parquet data directly into Redshift using FORMAT AS PARQUET
-    3. Updates watermarks for both MySQL and Redshift stages
-    4. Provides comprehensive status tracking per table
-    
-    Perfect for production data synchronization with any table structure.
-    
+    [DEPRECATED - v1.0.0 command removed]
+
+    This command has been removed in v1.2.0. Please use the multi-pipeline sync subcommands instead.
+
+    Migration:
+        Old: s3-backup sync -t settlement.table_name
+        New: python -m src.cli.main sync pipeline -p <pipeline_name> -t table_name
+
+    New v1.2.0 Commands:
+        - sync pipeline -p <pipeline>    # Sync all tables in a pipeline
+        - sync connection -c <connection> -t <table>  # Sync specific table from connection
+
     Examples:
-        # Full sync (MySQL → S3 → Redshift) with auto-detection
-        s3-backup sync -t settlement.settlement_claim_detail
-        
-        # Multiple tables with parallel strategy  
-        s3-backup sync -t settlement.settlement_claim_detail \\
-                       -t settlement.settlement_normal_delivery_detail \\
-                       -s inter-table
-        
-        # Explicit pipeline specification (v1.2.0 multi-schema)
-        s3-backup sync -t settlement.settle_orders -p us_dw_pipeline
-        
-        # Backup only (MySQL → S3)
-        s3-backup sync -t settlement.table_name --backup-only
-        
-        # Redshift loading only (S3 → Redshift)
-        s3-backup sync -t settlement.table_name --redshift-only
-        
-        # Test run without execution
-        s3-backup sync -t settlement.table_name --dry-run
-        
-        # Uses row-based chunking for reliable incremental processing
-        s3-backup sync -t settlement.table_name
+        # Sync all tables in a pipeline
+        python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline
+
+        # Sync specific table
+        python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.table_name
+
+        # See available pipelines
+        python -m src.cli.main config list-pipelines
     """
-    config = ctx.obj['config']
-    backup_logger = ctx.obj['backup_logger']
+    click.echo("❌ DEPRECATED: The 'sync' command has been removed in v1.2.0", err=True)
+    click.echo("", err=True)
+    click.echo("Please use the multi-pipeline sync subcommands instead:", err=True)
+    click.echo("", err=True)
+    click.echo("  # Sync all tables in a pipeline:", err=True)
+    click.echo("  python -m src.cli.main sync pipeline -p <pipeline_name>", err=True)
+    click.echo("", err=True)
+    click.echo("  # Sync specific table:", err=True)
+    click.echo("  python -m src.cli.main sync pipeline -p <pipeline_name> -t <table_name>", err=True)
+    click.echo("", err=True)
+    click.echo("To see available pipelines:", err=True)
+    click.echo("  python -m src.cli.main config list-pipelines", err=True)
+    sys.exit(1)
     
     # Validate options
     if backup_only and redshift_only:
@@ -1111,10 +1121,24 @@ def sync(ctx, tables: List[str], strategy: str, max_workers: int,
 @cli.command()
 @click.pass_context
 def status(ctx):
-    """Check system status and connectivity."""
-    config = ctx.obj['config']
-    backup_logger = ctx.obj['backup_logger']
-    
+    """
+    [DEPRECATED - v1.0.0 command removed]
+
+    This command has been removed in v1.2.0. Use the connections and config commands instead.
+
+    Alternatives:
+        python -m src.cli.main connections health  # Check connection health
+        python -m src.cli.main config status       # Check pipeline status
+        python -m src.cli.main connections list    # List all connections
+    """
+    click.echo("❌ DEPRECATED: The 'status' command has been removed in v1.2.0", err=True)
+    click.echo("", err=True)
+    click.echo("Use these v1.2.0 alternatives instead:", err=True)
+    click.echo("  python -m src.cli.main connections health  # Check connection health", err=True)
+    click.echo("  python -m src.cli.main config status       # Check pipeline status", err=True)
+    click.echo("  python -m src.cli.main connections list    # List all connections", err=True)
+    sys.exit(1)
+
     click.echo("🔍 System Status Check")
     click.echo("=" * 50)
     
@@ -1242,11 +1266,26 @@ def status(ctx):
 
 
 @cli.command()
-@click.option('--strategy', type=click.Choice(['sequential', 'inter-table']), 
+@click.option('--strategy', type=click.Choice(['sequential', 'inter-table']),
               help='Show info for specific strategy')
 @click.pass_context
 def info(ctx, strategy: str):
-    """Show information about backup strategies."""
+    """
+    [DEPRECATED - v1.0.0 command removed]
+
+    This command has been removed in v1.2.0.
+
+    For pipeline information, use:
+        python -m src.cli.main config show-pipeline -p <pipeline_name>
+        python -m src.cli.main config list-pipelines
+    """
+    click.echo("❌ DEPRECATED: The 'info' command has been removed in v1.2.0", err=True)
+    click.echo("", err=True)
+    click.echo("For pipeline information, use:", err=True)
+    click.echo("  python -m src.cli.main config show-pipeline -p <pipeline_name>", err=True)
+    click.echo("  python -m src.cli.main config list-pipelines", err=True)
+    sys.exit(1)
+
     config = ctx.obj['config']
     
     if strategy:
@@ -1306,7 +1345,27 @@ def info(ctx, strategy: str):
 @click.option('--confirm', is_flag=True, help='Confirm deletion')
 @click.pass_context
 def clean(ctx, bucket: str, prefix: str, older_than_days: int, dry_run: bool, confirm: bool):
-    """Clean old backup files from S3."""
+    """
+    [DEPRECATED - v1.0.0 command removed]
+
+    This command has been removed in v1.2.0. Use the s3clean command instead.
+
+    Migration:
+        Old: s3-backup clean --bucket my-bucket --older-than-days 30
+        New: python -m src.cli.main s3clean list -t <table_name> -p <pipeline>
+             python -m src.cli.main s3clean clean -t <table_name> -p <pipeline> --older-than "30d"
+
+    Examples:
+        python -m src.cli.main s3clean list -t unidw.table_name -p us_dw_unidw_2_public_pipeline
+        python -m src.cli.main s3clean clean -t unidw.table_name -p us_dw_unidw_2_public_pipeline --older-than "7d"
+    """
+    click.echo("❌ DEPRECATED: The 'clean' command has been removed in v1.2.0", err=True)
+    click.echo("", err=True)
+    click.echo("Use the s3clean command instead:", err=True)
+    click.echo("  python -m src.cli.main s3clean list -t <table_name> -p <pipeline>", err=True)
+    click.echo("  python -m src.cli.main s3clean clean -t <table_name> -p <pipeline> --older-than \"7d\"", err=True)
+    sys.exit(1)
+
     config = ctx.obj['config']
     backup_logger = ctx.obj['backup_logger']
     
@@ -1388,7 +1447,24 @@ def clean(ctx, bucket: str, prefix: str, older_than_days: int, dry_run: bool, co
 @click.option('--output', '-o', type=click.Path(), help='Output file path')
 @click.pass_context
 def config(ctx, output: str):
-    """Show current configuration."""
+    """
+    [DEPRECATED - v1.0.0 command removed]
+
+    This command has been removed in v1.2.0. Use the config subcommands instead.
+
+    Alternatives:
+        python -m src.cli.main config list-pipelines        # List all pipelines
+        python -m src.cli.main config show-pipeline -p <p>  # Show pipeline config
+        python -m src.cli.main connections list             # List connections
+    """
+    click.echo("❌ DEPRECATED: The 'config' command has been removed in v1.2.0", err=True)
+    click.echo("", err=True)
+    click.echo("Use the config subcommands instead:", err=True)
+    click.echo("  python -m src.cli.main config list-pipelines        # List all pipelines", err=True)
+    click.echo("  python -m src.cli.main config show-pipeline -p <p>  # Show pipeline config", err=True)
+    click.echo("  python -m src.cli.main connections list             # List connections", err=True)
+    sys.exit(1)
+
     config = ctx.obj['config']
     
     # Prepare config data (hide sensitive info)
@@ -1518,29 +1594,36 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
         # IMPORTANT: Recreate config with correct S3 config from pipeline
         config = None
         if effective_pipeline and config_manager:
-            pipeline_s3_config = _get_s3_config_for_pipeline(effective_pipeline)
-            if pipeline_s3_config:
-                # Recreate AppConfig with the correct S3 config from pipeline
-                try:
-                    # Get pipeline configuration to extract source and target
-                    config_path = Path("config/pipelines") / f"{effective_pipeline}.yml"
-                    if config_path.exists():
-                        import yaml
-                        with open(config_path, 'r') as f:
-                            pipeline_config = yaml.safe_load(f)
+            try:
+                # Get pipeline configuration to extract source, target, and s3_config
+                config_path = Path("config/pipelines") / f"{effective_pipeline}.yml"
+                if not config_path.exists():
+                    raise FileNotFoundError(f"Pipeline configuration not found: {config_path}")
 
-                        pipeline_info = pipeline_config.get('pipeline', {})
-                        source_name = pipeline_info.get('source')
-                        target_name = pipeline_info.get('target')
+                import yaml
+                with open(config_path, 'r') as f:
+                    pipeline_config = yaml.safe_load(f)
 
-                        # Recreate config with correct S3 config
-                        config = config_manager.create_app_config(
-                            source_connection=source_name,
-                            target_connection=target_name,
-                            s3_config_name=pipeline_s3_config
-                        )
-                except Exception as e:
-                    click.echo(f"⚠️  Warning: Failed to load pipeline config: {e}")
+                pipeline_info = pipeline_config.get('pipeline', {})
+                source_name = pipeline_info.get('source')
+                target_name = pipeline_info.get('target')
+                pipeline_s3_config = pipeline_info.get('s3_config')
+
+                if not source_name:
+                    raise ValueError(f"Pipeline '{effective_pipeline}' missing 'source' configuration")
+                if not target_name:
+                    raise ValueError(f"Pipeline '{effective_pipeline}' missing 'target' configuration")
+                if not pipeline_s3_config:
+                    raise ValueError(f"Pipeline '{effective_pipeline}' missing 's3_config' configuration")
+
+                # Recreate config with correct S3 config
+                config = config_manager.create_app_config(
+                    source_connection=source_name,
+                    target_connection=target_name,
+                    s3_config_name=pipeline_s3_config
+                )
+            except Exception as e:
+                click.echo(f"⚠️  Warning: Failed to load pipeline config: {e}")
 
         if not config:
             click.echo("❌ Failed to create configuration from pipeline", err=True)
@@ -1892,20 +1975,15 @@ def watermark_count(ctx, operation: str, table: str, count: int, pipeline: str, 
         # Validate consistency across systems
         s3-backup watermark-count validate-counts -t settlement.settlement_normal_delivery_detail
     """
-    config = ctx.obj['config']
+    config_manager = ctx.obj.get('config_manager')
     backup_logger = ctx.obj['backup_logger']
-    
+
     try:
-        from src.core.watermark_adapter import create_watermark_manager
-        from src.core.gemini_redshift_loader import GeminiRedshiftLoader
-        
-        watermark_manager = create_watermark_manager(config.to_dict())
-        
-        # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach) 
+        # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
         effective_table_name = table
         canonical_scope = None
         scope_info = "Default scope"
-        
+
         # Auto-detect pipeline with conflict validation (smart approach)
         effective_pipeline = pipeline
         if table and not pipeline and not connection:
@@ -1955,7 +2033,50 @@ def watermark_count(ctx, operation: str, table: str, count: int, pipeline: str, 
         if effective_table_name != table:
             click.echo(f"   Full identifier: {effective_table_name}")
         click.echo()
-        
+
+        # IMPORTANT: Recreate config with correct S3 config from pipeline
+        config = None
+        if effective_pipeline and config_manager:
+            try:
+                # Get pipeline configuration to extract source, target, and s3_config
+                config_path = Path("config/pipelines") / f"{effective_pipeline}.yml"
+                if not config_path.exists():
+                    raise FileNotFoundError(f"Pipeline configuration not found: {config_path}")
+
+                import yaml
+                with open(config_path, 'r') as f:
+                    pipeline_config = yaml.safe_load(f)
+
+                pipeline_info = pipeline_config.get('pipeline', {})
+                source_name = pipeline_info.get('source')
+                target_name = pipeline_info.get('target')
+                pipeline_s3_config = pipeline_info.get('s3_config')
+
+                if not source_name:
+                    raise ValueError(f"Pipeline '{effective_pipeline}' missing 'source' configuration")
+                if not target_name:
+                    raise ValueError(f"Pipeline '{effective_pipeline}' missing 'target' configuration")
+                if not pipeline_s3_config:
+                    raise ValueError(f"Pipeline '{effective_pipeline}' missing 's3_config' configuration")
+
+                # Recreate config with correct S3 config
+                config = config_manager.create_app_config(
+                    source_connection=source_name,
+                    target_connection=target_name,
+                    s3_config_name=pipeline_s3_config
+                )
+            except Exception as e:
+                click.echo(f"⚠️  Warning: Failed to load pipeline config: {e}")
+
+        if not config:
+            click.echo("❌ Failed to create configuration from pipeline", err=True)
+            click.echo("   Please ensure pipeline is correctly specified")
+            sys.exit(1)
+
+        # Use S3-based watermark system
+        from src.core.watermark_adapter import create_watermark_manager
+        watermark_manager = create_watermark_manager(config.to_dict())
+
         if operation == 'set-count':
             if count is None:
                 click.echo("❌ Count value required for set-count operation", err=True)
@@ -2124,7 +2245,6 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
         # Force clean without confirmation
         s3-backup s3clean clean -t settlement.settlement_return_detail --force
     """
-    config = ctx.obj['config']
     config_manager = ctx.obj.get('config_manager')
     backup_logger = ctx.obj['backup_logger']
 
@@ -2154,9 +2274,12 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                 effective_pipeline = detected_pipeline
                 click.echo(f"🔍 Auto-detected pipeline: {effective_pipeline} for table {table}")
             else:
-                click.echo(f"⚠️  No pipeline found for table '{table}', using default scope")
+                click.echo(f"❌ No pipeline found for table '{table}'. Pipeline required for v1.2.0", err=True)
+                click.echo(f"   Please specify --pipeline or --connection", err=True)
+                sys.exit(1)
 
         # IMPORTANT: Recreate config with correct S3 config from pipeline
+        config = None
         if effective_pipeline and config_manager:
             pipeline_s3_config = _get_s3_config_for_pipeline(effective_pipeline)
             if pipeline_s3_config:
@@ -2181,7 +2304,12 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                         )
                         logger.info(f"Recreated AppConfig with S3 config '{pipeline_s3_config}' from pipeline '{effective_pipeline}'")
                 except Exception as e:
-                    logger.warning(f"Failed to recreate config with pipeline S3 config: {e}, using default")
+                    logger.warning(f"Failed to recreate config with pipeline S3 config: {e}")
+
+        if not config:
+            click.echo("❌ Failed to create configuration from pipeline", err=True)
+            click.echo("   Please ensure pipeline is correctly specified", err=True)
+            sys.exit(1)
 
         # Initialize S3 client
         s3_client = boto3.client(
@@ -2790,17 +2918,19 @@ if __name__ == '__main__':
     @click.pass_context
     def validate_cdc(ctx, table: str, pipeline: str):
         """
-        Validate CDC strategy configuration for tables.
-        
-        Shows CDC strategy information and validates configuration.
-        
-        Examples:
-            # Validate CDC strategy for a table
-            s3-backup validate-cdc -t settlement.settle_orders -p us_dw_hybrid_v1_2
-            
-            # Show all available CDC strategies
-            s3-backup validate-cdc
+        [DEPRECATED - v1.0.0 command removed]
+
+        This command has been removed in v1.2.0.
+
+        For CDC configuration, use:
+            python -m src.cli.main config show-pipeline -p <pipeline_name>
         """
+        click.echo("❌ DEPRECATED: The 'validate-cdc' command has been removed in v1.2.0", err=True)
+        click.echo("", err=True)
+        click.echo("For CDC configuration, use:", err=True)
+        click.echo("  python -m src.cli.main config show-pipeline -p <pipeline_name>", err=True)
+        sys.exit(1)
+
         config = ctx.obj['config']
         
         if table and pipeline:
