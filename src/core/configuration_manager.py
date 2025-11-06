@@ -1161,23 +1161,33 @@ class ConfigurationManager:
         else:
             raise ValidationError(f"Connection '{connection_name}' not found in connections.yml")
 
-    def create_app_config(self, source_connection: Optional[str] = None, target_connection: Optional[str] = None, s3_config_name: Optional[str] = None) -> 'AppConfig':
+    def create_app_config(self, source_connection: str, target_connection: str, s3_config_name: str) -> 'AppConfig':
         """
-        Create AppConfig from connections.yml for backward compatibility.
+        Create AppConfig from connections.yml (v1.2.0 multi-pipeline system).
 
-        This allows existing backup strategies to work without modification
-        while using YAML-based configuration.
+        All parameters are REQUIRED - no v1.0.0 compatibility/defaults.
 
         Args:
-            source_connection: Source connection name (defaults to first source)
-            target_connection: Target connection name (defaults to first target)
-            s3_config_name: S3 config name (defaults to first available s3 config)
+            source_connection: Required source connection name
+            target_connection: Required target connection name
+            s3_config_name: Required S3 config name
 
         Returns:
             AppConfig instance populated from connections.yml
+
+        Raises:
+            ValueError: If any parameter is None or if connection/config not found
         """
         from src.config.settings import AppConfig
         import os
+
+        # Validate required parameters
+        if not source_connection:
+            raise ValueError("source_connection is required - v1.0.0 compatibility removed")
+        if not target_connection:
+            raise ValueError("target_connection is required - v1.0.0 compatibility removed")
+        if not s3_config_name:
+            raise ValueError("s3_config_name is required - v1.0.0 compatibility removed")
 
         # Get connections
         sources = self.connections_config.get('connections', {}).get('sources', {})
@@ -1191,17 +1201,20 @@ class ConfigurationManager:
         if not s3_configs:
             raise ValidationError("No S3 configurations defined in connections.yml")
 
-        # Use specified or first connection
-        source_name = source_connection or list(sources.keys())[0]
-        target_name = target_connection or list(targets.keys())[0]
-        s3_name = s3_config_name or list(s3_configs.keys())[0]
+        # Validate specified connections exist
+        if source_connection not in sources:
+            raise ValidationError(f"Source connection '{source_connection}' not found in connections.yml")
+        if target_connection not in targets:
+            raise ValidationError(f"Target connection '{target_connection}' not found in connections.yml")
+        if s3_config_name not in s3_configs:
+            raise ValidationError(f"S3 config '{s3_config_name}' not found in connections.yml")
 
-        source_config = sources[source_name]
-        target_config = targets[target_name]
-        s3_config = self.get_s3_config(s3_name)
+        source_config = sources[source_connection]
+        target_config = targets[target_connection]
+        s3_config = self.get_s3_config(s3_config_name)
         backup_config = self.connections_config.get('backup', {})
 
-        logger.debug(f"Creating AppConfig from source={source_name}, target={target_name}, s3_config={s3_name}")
+        logger.debug(f"Creating AppConfig from source={source_connection}, target={target_connection}, s3_config={s3_config_name}")
 
         # Import config classes
         from src.config.settings import DatabaseConfig, SSHConfig, S3Config, RedshiftConfig, RedshiftSSHConfig, BackupConfig

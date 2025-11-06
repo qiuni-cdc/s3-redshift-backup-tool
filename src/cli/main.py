@@ -444,53 +444,30 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
             include_caller=debug
         )
         
-        # Load configuration (migrated to YAML-based system)
+        # Load configuration (v1.2.0 multi-pipeline system - NO v1.0.0 compatibility)
         try:
             from src.core.configuration_manager import ConfigurationManager
 
             # Initialize ConfigurationManager to load connections.yml
             config_manager = ConfigurationManager()
 
-            # Create AppConfig from YAML (for backward compatibility with existing code)
-            config = config_manager.create_app_config()
-
             # Store config_manager in context for commands that need it
             ctx.obj['config_manager'] = config_manager
 
+            # NO global AppConfig - each command must specify pipeline/connection
+            ctx.obj['config'] = None  # Explicit None to catch v1.0.0 usage
+
         except Exception as e:
-            # Fallback to direct .env loading if YAML config fails
-            click.echo(f"⚠️  Failed to load YAML configuration: {e}")
-            click.echo("   Falling back to .env configuration...")
+            click.echo(f"❌ Failed to load configuration: {e}")
+            click.echo("   Please ensure config/connections.yml and config/pipelines/*.yml exist")
+            sys.exit(1)
 
-            if config_file:
-                config = AppConfig.load(config_file)
-            else:
-                config = AppConfig.load()
+        # Create BackupLogger (logging already configured above via setup_logging)
+        backup_logger = BackupLogger("cli")
 
-        # Override debug setting if specified
-        if debug:
-            config.debug = True
-            config.log_level = "DEBUG"
-        
-        # Configure application logging
-        backup_logger = configure_logging_from_config(config)
-        
-        # Validate configuration (but don't fail CLI initialization)
-        try:
-            errors = config.validate_all()
-            if errors:
-                click.echo("⚠️  Configuration warnings:")
-                for error in errors:
-                    click.echo(f"   - {error}")
-                click.echo()
-        except Exception as validation_error:
-            # Store validation error for later display but don't fail initialization
-            click.echo(f"⚠️  Configuration validation error: {validation_error}")
-            click.echo()
-        
         # Store in context
-        ctx.obj['config'] = config
         ctx.obj['backup_logger'] = backup_logger
+        # config already set to None above - no global config in v1.2.0
         ctx.obj['debug'] = debug
         
         # Integrate v1.1.0 Multi-Schema CLI Features

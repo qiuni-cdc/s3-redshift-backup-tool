@@ -71,63 +71,42 @@ class FlexibleSchemaManager:
             connection_scope, actual_table_name = table_name.split(':', 1)
             logger.info(f"Using connection scope: {connection_scope} for table: {actual_table_name}")
         
+        # All tables must be scoped in v1.2.0 - no v1.0.0 compatibility
+        if not connection_scope:
+            raise ValueError(
+                f"Table name must be scoped (connection:schema.table format). "
+                f"Got unscoped: {table_name}. "
+                f"v1.0.0 compatibility removed - all tables must specify connection scope."
+            )
+
+        if not self.connection_registry:
+            raise ValueError(
+                f"Connection registry not initialized. Cannot discover schema for {table_name}"
+            )
+
         try:
-            # Use scoped connection if available, otherwise fall back to default
-            if connection_scope and self.connection_registry:
-                # Use connection registry for scoped connections with context manager
-                with self.connection_registry.get_mysql_connection(connection_scope) as conn:
-                    cursor = conn.cursor(dictionary=True)
-                    
-                    try:
-                        # Get table structure from MySQL
-                        schema_info = self._get_mysql_table_info(cursor, actual_table_name)
-                        
-                        # Convert to PyArrow schema
-                        pyarrow_schema = self._create_pyarrow_schema(schema_info, actual_table_name)
-                        
-                        # Generate Redshift DDL
-                        redshift_ddl = self._generate_redshift_ddl(actual_table_name, schema_info)
-                        
-                        # Cache the result
-                        self._cache_schema(table_name, pyarrow_schema, redshift_ddl)
-                        
-                        logger.info(f"Dynamic schema discovered for {table_name}: {len(pyarrow_schema)} columns")
-                        return pyarrow_schema, redshift_ddl
-                        
-                    finally:
-                        cursor.close()
-            else:
-                # Only fall back to old connection manager for truly unscoped tables
-                if connection_scope:
-                    # For scoped tables, we must have connection registry
-                    logger.error(f"Scoped table {table_name} requires connection registry, but none available")
-                    raise ValueError(f"Connection registry required for scoped table {table_name}")
-                
-                # Fall back to old connection manager for non-scoped tables only
-                with self.connection_manager.ssh_tunnel() as local_port:
-                    with self.connection_manager.database_connection(local_port) as conn:
-                        cursor = conn.cursor(dictionary=True)
-                        
-                        try:
-                            # Get table structure from MySQL
-                            schema_info = self._get_mysql_table_info(cursor, actual_table_name)
-                            
-                            # Convert to PyArrow schema
-                            pyarrow_schema = self._create_pyarrow_schema(schema_info, actual_table_name)
-                            
-                            # Generate Redshift DDL
-                            redshift_ddl = self._generate_redshift_ddl(actual_table_name, schema_info)
-                            
-                            # Cache the result
-                            self._cache_schema(table_name, pyarrow_schema, redshift_ddl)
-                            
-                            logger.info(f"Dynamic schema discovered for {table_name}: {len(pyarrow_schema)} columns")
-                            return pyarrow_schema, redshift_ddl
-                        
-                        finally:
-                            # Ensure cursor is properly closed
-                            if cursor:
-                                cursor.close()
+            # Use connection registry for scoped connections with context manager
+            with self.connection_registry.get_mysql_connection(connection_scope) as conn:
+                cursor = conn.cursor(dictionary=True)
+
+                try:
+                    # Get table structure from MySQL
+                    schema_info = self._get_mysql_table_info(cursor, actual_table_name)
+
+                    # Convert to PyArrow schema
+                    pyarrow_schema = self._create_pyarrow_schema(schema_info, actual_table_name)
+
+                    # Generate Redshift DDL
+                    redshift_ddl = self._generate_redshift_ddl(actual_table_name, schema_info)
+
+                    # Cache the result
+                    self._cache_schema(table_name, pyarrow_schema, redshift_ddl)
+
+                    logger.info(f"Dynamic schema discovered for {table_name}: {len(pyarrow_schema)} columns")
+                    return pyarrow_schema, redshift_ddl
+
+                finally:
+                    cursor.close()
                     
         except Exception as e:
             logger.error(f"Failed to discover schema for {table_name}: {e}")

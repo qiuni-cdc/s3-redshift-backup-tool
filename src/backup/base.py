@@ -1274,36 +1274,30 @@ class BaseBackupStrategy(ABC):
     def database_session(self, connection_name: Optional[str] = None):
         """
         Context manager for database operations with multi-schema support.
-        
+
         Args:
-            connection_name: Optional connection name for multi-schema support.
-                           If None, uses v1.0.0 compatibility mode.
+            connection_name: Required connection name from connection registry.
+
+        Raises:
+            ValueError: If connection_name is None or connection_registry is not available
         """
-        if connection_name and self.connection_registry:
-            # Use connection registry for multi-schema support
-            try:
-                with self.connection_registry.get_mysql_connection(connection_name) as db_conn:
-                    config = self.connection_registry.get_connection(connection_name)
-                    self.logger.connection_established("Database", host=config.host, database=config.database)
-                    yield db_conn
-            except Exception as e:
-                self.logger.error_occurred(e, f"database_session({connection_name})")
-                raise
-            finally:
-                if connection_name:
-                    self.logger.connection_closed(f"Database({connection_name})")
-        else:
-            # Fall back to v1.0.0 compatibility mode
-            try:
-                with self.connection_manager.ssh_tunnel() as local_port:
-                    with self.connection_manager.database_connection(local_port) as db_conn:
-                        self.logger.connection_established("Database", host="localhost")
-                        yield db_conn
-            except Exception as e:
-                self.logger.error_occurred(e, "database_session")
-                raise
-            finally:
-                self.logger.connection_closed("Database")
+        if not connection_name:
+            raise ValueError("connection_name is required - v1.0.0 compatibility removed")
+
+        if not self.connection_registry:
+            raise ValueError("Connection registry not initialized - cannot perform database operations")
+
+        # Use connection registry for multi-schema support
+        try:
+            with self.connection_registry.get_mysql_connection(connection_name) as db_conn:
+                config = self.connection_registry.get_connection(connection_name)
+                self.logger.connection_established("Database", host=config.host, database=config.database)
+                yield db_conn
+        except Exception as e:
+            self.logger.error_occurred(e, f"database_session({connection_name})")
+            raise
+        finally:
+            self.logger.connection_closed(f"Database({connection_name})")
     
     def calculate_time_chunks(
         self, 
