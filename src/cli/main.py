@@ -468,7 +468,8 @@ def cli(ctx, debug, quiet, config_file, log_file, json_logs):
             sys.exit(1)
 
         # Create BackupLogger (logging already configured above via setup_logging)
-        backup_logger = BackupLogger("cli")
+        from src.utils.logging import get_logger
+        backup_logger = BackupLogger(get_logger("cli"))
 
         # Store in context
         ctx.obj['backup_logger'] = backup_logger
@@ -1462,25 +1463,20 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
         s3-backup watermark reset -t settlement.settlement_claim_detail --preserve-files
         s3-backup watermark list
     """
-    config = ctx.obj['config']
+    config_manager = ctx.obj.get('config_manager')
     backup_logger = ctx.obj['backup_logger']
-    
+
     try:
-        # Use S3-based watermark system (same as backup operations)
-        from src.core.watermark_adapter import create_watermark_manager
-        
-        watermark_manager = create_watermark_manager(config.to_dict())
-        
         # Handle v1.2.0 multi-schema table identification with smart validation (defensive approach)
         effective_table_name = table
         canonical_scope = None
         scope_info = "Default scope"
-        
+
         # Auto-detect pipeline with conflict validation (smart approach)
         effective_pipeline = pipeline
         if table and not pipeline and not connection:
             detected_pipeline, all_matches, is_ambiguous = _auto_detect_pipeline_for_table(table)
-            
+
             if is_ambiguous:
                 click.echo(f"⚠️  Multiple pipelines could handle table '{table}':", err=True)
                 for match in all_matches:
@@ -1519,6 +1515,42 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 canonical_scope = connection
                 scope_info = f"Connection: {connection}"
         
+        # IMPORTANT: Recreate config with correct S3 config from pipeline
+        config = None
+        if effective_pipeline and config_manager:
+            pipeline_s3_config = _get_s3_config_for_pipeline(effective_pipeline)
+            if pipeline_s3_config:
+                # Recreate AppConfig with the correct S3 config from pipeline
+                try:
+                    # Get pipeline configuration to extract source and target
+                    config_path = Path("config/pipelines") / f"{effective_pipeline}.yml"
+                    if config_path.exists():
+                        import yaml
+                        with open(config_path, 'r') as f:
+                            pipeline_config = yaml.safe_load(f)
+
+                        pipeline_info = pipeline_config.get('pipeline', {})
+                        source_name = pipeline_info.get('source')
+                        target_name = pipeline_info.get('target')
+
+                        # Recreate config with correct S3 config
+                        config = config_manager.create_app_config(
+                            source_connection=source_name,
+                            target_connection=target_name,
+                            s3_config_name=pipeline_s3_config
+                        )
+                except Exception as e:
+                    click.echo(f"⚠️  Warning: Failed to load pipeline config: {e}")
+
+        if not config:
+            click.echo("❌ Failed to create configuration from pipeline", err=True)
+            click.echo("   Please ensure pipeline is correctly specified")
+            sys.exit(1)
+
+        # Use S3-based watermark system (same as backup operations)
+        from src.core.watermark_adapter import create_watermark_manager
+        watermark_manager = create_watermark_manager(config.to_dict())
+
         click.echo(f"🔖 Watermark {operation.upper()}")
         if table:
             click.echo(f"   Table: {table}")
@@ -1526,7 +1558,7 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
             if effective_table_name != table:
                 click.echo(f"   Full identifier: {effective_table_name}")
         click.echo()
-        
+
         if operation == 'get':
             if not table:
                 click.echo("❌ Table name required for watermark operations", err=True)
