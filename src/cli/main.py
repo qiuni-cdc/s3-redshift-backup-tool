@@ -318,6 +318,11 @@ def _get_canonical_connection_for_pipeline(pipeline_name: str) -> Optional[str]:
         else:
             return None
 
+    except Exception as e:
+        # Fallback gracefully - if we can't resolve, let pipeline scoping work as before
+        logger.warning(f"Failed to load connection from pipeline {pipeline_name}: {e}")
+        return None
+
 
 def _get_s3_config_for_pipeline(pipeline_name: str) -> Optional[str]:
     """
