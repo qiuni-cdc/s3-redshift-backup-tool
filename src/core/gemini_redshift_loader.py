@@ -578,7 +578,7 @@ class GeminiRedshiftLoader:
             cursor = conn.cursor()
 
             # Get source columns from schema manager to build explicit column list
-            # This allows Redshift table to have extra columns (like created_at with DEFAULT)
+            # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
             column_list = ""
             if full_table_name and hasattr(self, 'schema_manager'):
                 try:
@@ -588,14 +588,29 @@ class GeminiRedshiftLoader:
                         # Build column list from source schema
                         source_columns = [field.name for field in pyarrow_schema]
 
-                        # Apply column mappings if they exist
+                        # Try to find column mappings - check both scoped and unscoped table names
+                        # E.g., "us_dw_unidw_direct:unidw.dw_parcel_detail_tool_temp" vs "unidw.dw_parcel_detail_tool_temp"
+                        unscoped_table_name = full_table_name.split(':', 1)[1] if ':' in full_table_name else full_table_name
+
+                        has_mapping = False
+                        mapping_table_name = None
+
+                        # Try scoped name first, then unscoped
                         if self.column_mapper.has_mapping(full_table_name):
+                            has_mapping = True
+                            mapping_table_name = full_table_name
+                        elif self.column_mapper.has_mapping(unscoped_table_name):
+                            has_mapping = True
+                            mapping_table_name = unscoped_table_name
+
+                        # Apply column mappings if they exist
+                        if has_mapping:
                             mapped_columns = []
                             for col in source_columns:
-                                mapped_col = self.column_mapper.get_target_column(full_table_name, col)
+                                mapped_col = self.column_mapper.get_target_column(mapping_table_name, col)
                                 mapped_columns.append(mapped_col)
                             column_list = f" ({', '.join(mapped_columns)})"
-                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns")
+                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns (from {mapping_table_name})")
                         else:
                             column_list = f" ({', '.join(source_columns)})"
                             logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
@@ -746,7 +761,7 @@ class GeminiRedshiftLoader:
             cursor = conn.cursor()
 
             # Get source columns from schema manager to build explicit column list
-            # This allows Redshift table to have extra columns (like created_at with DEFAULT)
+            # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
             column_list = ""
             if full_table_name and hasattr(self, 'schema_manager'):
                 try:
@@ -756,14 +771,29 @@ class GeminiRedshiftLoader:
                         # Build column list from source schema
                         source_columns = [field.name for field in pyarrow_schema]
 
-                        # Apply column mappings if they exist
+                        # Try to find column mappings - check both scoped and unscoped table names
+                        # E.g., "us_dw_unidw_direct:unidw.dw_parcel_detail_tool_temp" vs "unidw.dw_parcel_detail_tool_temp"
+                        unscoped_table_name = full_table_name.split(':', 1)[1] if ':' in full_table_name else full_table_name
+
+                        has_mapping = False
+                        mapping_table_name = None
+
+                        # Try scoped name first, then unscoped
                         if self.column_mapper.has_mapping(full_table_name):
+                            has_mapping = True
+                            mapping_table_name = full_table_name
+                        elif self.column_mapper.has_mapping(unscoped_table_name):
+                            has_mapping = True
+                            mapping_table_name = unscoped_table_name
+
+                        # Apply column mappings if they exist
+                        if has_mapping:
                             mapped_columns = []
                             for col in source_columns:
-                                mapped_col = self.column_mapper.get_target_column(full_table_name, col)
+                                mapped_col = self.column_mapper.get_target_column(mapping_table_name, col)
                                 mapped_columns.append(mapped_col)
                             column_list = f" ({', '.join(mapped_columns)})"
-                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns")
+                            logger.info(f"Using explicit column list with mappings: {len(mapped_columns)} columns (from {mapping_table_name})")
                         else:
                             column_list = f" ({', '.join(source_columns)})"
                             logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
