@@ -65,10 +65,8 @@ def _load_pipeline_config_for_tables(tables: List[str]) -> Optional[Dict[str, An
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-            logger.info(f"Successfully loaded pipeline config from {config_path}")
             return config
     except Exception as e:
-        logger.error(f"Failed to load pipeline config {config_path}: {e}")
         return None
 
 
@@ -94,7 +92,6 @@ def _create_cdc_strategy_for_table(pipeline_name: str, table_name: str):
         # Load pipeline configuration
         config_path = Path("config/pipelines") / f"{pipeline_name}.yml"
         if not config_path.exists():
-            logger.warning(f"Pipeline configuration not found: {config_path}")
             return None
         
         with open(config_path, 'r') as f:
@@ -320,7 +317,6 @@ def _get_canonical_connection_for_pipeline(pipeline_name: str) -> Optional[str]:
 
     except Exception as e:
         # Fallback gracefully - if we can't resolve, let pipeline scoping work as before
-        logger.warning(f"Failed to load connection from pipeline {pipeline_name}: {e}")
         return None
 
 
@@ -353,7 +349,6 @@ def _get_s3_config_for_pipeline(pipeline_name: str) -> Optional[str]:
             return None
 
     except Exception as e:
-        logger.warning(f"Failed to load S3 config from pipeline {pipeline_name}: {e}")
         return None
 
 
@@ -2304,9 +2299,8 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                             target_connection=target_name,
                             s3_config_name=pipeline_s3_config
                         )
-                        logger.info(f"Recreated AppConfig with S3 config '{pipeline_s3_config}' from pipeline '{effective_pipeline}'")
                 except Exception as e:
-                    logger.warning(f"Failed to recreate config with pipeline S3 config: {e}")
+                    click.echo(f"⚠️  Warning: Failed to recreate config with pipeline S3 config: {e}", err=True)
 
         if not config:
             click.echo("❌ Failed to create configuration from pipeline", err=True)
