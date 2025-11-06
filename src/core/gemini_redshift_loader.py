@@ -636,8 +636,10 @@ class GeminiRedshiftLoader:
     def _redshift_connection(self):
         """Context manager for Redshift database connections"""
         try:
-            # Use Redshift SSH tunnel if configured
-            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
+            # Use Redshift SSH tunnel if configured (skip if None or placeholder)
+            if (hasattr(self.config, 'redshift_ssh') and
+                self.config.redshift_ssh.host and
+                self.config.redshift_ssh.host not in ['None', '', 'null']):
                 with self.connection_manager.redshift_ssh_tunnel() as local_port:
                     conn = psycopg2.connect(
                         host='localhost',
@@ -783,8 +785,10 @@ class GeminiRedshiftLoader:
     def _redshift_connection(self):
         """Context manager for Redshift database connections"""
         try:
-            # Use Redshift SSH tunnel if configured
-            if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
+            # Use Redshift SSH tunnel if configured (skip if None or placeholder)
+            if (hasattr(self.config, 'redshift_ssh') and
+                self.config.redshift_ssh.host and
+                self.config.redshift_ssh.host not in ['None', '', 'null']):
                 with self.connection_manager.redshift_ssh_tunnel() as local_port:
                     conn = psycopg2.connect(
                         host='localhost',

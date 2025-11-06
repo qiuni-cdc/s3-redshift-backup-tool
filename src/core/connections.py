@@ -650,8 +650,10 @@ class ConnectionManager:
             if hasattr(self.config, 'redshift') and self.config.redshift.host:
                 import psycopg2
                 
-                # Use Redshift SSH tunnel if configured
-                if hasattr(self.config, 'redshift_ssh') and self.config.redshift_ssh.host:
+                # Use Redshift SSH tunnel if configured (skip if None or placeholder)
+                if (hasattr(self.config, 'redshift_ssh') and
+                    self.config.redshift_ssh.host and
+                    self.config.redshift_ssh.host not in ['None', '', 'null']):
                     with self.redshift_ssh_tunnel() as local_port:
                         conn = psycopg2.connect(
                             host='localhost',
