@@ -580,10 +580,13 @@ class GeminiRedshiftLoader:
             # Get source columns from schema manager to build explicit column list
             # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
             column_list = ""
+            logger.info(f"🔍 Building column list - full_table_name='{full_table_name}', has_schema_manager={hasattr(self, 'schema_manager')}")
             if full_table_name and hasattr(self, 'schema_manager'):
                 try:
                     # Get the schema from MySQL source (what's actually in the Parquet file)
+                    logger.info(f"🔍 Getting schema for {full_table_name}")
                     pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
+                    logger.info(f"🔍 Schema retrieved: {pyarrow_schema is not None}, fields: {len(pyarrow_schema) if pyarrow_schema else 0}")
                     if pyarrow_schema:
                         # Build column list from source schema
                         source_columns = [field.name for field in pyarrow_schema]
@@ -616,6 +619,8 @@ class GeminiRedshiftLoader:
                             logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
                 except Exception as e:
                     logger.warning(f"Failed to build column list from schema: {e}, using default matching")
+                    import traceback
+                    logger.warning(f"Traceback: {traceback.format_exc()}")
                     column_list = ""
 
             # Build COPY command for direct parquet loading
@@ -626,7 +631,8 @@ class GeminiRedshiftLoader:
                 SECRET_ACCESS_KEY '{self.config.s3.secret_key.get_secret_value()}'
                 FORMAT AS PARQUET;
             """
-            
+
+            logger.info(f"🔍 Final column_list: '{column_list}'")
             logger.info(f"Executing COPY command for {s3_uri}")
             
             # Execute COPY command
@@ -763,10 +769,13 @@ class GeminiRedshiftLoader:
             # Get source columns from schema manager to build explicit column list
             # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
             column_list = ""
+            logger.info(f"🔍 Building column list - full_table_name='{full_table_name}', has_schema_manager={hasattr(self, 'schema_manager')}")
             if full_table_name and hasattr(self, 'schema_manager'):
                 try:
                     # Get the schema from MySQL source (what's actually in the Parquet file)
+                    logger.info(f"🔍 Getting schema for {full_table_name}")
                     pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
+                    logger.info(f"🔍 Schema retrieved: {pyarrow_schema is not None}, fields: {len(pyarrow_schema) if pyarrow_schema else 0}")
                     if pyarrow_schema:
                         # Build column list from source schema
                         source_columns = [field.name for field in pyarrow_schema]
@@ -799,6 +808,8 @@ class GeminiRedshiftLoader:
                             logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
                 except Exception as e:
                     logger.warning(f"Failed to build column list from schema: {e}, using default matching")
+                    import traceback
+                    logger.warning(f"Traceback: {traceback.format_exc()}")
                     column_list = ""
 
             # Build COPY command for direct parquet loading
@@ -809,7 +820,8 @@ class GeminiRedshiftLoader:
                 SECRET_ACCESS_KEY '{self.config.s3.secret_key.get_secret_value()}'
                 FORMAT AS PARQUET;
             """
-            
+
+            logger.info(f"🔍 Final column_list: '{column_list}'")
             logger.info(f"Executing COPY command for {s3_uri}")
             
             # Execute COPY command
