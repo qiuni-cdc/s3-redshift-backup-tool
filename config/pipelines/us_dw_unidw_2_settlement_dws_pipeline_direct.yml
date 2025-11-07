@@ -43,7 +43,7 @@ tables:
     cdc_strategy: "id_only"
     cdc_id_column: "id"
     description: "Parcel detail tool temp data with ID-only strategy" 
-    target_name: "dw_parcel_detail_tool_new"  # Map to different target table name
+    target_name: "dw_parcel_detail_tool"  # Map to different target table name
     processing:
       batch_size: 100000
     validation:

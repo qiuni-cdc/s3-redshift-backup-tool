@@ -232,31 +232,6 @@ tables:
 - Pipeline files reference connection names, NOT direct credentials
 - S3 bucket, batch_size, and other non-sensitive configs are directly in YAML
 
-### **2.4 Verify Configuration**
-
-```bash
-# Test system with your .env configuration
-python -m src.cli.main status
-
-# This will show:
-# - Database connectivity (MySQL via SSH tunnel)
-# - S3 bucket access
-# - Redshift connectivity (if configured)
-# - Any configuration issues
-```
-
-**Expected Output:**
-```
-✅ Database Connection: Connected via SSH tunnel
-✅ S3 Bucket Access: Accessible
-✅ Redshift Connection: Connected via SSH tunnel
-✅ System Status: Ready for backup operations
-```
-
-**If you see errors**, check your `.env` file settings and network connectivity.
-
----
-
 ## 🧪 **Step 3: Create Test Pipeline**
 
 ### **3.1 Create Test Pipeline Configuration**

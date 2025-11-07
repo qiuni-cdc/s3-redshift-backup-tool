@@ -1421,4 +1421,7 @@ source s3_backup_venv/bin/activate
 
 python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
+
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only
