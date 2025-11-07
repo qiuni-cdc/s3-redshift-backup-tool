@@ -774,7 +774,8 @@ class ConnectionRegistry:
         tunnel = None
         try:
             tunnel = SSHTunnelForwarder(**tunnel_params)
-            tunnel.daemon_forward_servers = True  # Don't block on exit
+            tunnel.daemon_forward_servers = False  # Use non-daemon threads for clean shutdown
+            tunnel.daemon_transport = False  # Ensure transport threads also non-daemon
             tunnel.skip_tunnel_checkup = False  # Enable tunnel health checks
             
             logger.debug(f"Starting SSH tunnel for {name} to {ssh_config['host']}...")
@@ -1003,15 +1004,18 @@ class ConnectionRegistry:
     def close_all_connections(self):
         """Close all connections, pools, and tunnels"""
         closed_count = 0
-        
-        # Close SSH tunnels
+
+        # Close SSH tunnels gracefully
         for name, tunnel in list(self.ssh_tunnels.items()):
             try:
-                tunnel.stop()
-                closed_count += 1
-                logger.debug(f"Closed SSH tunnel: {name}")
+                if tunnel and tunnel.is_active:
+                    logger.debug(f"Stopping SSH tunnel: {name}")
+                    tunnel.stop(force=False)  # Graceful stop first
+                    closed_count += 1
+                    logger.debug(f"Closed SSH tunnel: {name}")
             except Exception as e:
-                logger.warning(f"Error closing SSH tunnel {name}: {e}")
+                # Log but don't fail - we're shutting down anyway
+                logger.debug(f"Error closing SSH tunnel {name}: {e}")
         self.ssh_tunnels.clear()
         
         # MySQL pools cleanup (connections auto-close when pool is deleted)
@@ -1042,3 +1046,14 @@ class ConnectionRegistry:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup"""
         self.close_all_connections()
+
+    def __del__(self):
+        """Destructor to ensure SSH tunnels are closed on garbage collection"""
+        try:
+            # Only log if there are actually tunnels to close
+            if hasattr(self, 'ssh_tunnels') and self.ssh_tunnels:
+                logger.debug("ConnectionRegistry destructor called, closing tunnels")
+                self.close_all_connections()
+        except Exception:
+            # Suppress errors during destruction to avoid issues at interpreter shutdown
+            pass
