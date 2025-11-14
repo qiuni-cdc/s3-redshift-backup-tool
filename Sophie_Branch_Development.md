@@ -1409,7 +1409,7 @@ python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
 python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool --limit 26000000 2>&1 | tee logs/parcel_detail_sync.log
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool 2>&1 | tee logs/parcel_detail_sync.log
 python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline 
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline  
 python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline
