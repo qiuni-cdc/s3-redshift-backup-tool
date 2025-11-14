@@ -642,7 +642,8 @@
     uti.bag_no,
     uti.reference,
     uti.sub_reference,
-    eoi.start_address,
+    eoi.start_address, 
+    time_204.path_time AS `time_204`,
     time_211.path_time AS `time_211`,
     time_213.path_time AS `time_213`,
     time_231.path_time AS `time_231`,
@@ -778,7 +779,13 @@ LEFT JOIN (
 	SELECT code, name FROM driver_app.uni_common_dict
 	WHERE type = 'DELIVERY.FAILED.REASON'
 ) AS ucd
-	ON time_211.failed_reason_type = ucd.code		
+	ON time_211.failed_reason_type = ucd.code	  
+LEFT JOIN (
+    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
+    FROM uni_tracking_spath uts
+    WHERE uts.code = 204
+) AS time_204
+ON uti.order_id = time_204.order_id	
 WHERE uti.state >= 190 
   and uti.update_time &lt; UNIX_TIMESTAMP(DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00'))
   and uti.update_time >= UNIX_TIMESTAMP(DATE_FORMAT(DATE_ADD('${beg_datetime}', INTERVAL ${hours} HOUR),'%Y-%m-%d %H:00:00'))
@@ -2254,6 +2261,10 @@ WHERE uti.state >= 190
       <field>
         <column_name>start_address</column_name>
         <stream_name>start_address</stream_name>
+      </field>
+      <field>
+        <column_name>time_204</column_name>
+        <stream_name>time_204</stream_name>
       </field>
       <field>
         <column_name>time_211</column_name>

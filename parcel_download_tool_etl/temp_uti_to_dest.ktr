@@ -562,7 +562,8 @@
     ANY_VALUE(bag_no) AS bag_no,
     ANY_VALUE(reference) AS reference,
     ANY_VALUE(sub_reference) AS sub_reference,
-    ANY_VALUE(start_address) AS start_address,
+    ANY_VALUE(start_address) AS start_address, 
+    MIN(time_204) AS time_204,
     MIN(time_211) AS time_211,
     MIN(time_213) AS time_213,
     MIN(time_231) AS time_231,
@@ -1517,6 +1518,29 @@ GROUP BY order_id;
       <value-meta>
         <type>Timestamp</type>
         <storagetype>normal</storagetype>
+        <name>time_204</name>
+        <length>0</length>
+        <precision>-1</precision>
+        <origin>Table_input_dest</origin>
+        <comments>time_204</comments>
+        <conversion_Mask/>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en</date_format_locale>
+        <date_format_timezone>UTC</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Timestamp</type>
+        <storagetype>normal</storagetype>
         <name>time_211</name>
         <length>0</length>
         <precision>-1</precision>
@@ -2062,6 +2086,10 @@ GROUP BY order_id;
       <field>
         <column_name>start_address</column_name>
         <stream_name>start_address</stream_name>
+      </field>
+      <field>
+        <column_name>time_204</column_name>
+        <stream_name>time_204</stream_name>
       </field>
       <field>
         <column_name>time_211</column_name>
