@@ -18,7 +18,7 @@
     </parameter>
     <parameter>
       <name>hours</name>
-      <default_value>-0.5</default_value>
+      <default_value></default_value>
       <description/>
     </parameter>
   </parameters>

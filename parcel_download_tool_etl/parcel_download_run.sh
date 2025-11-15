@@ -56,7 +56,7 @@ for ((i=1; i<=HOURS_COUNT; i++)); do
     echo "=========================================="
 
     # Run sync for this 1-hour window (pass timestamp directly)
-    python parcel_download_and_sync.py -d "$WINDOW_END_TIMESTAMP" --hours "-1" --pipeline "us_dw_unidw_2_settlement_dws_pipeline_direct" > "$LOG_FILE" 2>&1
+    python parcel_download_and_sync.py -d "$WINDOW_END" --hours "-1" --pipeline "us_dw_unidw_2_settlement_dws_pipeline_direct" > "$LOG_FILE" 2>&1
     EXIT_CODE=$?
 
     # If failed, stop immediately
