@@ -41,12 +41,17 @@ fi
 for ((i=1; i<=HOURS_COUNT; i++)); do
     HOUR_OFFSET=$((TOTAL_HOURS + i))
     WINDOW_END_TIMESTAMP=$((BASE_TIMESTAMP + HOUR_OFFSET * 3600))
+    WINDOW_START_TIMESTAMP=$((WINDOW_END_TIMESTAMP - 3600))
+
+    # Convert timestamps to readable format for display
+    WINDOW_START=$(date -d "@$WINDOW_START_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
+    WINDOW_END=$(date -d "@$WINDOW_END_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
 
     LOG_FILE="$LOG_DIR/window_${i}_$(date '+%Y%m%d_%H%M%S').log"
 
     echo ""
     echo "=========================================="
-    echo "Window $i/$HOURS_COUNT (timestamp: $WINDOW_END_TIMESTAMP)"
+    echo "Window $i/$HOURS_COUNT: $WINDOW_START to $WINDOW_END"
     echo "Log: $LOG_FILE"
     echo "=========================================="
 
