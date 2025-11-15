@@ -150,7 +150,25 @@ def get_source_connection_from_pipeline(pipeline_name: str) -> str:
     return source_connection
 
 
-def get_mysql_table_count(table_name: str, connection_name: str) -> int:
+def get_target_connection_from_pipeline(pipeline_name: str) -> str:
+    """Get the target connection name from a pipeline configuration"""
+    import yaml
+
+    pipeline_path = PROJECT_ROOT / "config" / "pipelines" / f"{pipeline_name}.yml"
+    if not pipeline_path.exists():
+        raise FileNotFoundError(f"Pipeline configuration not found: {pipeline_path}")
+
+    with open(pipeline_path, 'r') as f:
+        pipeline_config = yaml.safe_load(f)
+
+    target_connection = pipeline_config.get('pipeline', {}).get('target')
+    if not target_connection:
+        raise ValueError(f"Pipeline '{pipeline_name}' missing 'target' configuration")
+
+    return target_connection
+
+
+def get_mysql_table_count(table_name: str, source_connection: str) -> int:
     """Get the row count from a MySQL table using existing connection infrastructure"""
     try:
         # Initialize connection registry (uses project root's connections.yml)
@@ -158,10 +176,10 @@ def get_mysql_table_count(table_name: str, connection_name: str) -> int:
         conn_registry = ConnectionRegistry(config_path=str(config_path))
 
         logger.info(f"🔍 Querying MySQL table count for: {table_name}")
-        logger.info(f"📡 Using connection: {connection_name}")
+        logger.info(f"📡 Using connection: {source_connection}")
 
         # Use the connection specified by the pipeline
-        with conn_registry.get_mysql_connection(connection_name) as conn:
+        with conn_registry.get_mysql_connection(source_connection) as conn:
             cursor = conn.cursor()
             query = f"SELECT COUNT(*) FROM {table_name}"
             logger.info(f"📊 Executing MySQL query: {query}")
@@ -177,7 +195,51 @@ def get_mysql_table_count(table_name: str, connection_name: str) -> int:
         raise
 
 
-def delete_mysql_table_records(table_name: str, connection_name: str) -> bool:
+def get_redshift_table_count(table_name: str, target_connection: str, start_time: str, end_time: str) -> int:
+    """
+    Get the row count from a Redshift table for rows inserted during a specific time window.
+
+    Args:
+        table_name: Name of the Redshift table (e.g., 'dw_parcel_detail_tool')
+        target_connection: Redshift connection name from connections.yml (e.g., 'redshift_settlement_dws')
+        start_time: Start of time window (ISO format string)
+        end_time: End of time window (ISO format string)
+
+    Returns:
+        int: Count of rows where inserted_at is between start_time and end_time
+    """
+    try:
+        # Initialize connection registry (uses project root's connections.yml)
+        config_path = PROJECT_ROOT / "config" / "connections.yml"
+        conn_registry = ConnectionRegistry(config_path=str(config_path))
+
+        logger.info(f"🔍 Querying Redshift table count for: {table_name}")
+        logger.info(f"📡 Using connection: {target_connection}")
+        logger.info(f"⏰ Time window: {start_time} to {end_time}")
+
+        # Use the Redshift connection specified
+        with conn_registry.get_redshift_connection(target_connection) as conn:
+            cursor = conn.cursor()
+            query = f"""
+                SELECT COUNT(*)
+                FROM {table_name}
+                WHERE inserted_at >= %s AND inserted_at <= %s
+            """
+            logger.info(f"📊 Executing Redshift query: {query}")
+            logger.info(f"📊 Parameters: start_time={start_time}, end_time={end_time}")
+            cursor.execute(query, (start_time, end_time))
+            count = cursor.fetchone()[0]
+            cursor.close()
+
+            logger.info(f"📈 Redshift table {table_name} has {count:,} rows inserted in time window")
+            return count
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get Redshift table count for {table_name}: {e}")
+        raise
+
+
+def delete_mysql_table_records(table_name: str, source_connection: str) -> bool:
     """Delete all records from a MySQL table using existing connection infrastructure"""
     try:
         # Initialize connection registry (uses project root's connections.yml)
@@ -185,10 +247,10 @@ def delete_mysql_table_records(table_name: str, connection_name: str) -> bool:
         conn_registry = ConnectionRegistry(config_path=str(config_path))
 
         logger.info(f"🗑️ Deleting all records from MySQL table: {table_name}")
-        logger.info(f"📡 Using connection: {connection_name}")
+        logger.info(f"📡 Using connection: {source_connection}")
 
         # Use the connection specified by the pipeline
-        with conn_registry.get_mysql_connection(connection_name) as conn:
+        with conn_registry.get_mysql_connection(source_connection) as conn:
             cursor = conn.cursor()
 
             # First get count before deletion for logging
@@ -341,13 +403,15 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
         return False, "", str(e)
 
 
-def run_sync_command(table_name, pipeline, connection_name, limit=None, backup_only=False, redshift_only=False):
+def run_sync_command(table_name, pipeline, source_connection, target_connection, limit=None, backup_only=False, redshift_only=False):
     """
     Run the sync command with JSON output
 
     Args:
         table_name: Name of the table to sync
         pipeline: Pipeline name
+        source_connection: MySQL source connection name
+        target_connection: Redshift target connection name
         limit: Optional row limit
         backup_only: Only run backup stage
         redshift_only: Only run Redshift loading stage
@@ -453,7 +517,7 @@ def run_sync_command(table_name, pipeline, connection_name, limit=None, backup_o
 
                 # Special validation for unidw.dw_parcel_detail_tool_temp table
                 if table_name == "unidw.dw_parcel_detail_tool_temp":
-                    return validate_parcel_detail_sync(table_name, table_results, overall_status, json_data, json_filename, connection_name)
+                    return validate_parcel_detail_sync(table_name, table_results, overall_status, json_data, json_filename, source_connection, target_connection)
 
                 # Determine success based on overall status for other tables
                 if overall_status == 'success':
@@ -480,13 +544,14 @@ def run_sync_command(table_name, pipeline, connection_name, limit=None, backup_o
         return False, {}, ""
 
 
-def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_status: str, json_data: dict, json_filename: str, connection_name: str) -> tuple:
+def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_status: str, json_data: dict, json_filename: str, source_connection: str, target_connection: str) -> tuple:
     """
     Special validation for unidw.dw_parcel_detail_tool_temp table.
 
     Validates that:
     1. The table status is 'success'
     2. The rows_processed matches the actual count in the MySQL source table
+    3. The rows loaded to Redshift during the sync time window matches MySQL count
 
     Args:
         table_name: Name of the table being validated
@@ -494,7 +559,8 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
         overall_status: Overall sync status
         json_data: Complete JSON data
         json_filename: JSON output filename
-        connection_name: MySQL connection name from pipeline configuration
+        source_connection: MySQL source connection name from pipeline configuration
+        target_connection: Redshift target connection name from pipeline configuration
 
     Returns:
         tuple: (success: bool, json_data: dict, json_filename: str)
@@ -519,9 +585,18 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
         rows_processed = table_data.get('rows_processed', 0)
         logger.info(f"📊 Sync reported {rows_processed:,} rows processed for {table_name}")
 
+        # Extract start_time and end_time from JSON for Redshift verification
+        start_time = json_data.get('start_time')
+        end_time = json_data.get('end_time')
+
+        if not start_time or not end_time:
+            logger.warning(f"⚠️  Cannot perform Redshift verification: start_time or end_time missing in JSON")
+            logger.info(f"   start_time: {start_time}")
+            logger.info(f"   end_time: {end_time}")
+
         # Get actual count from MySQL source table
         try:
-            mysql_count = get_mysql_table_count(table_name, connection_name)
+            mysql_count = get_mysql_table_count(table_name, source_connection)
         except Exception as e:
             logger.error(f"❌ Failed to query MySQL table count: {e}")
             logger.error(f"❌ {table_name} sync validation failed:")
@@ -531,20 +606,60 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
             logger.error(f"   ✗ Row counts do not match!")
             return False, json_data, json_filename
 
-        # Compare rows processed vs MySQL source count
-        if rows_processed == mysql_count:
+        # Get actual count from Redshift target table during sync time window
+        redshift_count = None
+        if start_time and end_time:
+            try:
+                # Target table in Redshift is 'dw_parcel_detail_tool' (without unidw. prefix)
+                # Connection comes from pipeline config (e.g., 'redshift_settlement_dws')
+                target_table = 'dw_parcel_detail_tool'
+
+                redshift_count = get_redshift_table_count(
+                    table_name=target_table,
+                    target_connection=target_connection,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to query Redshift table count: {e}")
+                logger.warning(f"⚠️  Continuing with MySQL validation only")
+
+        # Compare all counts
+        validation_passed = True
+        validation_details = []
+
+        validation_details.append(f"   Status: {table_status}")
+        validation_details.append(f"   Rows processed (MySQL→S3): {rows_processed:,}")
+        validation_details.append(f"   MySQL source count: {mysql_count:,}")
+
+        if redshift_count is not None:
+            validation_details.append(f"   Redshift rows loaded (time window): {redshift_count:,}")
+
+        # Check MySQL backup counts match
+        if rows_processed != mysql_count:
+            validation_details.append(f"   ✗ MySQL backup count mismatch!")
+            validation_passed = False
+        else:
+            validation_details.append(f"   ✓ MySQL backup counts match!")
+
+        # Check Redshift count matches if available
+        if redshift_count is not None:
+            if redshift_count != mysql_count:
+                validation_details.append(f"   ✗ Redshift load count mismatch!")
+                validation_passed = False
+            else:
+                validation_details.append(f"   ✓ Redshift load count matches!")
+
+        # Log results
+        if validation_passed:
             logger.info(f"✅ {table_name} sync validation passed:")
-            logger.info(f"   Status: {table_status}")
-            logger.info(f"   Rows processed: {rows_processed:,}")
-            logger.info(f"   MySQL source count: {mysql_count:,}")
-            logger.info(f"   ✓ Row counts match!")
+            for detail in validation_details:
+                logger.info(detail)
             return True, json_data, json_filename
         else:
             logger.error(f"❌ {table_name} sync validation failed:")
-            logger.error(f"   Status: {table_status}")
-            logger.error(f"   Rows processed: {rows_processed:,}")
-            logger.error(f"   MySQL source count: {mysql_count:,}")
-            logger.error(f"   ✗ Row counts do not match!")
+            for detail in validation_details:
+                logger.error(detail)
             return False, json_data, json_filename
 
     except Exception as e:
@@ -572,6 +687,14 @@ def main():
         logger.info(f"📡 Source connection from pipeline: {SOURCE_CONNECTION}")
     except Exception as e:
         logger.error(f"❌ Failed to get source connection from pipeline '{PIPELINE}': {e}")
+        sys.exit(1)
+
+    # Get target connection from pipeline configuration
+    try:
+        TARGET_CONNECTION = get_target_connection_from_pipeline(PIPELINE)
+        logger.info(f"📡 Target connection from pipeline: {TARGET_CONNECTION}")
+    except Exception as e:
+        logger.error(f"❌ Failed to get target connection from pipeline '{PIPELINE}': {e}")
         sys.exit(1)
 
     # Determine execution mode
@@ -615,7 +738,8 @@ def main():
     sync_success, sync_data, json_file = run_sync_command(
         table_name=TABLE_NAME,
         pipeline=PIPELINE,
-        connection_name=SOURCE_CONNECTION
+        source_connection=SOURCE_CONNECTION,
+        target_connection=TARGET_CONNECTION
     )
 
     # Report pipeline status
