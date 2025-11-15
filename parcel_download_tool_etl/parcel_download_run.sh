@@ -49,11 +49,11 @@ for ((i=1; i<=HOURS_COUNT; i++)); do
 
     LOG_FILE="$LOG_DIR/window_${i}_$(date '+%Y%m%d_%H%M%S').log"
 
-    echo ""
-    echo "=========================================="
-    echo "Window $i/$HOURS_COUNT: $WINDOW_START to $WINDOW_END"
-    echo "Log: $LOG_FILE"
-    echo "=========================================="
+    echo "" 1>&2
+    echo "==========================================" 1>&2
+    echo "Window $i/$HOURS_COUNT: $WINDOW_START to $WINDOW_END" 1>&2
+    echo "Log: $LOG_FILE" 1>&2
+    echo "==========================================" 1>&2
 
     # Run sync for this 1-hour window (pass timestamp directly)
     python parcel_download_and_sync.py -d "$WINDOW_END" --hours "-1" --pipeline "us_dw_unidw_2_settlement_dws_pipeline_direct" > "$LOG_FILE" 2>&1
@@ -61,12 +61,12 @@ for ((i=1; i<=HOURS_COUNT; i++)); do
 
     # If failed, stop immediately
     if [ $EXIT_CODE -ne 0 ]; then
-        echo "❌ Failed at window $i - stopping"
+        echo "❌ Failed at window $i - stopping" 1>&2
         deactivate
         exit 1
     fi
 
-    echo "✅ Window $i completed"
+    echo "✅ Window $i completed" 1>&2
 done
 
 # Deactivate virtualenv
