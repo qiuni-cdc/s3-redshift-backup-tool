@@ -690,7 +690,7 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
                 validation_details.append(f"   ✗ Redshift load count mismatch!")
                 validation_passed = False
             else:
-                validation_details.append(f"   ✓ Redshift load count matches!")
+                validation_details.append(f"   ✓ Redshift load counts match!")
 
         # Log results
         if validation_passed:
