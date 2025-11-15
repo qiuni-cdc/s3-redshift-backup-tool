@@ -195,18 +195,61 @@ def get_mysql_table_count(table_name: str, source_connection: str) -> int:
         raise
 
 
-def get_redshift_table_count(table_name: str, target_connection: str, start_time: str, end_time: str) -> int:
+def get_mysql_inserted_at_range(table_name: str, source_connection: str) -> tuple:
     """
-    Get the row count from a Redshift table for rows inserted during a specific time window.
+    Get the min and max inserted_at values from MySQL source table.
+
+    Args:
+        table_name: Name of the MySQL table (e.g., 'unidw.dw_parcel_detail_tool_temp')
+        source_connection: MySQL connection name from connections.yml
+
+    Returns:
+        tuple: (min_inserted_at, max_inserted_at) as ISO format strings
+    """
+    try:
+        # Initialize connection registry (uses project root's connections.yml)
+        config_path = PROJECT_ROOT / "config" / "connections.yml"
+        conn_registry = ConnectionRegistry(config_path=str(config_path))
+
+        logger.info(f"🔍 Querying MySQL inserted_at range for: {table_name}")
+        logger.info(f"📡 Using connection: {source_connection}")
+
+        # Use the connection specified by the pipeline
+        with conn_registry.get_mysql_connection(source_connection) as conn:
+            cursor = conn.cursor()
+            query = f"SELECT MIN(inserted_at), MAX(inserted_at) FROM {table_name}"
+            logger.info(f"📊 Executing MySQL query: {query}")
+            cursor.execute(query)
+            result = cursor.fetchone()
+            cursor.close()
+
+            if result and result[0] and result[1]:
+                min_inserted_at = result[0].isoformat() if hasattr(result[0], 'isoformat') else str(result[0])
+                max_inserted_at = result[1].isoformat() if hasattr(result[1], 'isoformat') else str(result[1])
+                logger.info(f"📈 MySQL inserted_at range: {min_inserted_at} to {max_inserted_at}")
+                return min_inserted_at, max_inserted_at
+            else:
+                logger.warning(f"⚠️  No data found in {table_name}")
+                return None, None
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get MySQL inserted_at range for {table_name}: {e}")
+        raise
+
+
+def get_redshift_table_count(table_name: str, target_connection: str, min_inserted_at: str, max_inserted_at: str) -> int:
+    """
+    Get the row count from a Redshift table for rows with inserted_at in the specified range.
+    Note: inserted_at in Redshift is synced from the MySQL source table, not the load timestamp.
 
     Args:
         table_name: Name of the Redshift table (e.g., 'dw_parcel_detail_tool')
         target_connection: Redshift connection name from connections.yml (e.g., 'redshift_settlement_dws')
-        start_time: Start of time window (ISO format string)
-        end_time: End of time window (ISO format string)
+        min_inserted_at: Minimum inserted_at value from MySQL source (ISO format string)
+        max_inserted_at: Maximum inserted_at value from MySQL source (ISO format string)
 
     Returns:
-        int: Count of rows where inserted_at is between start_time and end_time
+        int: Count of rows where inserted_at is between min and max
     """
     try:
         # Initialize connection registry (uses project root's connections.yml)
@@ -215,7 +258,7 @@ def get_redshift_table_count(table_name: str, target_connection: str, start_time
 
         logger.info(f"🔍 Querying Redshift table count for: {table_name}")
         logger.info(f"📡 Using connection: {target_connection}")
-        logger.info(f"⏰ Time window: {start_time} to {end_time}")
+        logger.info(f"⏰ inserted_at range: {min_inserted_at} to {max_inserted_at}")
 
         # Use the Redshift connection specified
         with conn_registry.get_redshift_connection(target_connection) as conn:
@@ -226,12 +269,12 @@ def get_redshift_table_count(table_name: str, target_connection: str, start_time
                 WHERE inserted_at >= %s AND inserted_at <= %s
             """
             logger.info(f"📊 Executing Redshift query: {query}")
-            logger.info(f"📊 Parameters: start_time={start_time}, end_time={end_time}")
-            cursor.execute(query, (start_time, end_time))
+            logger.info(f"📊 Parameters: min_inserted_at={min_inserted_at}, max_inserted_at={max_inserted_at}")
+            cursor.execute(query, (min_inserted_at, max_inserted_at))
             count = cursor.fetchone()[0]
             cursor.close()
 
-            logger.info(f"📈 Redshift table {table_name} has {count:,} rows inserted in time window")
+            logger.info(f"📈 Redshift table {table_name} has {count:,} rows in inserted_at range")
             return count
 
     except Exception as e:
@@ -551,7 +594,10 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
     Validates that:
     1. The table status is 'success'
     2. The rows_processed matches the actual count in the MySQL source table
-    3. The rows loaded to Redshift during the sync time window matches MySQL count
+    3. The rows loaded to Redshift with matching inserted_at range equals MySQL count
+
+    Note: The inserted_at column in Redshift is synced from MySQL, not the load timestamp.
+    Validation queries Redshift using the min/max inserted_at values from the MySQL source table.
 
     Args:
         table_name: Name of the table being validated
@@ -585,15 +631,6 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
         rows_processed = table_data.get('rows_processed', 0)
         logger.info(f"📊 Sync reported {rows_processed:,} rows processed for {table_name}")
 
-        # Extract start_time and end_time from JSON for Redshift verification
-        start_time = json_data.get('start_time')
-        end_time = json_data.get('end_time')
-
-        if not start_time or not end_time:
-            logger.warning(f"⚠️  Cannot perform Redshift verification: start_time or end_time missing in JSON")
-            logger.info(f"   start_time: {start_time}")
-            logger.info(f"   end_time: {end_time}")
-
         # Get actual count from MySQL source table
         try:
             mysql_count = get_mysql_table_count(table_name, source_connection)
@@ -606,10 +643,13 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
             logger.error(f"   ✗ Row counts do not match!")
             return False, json_data, json_filename
 
-        # Get actual count from Redshift target table during sync time window
+        # Get inserted_at range from MySQL source table for Redshift verification
         redshift_count = None
-        if start_time and end_time:
-            try:
+        try:
+            # Get min/max inserted_at from MySQL source table
+            min_inserted_at, max_inserted_at = get_mysql_inserted_at_range(table_name, source_connection)
+
+            if min_inserted_at and max_inserted_at:
                 # Target table in Redshift is 'dw_parcel_detail_tool' (without unidw. prefix)
                 # Connection comes from pipeline config (e.g., 'redshift_settlement_dws')
                 target_table = 'dw_parcel_detail_tool'
@@ -617,12 +657,14 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
                 redshift_count = get_redshift_table_count(
                     table_name=target_table,
                     target_connection=target_connection,
-                    start_time=start_time,
-                    end_time=end_time
+                    min_inserted_at=min_inserted_at,
+                    max_inserted_at=max_inserted_at
                 )
-            except Exception as e:
-                logger.error(f"❌ Failed to query Redshift table count: {e}")
-                logger.warning(f"⚠️  Continuing with MySQL validation only")
+            else:
+                logger.warning(f"⚠️  Cannot get inserted_at range from MySQL - skipping Redshift verification")
+        except Exception as e:
+            logger.error(f"❌ Failed to query Redshift table count: {e}")
+            logger.warning(f"⚠️  Continuing with MySQL validation only")
 
         # Compare all counts
         validation_passed = True
@@ -633,7 +675,7 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
         validation_details.append(f"   MySQL source count: {mysql_count:,}")
 
         if redshift_count is not None:
-            validation_details.append(f"   Redshift rows loaded (time window): {redshift_count:,}")
+            validation_details.append(f"   Redshift rows loaded (inserted_at range): {redshift_count:,}")
 
         # Check MySQL backup counts match
         if rows_processed != mysql_count:
