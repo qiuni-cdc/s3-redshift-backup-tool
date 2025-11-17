@@ -1,5 +1,44 @@
 # Redshift 权限和调试指南
 
+## 🚀 快速参考 - 100% 兼容的查询
+
+**这些查询在所有 Redshift 版本上都能工作，不需要特殊权限：**
+
+```sql
+-- ✅ 1. 验证连接
+SELECT current_database(), current_user, pg_backend_pid(), now();
+
+-- ✅ 2. 查看表信息
+SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'public';
+
+-- ✅ 3. 验证数据是否加载
+SELECT COUNT(*) FROM public.your_table_name;
+
+-- ✅ 4. 查看表结构
+SELECT column_name, data_type, character_maximum_length
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'your_table';
+
+-- ✅ 5. 检查 COPY 错误（你自己的）
+SELECT query, filename, err_reason
+FROM stl_load_errors
+WHERE userid = (SELECT usesysid FROM pg_user WHERE usename = current_user)
+  AND starttime > CURRENT_TIMESTAMP - INTERVAL '1 hour'
+ORDER BY starttime DESC LIMIT 10;
+```
+
+**⚠️ 避免使用这些可能不兼容的查询：**
+- ❌ `SELECT locktype FROM pg_locks` - `locktype` 列可能不存在
+- ❌ `SELECT * FROM stv_recents` - 需要超级用户权限
+- ❌ `SELECT * FROM stv_inflight` - 需要超级用户权限
+
+**✅ 推荐：使用应用层诊断工具**
+```bash
+python scripts/debug_redshift_copy.py --env us_dw
+```
+
+---
+
 ## 🔐 Redshift 系统表权限说明
 
 ### **系统表访问权限要求**
@@ -92,14 +131,16 @@ SELECT COUNT(*) FROM public.your_table_name;
 
 SELECT * FROM public.your_table_name LIMIT 5;
 
--- 4. 查看自己的锁
+-- 4. 查看自己的锁（简化版，兼容 Redshift）
 SELECT
-    locktype,
-    relation::regclass as table_name,
-    mode,
+    pid,
+    relation,
     granted
 FROM pg_locks
 WHERE pid = pg_backend_pid();
+
+-- 如果上面的查询也不支持，可以尝试：
+-- SELECT * FROM pg_locks WHERE pid = pg_backend_pid();
 
 -- 5. 查看 COPY 错误（只能看到自己用户的）
 SELECT
@@ -114,6 +155,24 @@ WHERE starttime > CURRENT_TIMESTAMP - INTERVAL '1 hour'
   AND userid = (SELECT usesysid FROM pg_user WHERE usename = current_user)
 ORDER BY starttime DESC
 LIMIT 20;
+```
+
+**⚠️ 注意：Redshift 兼容性问题**
+
+Redshift 的 `pg_locks` 视图可能不完全兼容标准 PostgreSQL。如果上面的锁查询失败，有以下替代方案：
+
+```sql
+-- 方案 A: 查看 pg_locks 的实际结构
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'pg_locks'
+ORDER BY ordinal_position;
+
+-- 方案 B: 如果 pg_locks 不可用，跳过锁检查
+-- 使用应用层诊断工具替代（推荐）
+
+-- 方案 C: 简化查询，只查看基本信息
+SELECT * FROM pg_locks LIMIT 5;
 ```
 
 ### **方案 3: 使用超时机制检测卡住**
@@ -223,10 +282,25 @@ GRANT SELECT ON public.copy_monitoring TO your_user;
 
 ## 🔍 **实用调试命令（无需特殊权限）**
 
+### **Redshift 兼容性说明** ⚠️
+
+Redshift 基于 PostgreSQL 8.0.2，但做了大量修改。某些标准 PostgreSQL 视图可能：
+- **列名不同**（如 `pg_locks` 的 `locktype` 列可能不存在）
+- **完全不可用**（需要特殊权限）
+- **返回数据格式不同**
+
+**推荐做法**：
+1. ✅ **优先使用应用层诊断工具**（不依赖系统表）
+2. ✅ **测试查询前先检查视图结构**
+3. ✅ **使用 `information_schema` 替代 `pg_*` 视图**
+
+---
+
 ### **检查 COPY 是否成功**
 
 ```sql
--- 查看最近的 COPY 命令（从自己的查询历史）
+-- 方法 1: 查看最近的 COPY 命令（从自己的查询历史）
+-- 注意：stl_query 可能需要特殊权限，如果失败请使用方法 2
 SELECT
     query,
     SUBSTRING(querytxt, 1, 100) as query_text,
@@ -239,7 +313,20 @@ WHERE userid = (SELECT usesysid FROM pg_user WHERE usename = current_user)
 ORDER BY starttime DESC
 LIMIT 10;
 
--- 注意：这个查询只能看到自己用户的历史
+-- 方法 2: 直接验证表数据（最可靠）✅ 推荐
+SELECT
+    'Data verification' as check_type,
+    COUNT(*) as row_count,
+    MIN(id) as min_id,
+    MAX(id) as max_id
+FROM public.your_table_name;
+
+-- 方法 3: 检查最近插入的数据（如果有时间戳列）
+SELECT
+    COUNT(*) as recent_rows,
+    MAX(created_at) as latest_timestamp
+FROM public.your_table_name
+WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '1 hour';
 ```
 
 ### **检查表数据**
