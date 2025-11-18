@@ -1385,47 +1385,6 @@ The YAML-based configuration system is now **production-ready** with:
 
 **Location in Documentation:** `Codes_Explain.md:114-627`
 
-## Usually Used Commands
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
-
-python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
-python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
-python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log  
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --redshift-only
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
-
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool_temp --json-output sync_parcel_detail.json 
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
-
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool 2>&1 | tee logs/parcel_detail_sync.log
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline 
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline  
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee logs/parcel_detail_load.log
-
-git commit -m "add files from main" --no-verify
-source s3_backup_venv/bin/activate 
-
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct
-
-python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only
-
 ## Redshift COPY Hanging and Zombie Lock Issue (Resolved)
 
 ### Issue: 5-Day COPY Command Hang
@@ -1623,25 +1582,6 @@ def delete_all_locks():
         print(f"✅ Deleted: {lock['Key']}")
 ```
 
-**Usage:**
-```bash
-python delete_all_s3_locks.py
-```
-
-#### 4. Batch Size Performance Optimization
-
-**Config Change:** `config/pipelines/us_dw_unidw_2_settlement_dws_pipeline.yml`
-
-```yaml
-# BEFORE:
-processing:
-  batch_size: 100000
-
-# AFTER:
-processing:
-  batch_size: 1000000  # 10x increase for better performance
-```
-
 ### Why These Fixes Work
 
 #### 1. Timeout Protection
@@ -1766,4 +1706,49 @@ The Redshift COPY timeout protection and lock removal is now **production-ready*
 - `delete_all_s3_locks.py` - Created cleanup utility
 - `config/pipelines/us_dw_unidw_2_settlement_dws_pipeline.yml` - Increased batch size
 
-**Key Insight:** The root cause was not the COPY command itself, but Python waiting indefinitely for a response after SSH tunnel disconnect. The timeout mechanism ensures the process fails fast instead of hanging for days, while removing locks eliminates the zombie lock problem entirely.
+**Key Insight:** The root cause was not the COPY command itself, but Python waiting indefinitely for a response after SSH tunnel disconnect. The timeout mechanism ensures the process fails fast instead of hanging for days, while removing locks eliminates the zombie lock problem entirely. 
+
+## Usually Used Commands
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 22959410 2>&1 | tee parcel_detail_sync.log
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 248668885 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee parcel_detail_redshift_load.log
+
+python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
+python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
+python -m src.cli.main s3clean list -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --limit 100 2>&1 | tee pricing_temp.log  
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --redshift-only
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_pricing_temp --backup-only --limit 30000 2>&1 | tee pricing_temp.log 
+
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline --id 0
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool_temp --json-output sync_parcel_detail.json 
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_public_pipeline
+
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool 2>&1 | tee logs/parcel_detail_sync.log
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline 
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline  
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline -t unidw.dw_parcel_detail_tool --redshift-only 2>&1 | tee logs/parcel_detail_load.log
+
+git commit -m "add files from main" --no-verify
+source s3_backup_venv/bin/activate  
+
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline 
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct
+
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
+python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct
+
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only 
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only
