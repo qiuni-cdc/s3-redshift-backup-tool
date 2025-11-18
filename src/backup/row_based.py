@@ -60,23 +60,17 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         with self.database_session(source_connection) as db_conn:
             for i, table_name in enumerate(tables):
                 table_start_time = time.time()
-                lock_id = None
-                
+
                 self.logger.logger.info(
                     f"Processing table {i+1}/{len(tables)} with row-based chunking",
                     table_name=table_name,
                     progress=f"{i+1}/{len(tables)}"
                 )
-                
+
                 # Handle backward compatibility with old 'limit' parameter
                 effective_chunk_size = chunk_size or limit
-                
+
                 try:
-                    # Acquire lock before processing table to prevent concurrent operations
-                    self.logger.logger.debug(f"Acquiring lock for table {table_name}")
-                    lock_id = self.watermark_manager.simple_manager.acquire_lock(table_name)
-                    self.logger.logger.info(f"Lock acquired for {table_name}: {lock_id}")
-                    
                     success = self._process_single_table_row_based(
                         db_conn, table_name, current_timestamp, effective_chunk_size, max_total_rows, source_connection
                     )
@@ -106,15 +100,6 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                     failed_tables.append(table_name)
                     self.logger.table_failed(table_name, error=e)
                     self.logger.error_occurred(e, f"table_backup_{table_name}")
-                    
-                finally:
-                    # Always release lock, even if error occurs
-                    if lock_id:
-                        try:
-                            self.watermark_manager.simple_manager.release_lock(table_name, lock_id)
-                            self.logger.logger.debug(f"Released lock for {table_name}: {lock_id}")
-                        except Exception as lock_error:
-                            self.logger.logger.error(f"Failed to release lock for {table_name}: {lock_error}")
         
         # Update final metrics and watermarks
         duration = time.time() - start_time
