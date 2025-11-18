@@ -50,11 +50,19 @@ class SimpleWatermarkManager:
         """Initialize the watermark manager."""
         self.config = config
         
-        # Initialize S3 client directly
+        # Initialize S3 client with timeout protection
+        from botocore.config import Config
+
+        boto_config = Config(
+            connect_timeout=60,   # 60 seconds to establish connection
+            read_timeout=300      # 5 minutes to read response
+        )
+
         self.s3_client = boto3.client('s3',
             region_name=config['s3'].get('region', 'us-west-2'),
             aws_access_key_id=config['s3'].get('access_key_id'),
-            aws_secret_access_key=config['s3'].get('secret_access_key')
+            aws_secret_access_key=config['s3'].get('secret_access_key'),
+            config=boto_config
         )
         
         self.bucket_name = config['s3']['bucket_name']

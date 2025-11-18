@@ -471,7 +471,10 @@ class ConnectionManager:
                 },
                 max_pool_connections=self.config.s3.max_pool_connections,
                 # Enable TCP keepalive for long-running connections
-                tcp_keepalive=True
+                tcp_keepalive=True,
+                # Timeout settings to prevent indefinite hangs
+                connect_timeout=60,   # 60 seconds to establish S3 connection
+                read_timeout=300      # 5 minutes to read S3 response
             )
             
             # Create optimized S3 client
