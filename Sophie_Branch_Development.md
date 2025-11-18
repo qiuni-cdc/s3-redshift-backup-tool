@@ -1743,12 +1743,12 @@ git commit -m "add files from main" --no-verify
 source s3_backup_venv/bin/activate  
 
 python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline 
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline
 
 python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
 python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
 python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
 python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct
 
-python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only 
-python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log
