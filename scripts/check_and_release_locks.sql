@@ -59,19 +59,35 @@ LIMIT 20;
 -- ============================================
 -- IMPORTANT: Only run the commands below MANUALLY after reviewing the output above
 
--- Option A: Cancel a running query (safer)
+-- First, check if the lock is from YOUR session:
+-- Compare the PID from STEP 1 with your session PID from STEP 2
+
+-- ============================================
+-- CASE A: Lock is from YOUR OWN session (PID matches)
+-- ============================================
+-- ✅ RECOMMENDED: Use ROLLBACK or COMMIT (does NOT disconnect)
+-- ROLLBACK;  -- Cancel changes and release locks
+-- COMMIT;    -- Save changes and release locks
+
+-- ❌ NOT RECOMMENDED: Don't terminate your own session
+-- (It will disconnect you and you'll need to reconnect)
+
+-- ============================================
+-- CASE B: Lock is from ANOTHER session (PID different)
+-- ============================================
+-- ✅ Use pg_cancel_backend (safer, tries to cancel the query)
 -- SELECT pg_cancel_backend(<PID>);
 
--- Option B: Terminate a session (more aggressive)
+-- ✅ Use pg_terminate_backend (more aggressive, kills the session)
 -- SELECT pg_terminate_backend(<PID>);
-
--- Option C: If it's your own transaction
--- ROLLBACK;
--- COMMIT;
 
 -- ============================================
 -- Example usage:
 -- Replace <PID> with the actual process ID from STEP 1
 -- ============================================
--- To cancel: SELECT pg_cancel_backend(1073815845);
--- To terminate: SELECT pg_terminate_backend(1073815845);
+-- If it's someone else's session:
+--   SELECT pg_cancel_backend(1073815845);
+--   SELECT pg_terminate_backend(1073815845);
+--
+-- If it's YOUR session:
+--   ROLLBACK;  (or COMMIT;)

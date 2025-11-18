@@ -390,6 +390,122 @@ else:
 
 ---
 
+## 🔐 **解锁决策流程** ⭐ **重要**
+
+### **步骤 1: 确定锁的所有者**
+
+```sql
+-- 查看你的 PID
+SELECT pg_backend_pid();  -- 假设返回 1234
+
+-- 查看锁的 PID
+SELECT pid FROM pg_locks WHERE granted = true;  -- 假设看到 1073815845
+```
+
+### **步骤 2: 根据所有者选择方法**
+
+```
+┌─────────────────────────────────────┐
+│ 锁的 PID 是你自己的？              │
+│ (PID = pg_backend_pid())          │
+└──────────┬──────────────────────────┘
+           │
+    ┌──────┴──────┐
+    │             │
+   是            否
+    │             │
+    ▼             ▼
+┌───────────┐  ┌──────────────────┐
+│ 情况 A    │  │ 情况 B           │
+│ 自己的锁  │  │ 别人的锁         │
+└─────┬─────┘  └────┬─────────────┘
+      │             │
+      ▼             ▼
+ ✅ 使用:        ✅ 使用:
+ ROLLBACK;      pg_cancel_backend()
+ 或 COMMIT;     或 pg_terminate_backend()
+      │             │
+      ▼             ▼
+ 不断开连接     会终止那个会话
+ 优雅释放锁     强制释放锁
+```
+
+### **情况 A: 自己的锁** ✅ **推荐方法**
+
+```sql
+-- 第一步：确认是自己的
+SELECT pg_backend_pid();  -- 返回 1073815845
+
+-- 第二步：检查锁
+SELECT * FROM pg_locks WHERE pid = 1073815845;  -- 确实有锁
+
+-- 第三步：释放锁（选一个）
+ROLLBACK;  -- 取消所有未提交的更改，释放锁
+-- 或
+COMMIT;    -- 提交所有更改，释放锁
+
+-- ✅ 优点：
+--   • 不会断开连接
+--   • 可以选择提交或回滚
+--   • 更优雅、可控
+
+-- ❌ 不要用：
+-- SELECT pg_terminate_backend(1073815845);
+-- （会断开你自己的连接）
+```
+
+### **情况 B: 别人的锁** ✅ **使用 terminate**
+
+```sql
+-- 第一步：确认不是自己的
+SELECT pg_backend_pid();  -- 返回 1234（不同）
+
+-- 第二步：查看锁是谁的
+SELECT * FROM pg_locks WHERE pid = 1073815845;  -- 确实有锁
+
+-- 第三步：尝试取消（较温和）
+SELECT pg_cancel_backend(1073815845);
+
+-- 等待 5-10 秒...
+
+-- 第四步：如果还锁着，强制终止
+SELECT pg_terminate_backend(1073815845);
+
+-- ✅ 为什么用 terminate：
+--   • 你不能在别人的会话里执行 ROLLBACK/COMMIT
+--   • pg_terminate_backend() 会：
+--     1. 终止那个会话
+--     2. 自动回滚那个会话未提交的事务
+--     3. 释放所有锁
+
+-- ❌ 不能用：
+-- ROLLBACK;  -- 只会影响你自己的会话，不是那个 PID
+```
+
+### **快速判断代码**
+
+```sql
+-- 一键判断应该用什么方法
+SELECT
+    CASE
+        WHEN <锁的PID> = pg_backend_pid() THEN
+            '这是你的锁，请使用 ROLLBACK 或 COMMIT'
+        ELSE
+            '这是别人的锁，请使用 pg_terminate_backend(' || <锁的PID> || ')'
+    END as recommendation;
+
+-- 实际例子：
+SELECT
+    CASE
+        WHEN 1073815845 = pg_backend_pid() THEN
+            '这是你的锁，请使用 ROLLBACK 或 COMMIT'
+        ELSE
+            '这是别人的锁，请使用 pg_terminate_backend(1073815845)'
+    END as recommendation;
+```
+
+---
+
 ## 🚀 **快速故障排查流程**
 
 ### **步骤 1: 运行诊断脚本**

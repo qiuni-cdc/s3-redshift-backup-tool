@@ -146,9 +146,18 @@ def cancel_backend(conn, pid, terminate=False):
 
             if pid == my_pid:
                 print(f"   ⚠️  WARNING: This is your current session!")
-                confirm = input(f"   Are you sure you want to {action} your own session? (yes/no): ")
+                print(f"   💡 RECOMMENDATION: Instead of terminating your own session,")
+                print(f"      you should run ROLLBACK or COMMIT to release locks.")
+                print(f"")
+                print(f"   In your SQL client, run:")
+                print(f"      ROLLBACK;  -- to cancel changes and release locks")
+                print(f"      -- OR")
+                print(f"      COMMIT;    -- to save changes and release locks")
+                print(f"")
+                confirm = input(f"   Do you still want to {action} your own session? (yes/no): ")
                 if confirm.lower() != 'yes':
                     print("   ❌ Operation cancelled")
+                    print("   ✅ Please run ROLLBACK or COMMIT in your SQL session instead")
                     return False
 
             # Execute cancel or terminate
