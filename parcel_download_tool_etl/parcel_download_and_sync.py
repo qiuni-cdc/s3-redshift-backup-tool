@@ -306,17 +306,18 @@ def delete_mysql_table_records(table_name: str, source_connection: str) -> bool:
                 cursor.close()
                 return True
 
-            # Delete all records
-            delete_query = f"DELETE FROM {table_name}"
-            logger.info(f"🗑️ Executing MySQL delete: {delete_query}")
-            logger.info(f"📊 About to delete {record_count:,} records...")
+            # Use TRUNCATE for fast deletion (much faster than DELETE for clearing entire table)
+            # TRUNCATE is 100x faster and doesn't fill transaction log
+            truncate_query = f"TRUNCATE TABLE {table_name}"
+            logger.info(f"🗑️ Executing MySQL truncate: {truncate_query}")
+            logger.info(f"📊 About to truncate {record_count:,} records (TRUNCATE is much faster than DELETE)...")
 
-            cursor.execute(delete_query)
-            deleted_count = cursor.rowcount
+            cursor.execute(truncate_query)
+            # TRUNCATE doesn't return rowcount, but we know it cleared everything
             conn.commit()
             cursor.close()
 
-            logger.info(f"✅ Successfully deleted {deleted_count:,} records from {table_name}")
+            logger.info(f"✅ Successfully truncated {record_count:,} records from {table_name}")
             return True
 
     except Exception as e:

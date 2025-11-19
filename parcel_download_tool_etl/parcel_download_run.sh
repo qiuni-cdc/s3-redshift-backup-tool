@@ -18,7 +18,7 @@ fi
 
 cd "$PROJECT_ROOT/parcel_download_tool_etl" || exit 1
 
-LOG_DIR="$PROJECT_ROOT/parcel_download_tool_etl/parcel_download_hourly_log"
+LOG_DIR="$PROJECT_ROOT/parcel_download_tool_etl/backfill_logs"
 mkdir -p "$LOG_DIR"
 
 # Activate virtualenv
@@ -45,9 +45,10 @@ for ((i=1; i<=HOURS_COUNT; i++)); do
 
     # Convert timestamps to readable format for display
     WINDOW_START=$(date -d "@$WINDOW_START_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
-    WINDOW_END=$(date -d "@$WINDOW_END_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
+    WINDOW_END=$(date -d "@$WINDOW_END_TIMESTAMP" '+%Y-%m-%d %H:%M:%S') 
+    WINDOW_START_SAFE=$(date -d "@$WINDOW_START_TIMESTAMP" '+%Y%m%d_%H%M%S')
 
-    LOG_FILE="$LOG_DIR/window_${i}_$(date '+%Y%m%d_%H%M%S').log"
+    LOG_FILE="$LOG_DIR/backfill_${WINDOW_START_SAFE}_$(date '+%Y%m%d_%H%M%S').log"
 
     echo "" 1>&2
     echo "==========================================" 1>&2
