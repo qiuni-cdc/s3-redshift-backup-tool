@@ -474,7 +474,7 @@ class ConnectionManager:
                 tcp_keepalive=True,
                 # Timeout settings to prevent indefinite hangs
                 connect_timeout=60,   # 60 seconds to establish S3 connection
-                read_timeout=300      # 5 minutes to read S3 response
+                read_timeout=1800     # 30 minutes to read S3 response (for large files)
             )
             
             # Create optimized S3 client

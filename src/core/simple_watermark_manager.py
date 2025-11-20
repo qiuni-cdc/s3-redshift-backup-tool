@@ -55,7 +55,7 @@ class SimpleWatermarkManager:
 
         boto_config = Config(
             connect_timeout=60,   # 60 seconds to establish connection
-            read_timeout=300      # 5 minutes to read response
+            read_timeout=1800     # 30 minutes to read response (for large files)
         )
 
         self.s3_client = boto3.client('s3',
