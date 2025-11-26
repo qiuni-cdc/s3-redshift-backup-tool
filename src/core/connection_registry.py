@@ -400,17 +400,17 @@ class ConnectionRegistry:
         # Create pool if it doesn't exist
         if connection_name not in self.mysql_pools:
             self._create_mysql_pool(connection_name, config)
-        
+
         connection = None
         try:
             connection = self.mysql_pools[connection_name].get_connection()
-            
+
             # Test connection with simple query
             cursor = connection.cursor()
             cursor.execute("SELECT 1")
             cursor.fetchone()
             cursor.close()
-            
+
             logger.debug(f"Retrieved MySQL connection for {connection_name}")
             yield connection
             
@@ -723,9 +723,8 @@ class ConnectionRegistry:
     
     def _create_ssh_tunnel(self, name: str, config: ConnectionConfig) -> SSHTunnelForwarder:
         """Create SSH tunnel with enhanced error handling and proper timing"""
-        
         ssh_config = config.ssh_tunnel
-        
+
         # Check if tunnel already exists and is active
         if name in self.ssh_tunnels:
             existing_tunnel = self.ssh_tunnels[name]
@@ -774,8 +773,8 @@ class ConnectionRegistry:
         tunnel = None
         try:
             tunnel = SSHTunnelForwarder(**tunnel_params)
-            tunnel.daemon_forward_servers = False  # Use non-daemon threads for clean shutdown
-            tunnel.daemon_transport = False  # Ensure transport threads also non-daemon
+            tunnel.daemon_forward_servers = False  # Non-daemon for clean shutdown
+            tunnel.daemon_transport = False  # Non-daemon transport threads
             tunnel.skip_tunnel_checkup = False  # Enable tunnel health checks
             
             logger.debug(f"Starting SSH tunnel for {name} to {ssh_config['host']}...")
@@ -1005,12 +1004,12 @@ class ConnectionRegistry:
         """Close all connections, pools, and tunnels"""
         closed_count = 0
 
-        # Close SSH tunnels gracefully
+        # Close SSH tunnels with force stop to avoid hanging
         for name, tunnel in list(self.ssh_tunnels.items()):
             try:
                 if tunnel and tunnel.is_active:
                     logger.debug(f"Stopping SSH tunnel: {name}")
-                    tunnel.stop(force=False)  # Graceful stop first
+                    tunnel.stop(force=True)  # Force stop to avoid hanging
                     closed_count += 1
                     logger.debug(f"Closed SSH tunnel: {name}")
             except Exception as e:
