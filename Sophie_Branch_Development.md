@@ -1,5 +1,135 @@
 # Q&A - Common Issues and Solutions
 
+## SSH Tunnel Hanging on Shutdown (November 2025)
+
+### Problem
+Program hangs indefinitely after successful sync at the connection cleanup phase:
+```
+✅ unidw.dw_parcel_pricing_temp synced successfully
+Cleanup: connection_registry is set
+Closing all connections...
+<hangs here>
+```
+
+### Root Cause
+The `tunnel.stop(force=False)` call in `close_all_connections()` waits indefinitely for SSH tunnel threads to complete gracefully. In Python 3.7+, `socketserver.ThreadingMixIn.server_close()` waits for all non-daemon threads to finish.
+
+### Fix Applied
+Changed graceful shutdown to force shutdown in `src/core/connection_registry.py`:
+```python
+# BEFORE: Graceful stop (hangs)
+tunnel.stop(force=False)
+
+# AFTER: Force stop (immediate)
+tunnel.stop(force=True)
+```
+
+### Trade-offs
+- `force=True` may occasionally cause `Fatal Python error: _enter_buffered_busy` warnings at shutdown
+- These warnings are harmless and don't affect data integrity or program exit code
+- Preventing the hang is more important for production automation
+
+---
+
+## Duplicate SSH Tunnel Issue in Schema Validation (November 2025)
+
+### Problem
+When processing scoped table names (e.g., `US_DW_RO_SSH:unidw.dw_parcel_pricing_temp`), the `DataValidator._get_dynamic_table_schema()` method was creating a **second** `ConnectionRegistry`, resulting in:
+- Duplicate SSH tunnels to the same target
+- Potential blocking when the temporary registry is garbage collected
+- Connection conflicts
+
+### Root Cause
+```python
+# src/utils/validation.py - PROBLEMATIC CODE
+if ':' in table_name:
+    from src.core.connection_registry import ConnectionRegistry
+    connection_registry = ConnectionRegistry()  # Creates duplicate SSH tunnel!
+```
+
+### Fix Applied
+Skip schema validation for scoped tables in `src/utils/validation.py`:
+```python
+# AFTER: Skip validation for scoped tables
+if ':' in table_name:
+    logger.debug(f"Skipping schema validation for scoped table {table_name}")
+    return None  # Avoid creating duplicate SSH tunnel
+```
+
+### Why This is Safe
+1. `FlexibleSchemaManager` already performs full schema discovery in the main backup flow
+2. Schema validation is an extra check, not required for data correctness
+3. Parquet files contain embedded schema information
+4. Redshift COPY command validates data against table schema
+
+### Future Improvement
+Pass the existing `ConnectionRegistry` to the validator instead of creating a new one:
+```python
+def _get_dynamic_table_schema(self, table_name: str, connection_registry=None):
+    schema_manager = FlexibleSchemaManager(connection_manager, connection_registry=connection_registry)
+```
+
+---
+
+## Redshift Column Name Case Sensitivity (November 2025)
+
+### Problem
+MySQL column names with uppercase letters caused issues when loading to Redshift:
+- Redshift treats column names as case-insensitive
+- Column names stored internally as lowercase
+- Mismatches between Parquet schema and Redshift table schema
+
+### Fix Applied
+Convert all column names to lowercase at multiple points:
+
+1. **FlexibleSchemaManager._create_pyarrow_schema()** (`src/core/flexible_schema_manager.py`):
+```python
+col_name = col['COLUMN_NAME'].lower()  # Convert to lowercase
+```
+
+2. **S3Manager.upload_dataframe()** (`src/core/s3_manager.py`):
+```python
+df.columns = df.columns.str.lower()  # Convert DataFrame columns to lowercase
+```
+
+3. **FlexibleSchemaManager._sanitize_column_name_for_redshift()**:
+```python
+sanitized = column_name.lower()  # Lowercase first, then sanitize
+```
+
+---
+
+## Multi-Schema Connection Cleanup (November 2025)
+
+### Problem
+SSH tunnels were not properly cleaned up after CLI commands completed, causing:
+- Resource leaks
+- Potential port conflicts on subsequent runs
+- Hanging processes
+
+### Fix Applied
+Added cleanup in `src/cli/multi_schema_commands.py`:
+
+1. **Added `MultiSchemaContext.cleanup()` method**:
+```python
+def cleanup(self):
+    if self.connection_registry:
+        self.connection_registry.close_all_connections()
+```
+
+2. **Added `finally` blocks in all sync commands**:
+- `sync_pipeline`
+- `sync_connections`
+- `connections_test`
+- `_execute_table_sync`
+
+```python
+finally:
+    multi_schema_ctx.cleanup()
+```
+
+---
+
 ## ModuleNotFoundError: cdc_backup_integration Issue
 
 ### Why it happens:
@@ -1970,7 +2100,8 @@ python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_uni
 
 
 git commit -m "add files from main" --no-verify
-source s3_backup_venv/bin/activate  
+source s3_backup_venv/bin/activate    
+python -m src.cli.main connections test redshift_default
 
 
 python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool_temp -p us_dw_unidw_2_settlement_dws_pipeline_direct 
