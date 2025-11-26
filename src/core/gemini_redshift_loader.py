@@ -96,7 +96,7 @@ class GeminiRedshiftLoader:
             # Step 1: Get dynamic schema using unified schema manager
             logger.debug(f"Discovering schema for {table_name}")
             pyarrow_schema, redshift_ddl = self.schema_manager.get_table_schema(table_name)
-            
+
             # Step 2: Create or update Redshift table
             redshift_table_name = self._get_redshift_table_name(table_name, table_config)
             corrected_ddl = self._fix_ddl_table_name(redshift_ddl, redshift_table_name, table_name)
@@ -685,7 +685,7 @@ class GeminiRedshiftLoader:
                 conn.autocommit = True
                 yield conn
                 conn.close()
-                
+
         except Exception as e:
             logger.error(f"Failed to connect to Redshift: {e}")
             raise DatabaseError(f"Redshift connection failed: {e}")
@@ -867,7 +867,7 @@ class GeminiRedshiftLoader:
                 conn.autocommit = True
                 yield conn
                 conn.close()
-                
+
         except Exception as e:
             logger.error(f"Failed to connect to Redshift: {e}")
             raise DatabaseError(f"Redshift connection failed: {e}")

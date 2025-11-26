@@ -56,7 +56,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         if not self.cdc_integration:
             pipeline_config = getattr(self, 'pipeline_config', None)
             self.cdc_integration = create_cdc_integration(None, pipeline_config)
-        
+
         with self.database_session(source_connection) as db_conn:
             for i, table_name in enumerate(tables):
                 table_start_time = time.time()

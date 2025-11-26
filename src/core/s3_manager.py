@@ -452,6 +452,9 @@ class S3Manager:
                 compression=compression
             )
             
+            # Convert DataFrame column names to lowercase for Redshift compatibility
+            df.columns = df.columns.str.lower()
+
             # Use PoC schema alignment if enabled and schema provided
             if use_schema_alignment and schema:
                 logger.info("Applying PoC schema alignment")

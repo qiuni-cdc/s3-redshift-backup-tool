@@ -47,20 +47,19 @@ class FlexibleSchemaManager:
     def get_table_schema(self, table_name: str, force_refresh: bool = False) -> Tuple[pa.Schema, str]:
         """
         Get PyArrow schema and Redshift DDL for any table
-        
+
         Args:
             table_name: Full table name (e.g., 'settlement.settlement_normal_delivery_detail')
             force_refresh: Force refresh of cached schema
-            
+
         Returns:
             Tuple of (PyArrow schema, Redshift DDL)
         """
-        
         # Check cache first
         if not force_refresh and self._is_schema_cached(table_name):
             logger.info(f"Using cached schema for {table_name}")
             return self._schema_cache[table_name]
-        
+
         logger.info(f"Discovering dynamic schema for table: {table_name}")
         
         # Handle scoped table names (e.g., "US_PROD_RO_SSH:kuaisong.ecs_order_info")
@@ -103,11 +102,12 @@ class FlexibleSchemaManager:
                     self._cache_schema(table_name, pyarrow_schema, redshift_ddl)
 
                     logger.info(f"Dynamic schema discovered for {table_name}: {len(pyarrow_schema)} columns")
-                    return pyarrow_schema, redshift_ddl
 
                 finally:
                     cursor.close()
-                    
+
+            return pyarrow_schema, redshift_ddl
+
         except Exception as e:
             logger.error(f"Failed to discover schema for {table_name}: {e}")
             raise
@@ -177,29 +177,30 @@ class FlexibleSchemaManager:
     
     def _create_pyarrow_schema(self, schema_info: List[Dict], table_name: str) -> pa.Schema:
         """Convert MySQL schema info to PyArrow schema with intelligent type mapping"""
-        
+
         fields = []
-        
+
         for col in schema_info:
-            col_name = col['COLUMN_NAME']
+            # Convert column name to lowercase for Redshift compatibility
+            col_name = col['COLUMN_NAME'].lower()
             data_type = col['DATA_TYPE'].lower()
             column_type = col['COLUMN_TYPE'].lower()
             is_nullable = col['IS_NULLABLE'] == 'YES'
             max_length = col['CHARACTER_MAXIMUM_LENGTH']
             precision = col['NUMERIC_PRECISION']
             scale = col['NUMERIC_SCALE']
-            
+
             # Get PyArrow type using intelligent mapping
             pa_type = self._map_mysql_to_pyarrow(
                 data_type, column_type, max_length, precision, scale
             )
-            
-            # Create field
+
+            # Create field with lowercase column name
             field = pa.field(col_name, pa_type, nullable=is_nullable)
             fields.append(field)
-            
+
             logger.debug(f"Column {col_name}: {data_type}({column_type}) -> {pa_type}")
-        
+
         return pa.schema(fields)
     
     def _map_mysql_to_pyarrow(self, data_type: str, column_type: str, 
@@ -855,17 +856,19 @@ CREATE TABLE IF NOT EXISTS {clean_name} (
     
     def _sanitize_column_name_for_redshift(self, column_name: str) -> str:
         """Sanitize column names for Redshift compatibility
-        
+
         Redshift column names:
         - Cannot start with a number
         - Can contain letters, numbers, underscores
         - Must start with a letter or underscore
+        - Are case-insensitive (automatically converted to lowercase)
         """
+        # Convert to lowercase first (Redshift is case-insensitive)
+        sanitized = column_name.lower()
+
         # If column starts with a number, prefix with 'col_'
-        if column_name and column_name[0].isdigit():
-            sanitized = f"col_{column_name}"
+        if sanitized and sanitized[0].isdigit():
+            sanitized = f"col_{sanitized}"
             logger.warning(f"Column name '{column_name}' starts with number, renamed to '{sanitized}' for Redshift")
-            return sanitized
-        
-        # Return original name if it's already valid
-        return column_name
+
+        return sanitized

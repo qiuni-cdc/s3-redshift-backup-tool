@@ -1139,13 +1139,13 @@ class BaseBackupStrategy(ABC):
                         columns=len(schema),
                         schema_cached=table_name in self.flexible_schema_manager._schema_cache
                     )
-                
+
                 # Generate S3 key with configured partition strategy
                 s3_key = self.s3_manager.generate_s3_key(
                     table_name, current_timestamp, batch_id,
                     partition_strategy=self._get_partition_strategy()
                 )
-                
+
                 # Use flexible upload with dynamic schema alignment
                 success = self.s3_manager.upload_dataframe(
                     df,

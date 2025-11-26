@@ -66,7 +66,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             # Process each table sequentially
             successful_tables = []
             failed_tables = []
-            
+
             with self.database_session(source_connection) as db_conn:
                 for i, table_name in enumerate(tables):
                     table_start_time = time.time()

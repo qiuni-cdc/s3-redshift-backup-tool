@@ -73,43 +73,45 @@ class DataValidator:
     def _get_dynamic_table_schema(self, table_name: str) -> Optional[pa.Schema]:
         """
         Get table schema from actual database structure (not hardcoded)
-        
+
         Args:
             table_name: Full table name (e.g., 'settlement.table_name')
-            
+
         Returns:
             PyArrow schema from actual database structure
+
+        NOTE: This method is DISABLED for scoped tables (containing ':') to avoid
+        creating duplicate SSH tunnels which can cause connection issues.
+        Schema validation will be skipped for multi-schema pipelines.
         """
+        # DISABLED: Creating a new ConnectionRegistry here causes duplicate SSH tunnels
+        # which can block when the temporary registry is garbage collected.
+        # The backup process already has proper schema discovery via FlexibleSchemaManager.
+        if ':' in table_name:
+            logger.debug(f"Skipping schema validation for scoped table {table_name} (would create duplicate SSH tunnel)")
+            return None
+
         try:
-            # FIXED: Use FlexibleSchemaManager for dynamic schema discovery  
+            # FIXED: Use FlexibleSchemaManager for dynamic schema discovery
             from src.core.flexible_schema_manager import FlexibleSchemaManager
             from src.core.connections import ConnectionManager
             from src.config.settings import AppConfig
-            
+
             # Initialize config, connection manager and schema manager
             config = AppConfig()
             connection_manager = ConnectionManager(config)
-            
-            # Check if this is a scoped table name and we need the connection registry
-            connection_registry = None
-            if ':' in table_name:
-                try:
-                    from src.core.connection_registry import ConnectionRegistry
-                    connection_registry = ConnectionRegistry()
-                    logger.debug(f"Using connection registry for scoped table: {table_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to load connection registry: {e}")
-            
-            schema_manager = FlexibleSchemaManager(connection_manager, connection_registry=connection_registry)
+
+            # For non-scoped tables, use direct connection (no SSH tunnel needed)
+            schema_manager = FlexibleSchemaManager(connection_manager, connection_registry=None)
             pyarrow_schema, redshift_ddl = schema_manager.get_table_schema(table_name)
-            
+
             if pyarrow_schema:
                 logger.debug(f"Retrieved dynamic schema for {table_name}: {len(pyarrow_schema)} fields")
                 return pyarrow_schema
             else:
                 logger.warning(f"No schema returned for {table_name}")
                 return None
-                
+
         except Exception as e:
             logger.error(f"Failed to get dynamic schema for {table_name}: {e}")
             # Don't fall back to hardcoded schemas - that's the problem we're fixing

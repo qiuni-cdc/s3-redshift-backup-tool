@@ -25,29 +25,39 @@ logger = get_logger(__name__)
 
 class MultiSchemaContext:
     """Context object for multi-schema CLI commands"""
-    
+
     def __init__(self):
         self.connection_registry: Optional[ConnectionRegistry] = None
         self.config_manager: Optional[ConfigurationManager] = None
         self._initialized = False
-    
+
     def ensure_initialized(self, config_root: str = "config"):
         """Ensure multi-schema components are initialized"""
         if self._initialized:
             return
-        
+
         try:
             self.connection_registry = ConnectionRegistry()
             self.config_manager = ConfigurationManager(config_root)
             self._initialized = True
-            
+
             logger.info("Multi-schema CLI context initialized")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize multi-schema context: {e}")
             click.echo(f"❌ Initialization failed: {e}")
             click.echo("💡 Tip: Run 'python -m src.cli.main config setup' to create default configuration")
             sys.exit(1)
+
+    def cleanup(self):
+        """Clean up all resources including SSH tunnels"""
+        if self.connection_registry:
+            try:
+                logger.info("Cleaning up multi-schema context connections...")
+                self.connection_registry.close_all_connections()
+                logger.info("Multi-schema context cleanup completed")
+            except Exception as e:
+                logger.warning(f"Error during multi-schema context cleanup: {e}")
     
 # Global context
 multi_schema_ctx = MultiSchemaContext()
@@ -95,17 +105,17 @@ def add_multi_schema_commands(cli):
     @click.option('--parallel', is_flag=True, help='Override pipeline strategy to use parallel processing')
     @click.option('--json-output', type=click.Path(), help='Output execution metadata as JSON file for Airflow monitoring')
     @click.option('--s3-completion-bucket', type=str, help='S3 bucket for Airflow completion markers')
-    def sync_pipeline(pipeline: str, table: List[str], backup_only: bool, redshift_only: bool, 
+    def sync_pipeline(pipeline: str, table: List[str], backup_only: bool, redshift_only: bool,
                      limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], dry_run: bool, parallel: bool,
                      json_output: Optional[str] = None, s3_completion_bucket: Optional[str] = None):
         """Sync tables using pipeline configuration (v1.1.0 enhanced syntax)"""
-        
+
         multi_schema_ctx.ensure_initialized()
-        
+
         try:
             # Load and validate pipeline configuration
             pipeline_config = multi_schema_ctx.config_manager.get_pipeline_config(pipeline)
-            
+
             # Validate pipeline
             validation_report = multi_schema_ctx.config_manager.validate_pipeline(pipeline)
             if not validation_report['valid']:
@@ -115,33 +125,33 @@ def add_multi_schema_commands(cli):
                 if len(validation_report['errors']) > 5:
                     click.echo(f"  ... and {len(validation_report['errors']) - 5} more errors")
                 return
-            
+
             # Show pipeline information
             click.echo(f"🚀 Pipeline: {pipeline_config.name} (v{pipeline_config.version})")
             click.echo(f"📝 {pipeline_config.description}")
             click.echo(f"🔗 {pipeline_config.source} → {pipeline_config.target}")
             click.echo(f"📋 Tables: {', '.join(table)}")
-            
+
             if dry_run:
                 click.echo("🔍 DRY RUN - Preview mode enabled")
-            
+
             if parallel and pipeline_config.processing.get('strategy') != 'parallel':
                 click.echo("⚡ Overriding to parallel processing")
-            
+
             # Check if Airflow integration is requested
             if json_output or s3_completion_bucket:
                 click.echo("🚀 Using Airflow integration features")
-                
+
                 # Create sync executor function for Airflow integration
                 def execute_sync_tables(tracker):
                     """Execute sync for all tables and return results"""
                     table_results = {}
                     success_count = 0
-                    
+
                     for table_name in table:
                         if table_name not in pipeline_config.tables:
                             click.echo(f"⚠️  Warning: Table {table_name} not configured in pipeline")
-                            
+
                             # For default pipeline, allow dynamic registration
                             if pipeline == "default":
                                 multi_schema_ctx.config_manager.register_table_dynamically(pipeline, table_name)
@@ -152,9 +162,9 @@ def add_multi_schema_commands(cli):
                                     "error_message": f"Table {table_name} not configured in pipeline"
                                 }
                                 continue
-                        
+
                         table_config = pipeline_config.tables[table_name]
-                        
+
                         if dry_run:
                             _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
                             table_results[table_name] = {
@@ -166,18 +176,18 @@ def add_multi_schema_commands(cli):
                             success_count += 1
                         else:
                             result = _execute_table_sync(
-                                pipeline_config, table_config, 
+                                pipeline_config, table_config,
                                 backup_only, redshift_only, limit, parallel, max_workers, max_chunks
                             )
-                            
+
                             # FIXED: Use actual metrics from _execute_table_sync instead of hardcoded values
                             table_results[table_name] = result
-                            
+
                             if result.get("success", False):
                                 success_count += 1
-                    
+
                     return success_count, table_results
-                
+
                 # Use Airflow integration
                 exit_code = enhance_sync_with_airflow_integration(
                     pipeline=pipeline,
@@ -188,14 +198,14 @@ def add_multi_schema_commands(cli):
                     completion_prefix="completion_markers"
                 )
                 sys.exit(exit_code)
-            
+
             else:
                 # Original logic for backward compatibility
                 success_count = 0
                 for table_name in table:
                     if table_name not in pipeline_config.tables:
                         click.echo(f"⚠️  Warning: Table {table_name} not configured in pipeline")
-                        
+
                         # For default pipeline, allow dynamic registration
                         if pipeline == "default":
                             multi_schema_ctx.config_manager.register_table_dynamically(pipeline, table_name)
@@ -203,20 +213,20 @@ def add_multi_schema_commands(cli):
                         else:
                             click.echo(f"❌ Skipping unconfigured table: {table_name}")
                             continue
-                    
+
                     table_config = pipeline_config.tables[table_name]
-                    
+
                     if dry_run:
                         _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
                         success_count += 1
                     else:
                         success = _execute_table_sync(
-                            pipeline_config, table_config, 
+                            pipeline_config, table_config,
                             backup_only, redshift_only, limit, parallel, max_workers, max_chunks
                         )
                         if success:
                             success_count += 1
-                
+
                 # Summary
                 total_tables = len(table)
                 if success_count == total_tables:
@@ -225,11 +235,15 @@ def add_multi_schema_commands(cli):
                     click.echo(f"⚠️  Pipeline completed with issues: {success_count}/{total_tables} tables successful")
                     if success_count < total_tables:
                         sys.exit(1)
-        
+
         except Exception as e:
             logger.error(f"Pipeline sync failed: {e}")
             click.echo(f"❌ Pipeline sync failed: {e}")
             sys.exit(1)
+
+        finally:
+            # Clean up SSH tunnels and connections from global context
+            multi_schema_ctx.cleanup()
     
     @sync_command.command(name="connections")
     @click.option('--source', '-s', required=True, help='Source connection name')
@@ -241,40 +255,40 @@ def add_multi_schema_commands(cli):
     @click.option('--max-workers', type=int, help='Maximum parallel workers (overrides config)')
     @click.option('--max-chunks', type=int, help='Maximum number of chunks to process (total rows = limit × max-chunks)')
     @click.option('--batch-size', type=int, default=10000, help='Batch size for processing')
-    def sync_connections(source: str, target: str, table: List[str], backup_only: bool, 
+    def sync_connections(source: str, target: str, table: List[str], backup_only: bool,
                         redshift_only: bool, limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], batch_size: int):
         """Sync tables using explicit connections (v1.1.0 ad-hoc syntax)"""
-        
+
         multi_schema_ctx.ensure_initialized()
-        
+
         try:
             # Validate connections exist
             source_info = multi_schema_ctx.connection_registry.get_connection_info(source)
             target_info = multi_schema_ctx.connection_registry.get_connection_info(target)
-            
+
             click.echo(f"🚀 Ad-hoc Connection Sync")
             click.echo(f"📊 Source: {source} ({source_info['database']}@{source_info['host']})")
             click.echo(f"🎯 Target: {target} ({target_info['database']}@{target_info['host']})")
             click.echo(f"📋 Tables: {', '.join(table)}")
-            
+
             # Test connections
             click.echo("🔍 Testing connections...")
-            
+
             source_test = multi_schema_ctx.connection_registry.test_connection(source)
             if not source_test['success']:
                 click.echo(f"❌ Source connection failed: {source_test['error']}")
                 return
             click.echo(f"✅ Source connection: {source} ({source_test['duration_seconds']}s)")
-            
+
             target_test = multi_schema_ctx.connection_registry.test_connection(target)
             if not target_test['success']:
                 click.echo(f"❌ Target connection failed: {target_test['error']}")
                 return
             click.echo(f"✅ Target connection: {target} ({target_test['duration_seconds']}s)")
-            
+
             # Create ad-hoc pipeline configuration
             ad_hoc_pipeline = _create_adhoc_pipeline_config(source, target, list(table), batch_size)
-            
+
             # Process tables
             success_count = 0
             for table_name in table:
@@ -285,7 +299,7 @@ def add_multi_schema_commands(cli):
                 )
                 if success:
                     success_count += 1
-            
+
             # Summary
             total_tables = len(table)
             if success_count == total_tables:
@@ -294,11 +308,15 @@ def add_multi_schema_commands(cli):
                 click.echo(f"⚠️  Connection sync completed with issues: {success_count}/{total_tables} tables")
                 if success_count < total_tables:
                     sys.exit(1)
-        
+
         except Exception as e:
             logger.error(f"Connection-based sync failed: {e}")
             click.echo(f"❌ Connection sync failed: {e}")
             sys.exit(1)
+
+        finally:
+            # Clean up SSH tunnels and connections from global context
+            multi_schema_ctx.cleanup()
     
     # Configuration management commands
     @cli.group(name="config")
@@ -645,54 +663,59 @@ def add_multi_schema_commands(cli):
     @click.option('--all', 'test_all', is_flag=True, help='Test all connections')
     def connections_test(connection_name: Optional[str], test_all: bool):
         """Test database connections"""
-        
+
         multi_schema_ctx.ensure_initialized()
-        
-        if test_all:
-            click.echo("🔍 Testing all connections...")
-            click.echo("")
-            
-            results = multi_schema_ctx.connection_registry.test_all_connections()
-            
-            for conn_name, result in results['results'].items():
-                if result['success']:
-                    click.echo(f"✅ {conn_name} ({result['duration_seconds']}s)")
-                    if result['details']:
-                        for key, value in result['details'].items():
-                            if 'version' in key.lower():
-                                click.echo(f"   {value}")
-                else:
-                    click.echo(f"❌ {conn_name}: {result['error']}")
+
+        try:
+            if test_all:
+                click.echo("🔍 Testing all connections...")
                 click.echo("")
-            
-            # Summary
-            summary = results['summary']
-            click.echo(f"📊 Summary: {summary['successful_connections']}/{summary['total_connections']} successful ({summary['success_rate']}%)")
-            
-            if summary['successful_connections'] < summary['total_connections']:
-                sys.exit(1)
-        
-        elif connection_name:
-            click.echo(f"🔍 Testing connection: {connection_name}")
-            
-            result = multi_schema_ctx.connection_registry.test_connection(connection_name)
-            
-            if result['success']:
-                click.echo(f"✅ Connection successful ({result['duration_seconds']}s)")
-                
-                if result['details']:
+
+                results = multi_schema_ctx.connection_registry.test_all_connections()
+
+                for conn_name, result in results['results'].items():
+                    if result['success']:
+                        click.echo(f"✅ {conn_name} ({result['duration_seconds']}s)")
+                        if result['details']:
+                            for key, value in result['details'].items():
+                                if 'version' in key.lower():
+                                    click.echo(f"   {value}")
+                    else:
+                        click.echo(f"❌ {conn_name}: {result['error']}")
                     click.echo("")
-                    click.echo("Connection Details:")
-                    for key, value in result['details'].items():
-                        click.echo(f"  {key}: {value}")
+
+                # Summary
+                summary = results['summary']
+                click.echo(f"📊 Summary: {summary['successful_connections']}/{summary['total_connections']} successful ({summary['success_rate']}%)")
+
+                if summary['successful_connections'] < summary['total_connections']:
+                    sys.exit(1)
+
+            elif connection_name:
+                click.echo(f"🔍 Testing connection: {connection_name}")
+
+                result = multi_schema_ctx.connection_registry.test_connection(connection_name)
+
+                if result['success']:
+                    click.echo(f"✅ Connection successful ({result['duration_seconds']}s)")
+
+                    if result['details']:
+                        click.echo("")
+                        click.echo("Connection Details:")
+                        for key, value in result['details'].items():
+                            click.echo(f"  {key}: {value}")
+                else:
+                    click.echo(f"❌ Connection failed: {result['error']}")
+                    sys.exit(1)
+
             else:
-                click.echo(f"❌ Connection failed: {result['error']}")
+                click.echo("❌ Please specify a connection name or use --all")
+                click.echo("💡 List connections: python -m src.cli.main connections list")
                 sys.exit(1)
-        
-        else:
-            click.echo("❌ Please specify a connection name or use --all")
-            click.echo("💡 List connections: python -m src.cli.main connections list")
-            sys.exit(1)
+
+        finally:
+            # Clean up SSH tunnels and connections from global context
+            multi_schema_ctx.cleanup()
     
     @connections_command.command(name="info")
     @click.argument('connection_name')
@@ -812,12 +835,15 @@ def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshi
         click.echo(f"  📋 Dependencies: {', '.join(table_config.depends_on)}")
 
 
-def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool, 
+def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool,
                        limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None) -> Dict[str, Any]:
     """Execute actual table sync with multi-schema configuration"""
-    
+
     click.echo(f"🚀 Syncing: {table_config.full_name}")
-    
+
+    # Track connection registry for cleanup
+    connection_registry = None
+
     try:
         # Import the existing backup strategies
         from src.backup.sequential import SequentialBackupStrategy
@@ -918,7 +944,7 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             # FIXED: Properly handle backup_only and redshift_only flags (v1.2.0 regression fix)
             backup_success = True
             redshift_success = True
-            
+
             if not redshift_only:
                 # Stage 1: MySQL → S3 Backup with multi-schema support
                 source_connection = pipeline_config.source
@@ -928,17 +954,20 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     max_total_rows=max_total_rows,
                     source_connection=source_connection
                 )
-            
+                # Get connection registry for later cleanup
+                connection_registry = getattr(backup_strategy, 'connection_registry', None)
+
             if not backup_only and backup_success:
                 # Stage 2: S3 → Redshift Loading (using v1.0.0 working pattern)
                 try:
                     from src.core.gemini_redshift_loader import GeminiRedshiftLoader
                     from src.core.watermark_adapter import create_watermark_manager
                     from src.core.cdc_configuration_manager import CDCConfigurationManager
-                    
+
                     # Use the watermark v2.0 system for Redshift loading with shared connection registry
                     # Pass the connection registry from backup to ensure SSH tunnels are reused
-                    connection_registry = getattr(backup_strategy, 'connection_registry', None)
+                    if connection_registry is None:
+                        connection_registry = getattr(backup_strategy, 'connection_registry', None)
                     redshift_loader = GeminiRedshiftLoader(config, connection_registry=connection_registry)
                     watermark_manager = create_watermark_manager(config.to_dict())
                     
@@ -1036,14 +1065,14 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                 "files_created": actual_files,
                 "duration": 30.0  # TODO: Add actual duration tracking
             }
-            
+
             if result:
                 click.echo(f"  ✅ {table_config.full_name} synced successfully")
             else:
                 click.echo(f"  ❌ {table_config.full_name} sync failed")
-                
+
             return result_dict
-            
+
         except Exception as config_error:
             logger.error(f"Failed to execute table sync with v1.0.0 compatibility: {config_error}")
             click.echo(f"  ❌ Configuration error: {config_error}")
@@ -1054,7 +1083,7 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                 "files_created": 0,
                 "duration": 0
             }
-            
+
     except ImportError as e:
         # v1.0.0 compatibility removed - fail with clear error message
         error_msg = f"Required backup strategies not available: {e}. Ensure all dependencies are installed."
@@ -1067,7 +1096,7 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             "files_created": 0,
             "duration": 0
         }
-        
+
     except Exception as e:
         click.echo(f"  ❌ {table_config.full_name} failed: {e}")
         logger.error(f"Table sync failed for {table_config.full_name}: {e}")
@@ -1078,6 +1107,17 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
             "files_created": 0,
             "duration": 0
         }
+
+    finally:
+        # Always clean up connection registry to close SSH tunnels
+        logger.info(f"Cleanup: connection_registry is {'set' if connection_registry else 'None'}")
+        if connection_registry:
+            try:
+                logger.info("Closing all connections...")
+                connection_registry.close_all_connections()
+                logger.info("Connection registry cleaned up")
+            except Exception as cleanup_error:
+                logger.warning(f"Error during connection cleanup: {cleanup_error}")
 
 
 def _create_adhoc_pipeline_config(source: str, target: str, tables: List[str], batch_size: int):
