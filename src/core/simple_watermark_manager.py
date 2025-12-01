@@ -19,6 +19,7 @@ Cumulative Fields:
 
 import json
 import logging
+import time
 from typing import Dict, Optional, List, Any
 from datetime import datetime, timezone
 import boto3
@@ -484,19 +485,55 @@ class SimpleWatermarkManager:
             }
         }
     
-    def _save_watermark(self, table_name: str, watermark: Dict[str, Any]) -> None:
-        """Save watermark to S3."""
+    def _save_watermark(self, table_name: str, watermark: Dict[str, Any], max_retries: int = 3) -> None:
+        """
+        Save watermark to S3 with retry logic for network resilience.
+
+        This method implements exponential backoff retry to handle transient
+        network failures. Without retry, a brief network interruption after
+        S3 data upload would cause row count loss in the watermark.
+
+        Args:
+            table_name: Table identifier
+            watermark: Watermark data to save
+            max_retries: Maximum number of retry attempts (default: 3)
+        """
         key = f"{self.watermark_prefix}{self._clean_table_name(table_name)}.json"
-        
-        try:
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=json.dumps(watermark, indent=2, cls=DateTimeEncoder),
-                ContentType='application/json'
-            )
-        except Exception as e:
-            raise WatermarkError(f"Failed to save watermark: {e}")
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                self.s3_client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    Body=json.dumps(watermark, indent=2, cls=DateTimeEncoder),
+                    ContentType='application/json'
+                )
+
+                # Success - log if this was a retry
+                if attempt > 0:
+                    logger.info(f"Watermark saved successfully after {attempt + 1} attempts for {table_name}")
+                return
+
+            except Exception as e:
+                last_error = e
+
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"Watermark save failed for {table_name} (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time}s: {e}"
+                    )
+                    time.sleep(wait_time)
+                else:
+                    # All retries exhausted
+                    logger.error(
+                        f"Watermark save failed for {table_name} after {max_retries} attempts: {e}"
+                    )
+
+        # Raise error after all retries failed
+        raise WatermarkError(f"Failed to save watermark after {max_retries} attempts: {last_error}")
     
     def _clean_table_name(self, table_name: str) -> str:
         """Clean table name for S3 key usage."""
