@@ -222,7 +222,7 @@ pipeline:
   
   s3:
     isolation_prefix: ""  # No isolation for v1.0.0 compatibility
-    partition_strategy: "datetime"
+    partition_strategy: "table"
     compression: "snappy"
   
   default_table_config:

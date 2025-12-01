@@ -239,7 +239,7 @@ class ConfigurationManager:
                     },
                     's3': {
                         'isolation_prefix': '',  # No isolation for backward compatibility
-                        'partition_strategy': 'datetime',
+                        'partition_strategy': 'table',
                         'compression': 'snappy'
                     },
                     'default_table_config': {
@@ -701,7 +701,7 @@ class ConfigurationManager:
             source="default",
             target="default",
             processing={'strategy': 'sequential'},
-            s3={'isolation_prefix': '', 'partition_strategy': 'datetime'},
+            s3={'isolation_prefix': '', 'partition_strategy': 'table'},
             default_table_config={},
             tables=default_tables
         )

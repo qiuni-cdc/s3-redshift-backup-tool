@@ -122,7 +122,7 @@ class S3Manager:
         table_name: str, 
         timestamp: str, 
         batch_id,  # Accept both int and str
-        partition_strategy: str = "datetime"
+        partition_strategy: str = "table"
     ) -> str:
         """
         Generate S3 key with partitioning strategy.

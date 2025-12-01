@@ -2068,12 +2068,12 @@ The MySQL DELETE context manager fix is now **production-ready** with:
    - Use error suppression (`except: pass`) to isolate cleanup steps
 
 ## Usually Used Commands
-python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline_direct  
-python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline_direct 
-python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline_direct   
-python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -pus_dw_unidw_2_public_pipeline_direct
-python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline_direct --id 695773690 
-python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline_direct -t unidw.dw_parcel_detail_tool --limit 5000000 2>&1 | tee parcel_detail_sync.log
+python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
+--id 
+python -m src.cli.main s3clean list -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline   
+python -m src.cli.main s3clean clean -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline
+python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline --id 695773690 
+python -m src.cli.main sync pipeline -p us_dw_unidw_2_public_pipeline -t unidw.dw_parcel_detail_tool --limit 5000000 2>&1 | tee parcel_detail_sync.log
 
 python -m src.cli.main watermark get -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline 
 python -m src.cli.main watermark reset -t unidw.dw_parcel_pricing_temp -p us_dw_unidw_2_public_pipeline  
