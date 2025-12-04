@@ -264,7 +264,7 @@ def get_redshift_table_count(table_name: str, target_connection: str, min_insert
         with conn_registry.get_redshift_connection(target_connection) as conn:
             cursor = conn.cursor()
             query = f"""
-                SELECT COUNT(*)
+                SELECT COUNT(distinct id)
                 FROM {table_name}
                 WHERE inserted_at >= %s AND inserted_at <= %s
             """

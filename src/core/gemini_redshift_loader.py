@@ -603,34 +603,24 @@ class GeminiRedshiftLoader:
 
             logger.info(f"Executing COPY command for {s3_uri}")
 
-            # Set timeout to prevent indefinite hanging (10 minutes)
-            cursor.execute("SET statement_timeout = 600000")
+            # Execute COPY command
+            cursor.execute(copy_command)
 
-            try:
-                # Execute COPY command
-                cursor.execute(copy_command)
+            # CRITICAL FIX: Get actual number of rows loaded and verify it's not zero
+            cursor.execute("SELECT pg_last_copy_count()")
+            rows_loaded = cursor.fetchone()[0]
 
-                # CRITICAL FIX: Get actual number of rows loaded and verify it's not zero
-                cursor.execute("SELECT pg_last_copy_count()")
-                rows_loaded = cursor.fetchone()[0]
+            # Commit the transaction
+            conn.commit()
 
-                # Commit the transaction
-                conn.commit()
+            # Log actual result
+            if rows_loaded == 0:
+                logger.warning(f"⚠️  COPY command executed but loaded 0 rows from {s3_uri}")
+            else:
+                logger.info(f"✅ COPY command loaded {rows_loaded} rows from {s3_uri}")
 
-                # Log actual result
-                if rows_loaded == 0:
-                    logger.warning(f"⚠️  COPY command executed but loaded 0 rows from {s3_uri}")
-                else:
-                    logger.info(f"✅ COPY command loaded {rows_loaded} rows from {s3_uri}")
-
-                return rows_loaded
-            finally:
-                # Always reset timeout to unlimited
-                try:
-                    cursor.execute("SET statement_timeout = 0")
-                except:
-                    pass  # Ignore errors during timeout reset
-                cursor.close()
+            cursor.close()
+            return rows_loaded
             
         except Exception as e:
             # Rollback the failed transaction to clean up the connection state
@@ -785,34 +775,24 @@ class GeminiRedshiftLoader:
 
             logger.info(f"Executing COPY command for {s3_uri}")
 
-            # Set timeout to prevent indefinite hanging (10 minutes)
-            cursor.execute("SET statement_timeout = 600000")
+            # Execute COPY command
+            cursor.execute(copy_command)
 
-            try:
-                # Execute COPY command
-                cursor.execute(copy_command)
+            # CRITICAL FIX: Get actual number of rows loaded and verify it's not zero
+            cursor.execute("SELECT pg_last_copy_count()")
+            rows_loaded = cursor.fetchone()[0]
 
-                # CRITICAL FIX: Get actual number of rows loaded and verify it's not zero
-                cursor.execute("SELECT pg_last_copy_count()")
-                rows_loaded = cursor.fetchone()[0]
+            # Commit the transaction
+            conn.commit()
 
-                # Commit the transaction
-                conn.commit()
+            # Log actual result
+            if rows_loaded == 0:
+                logger.warning(f"⚠️  COPY command executed but loaded 0 rows from {s3_uri}")
+            else:
+                logger.info(f"✅ COPY command loaded {rows_loaded} rows from {s3_uri}")
 
-                # Log actual result
-                if rows_loaded == 0:
-                    logger.warning(f"⚠️  COPY command executed but loaded 0 rows from {s3_uri}")
-                else:
-                    logger.info(f"✅ COPY command loaded {rows_loaded} rows from {s3_uri}")
-
-                return rows_loaded
-            finally:
-                # Always reset timeout to unlimited
-                try:
-                    cursor.execute("SET statement_timeout = 0")
-                except:
-                    pass  # Ignore errors during timeout reset
-                cursor.close()
+            cursor.close()
+            return rows_loaded
             
         except Exception as e:
             # Rollback the failed transaction to clean up the connection state
