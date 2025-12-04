@@ -401,7 +401,7 @@ class S3Manager:
             
             # Wait for completion with timeout
             try:
-                future.result(timeout=300)  # 5 minute timeout
+                future.result(timeout=3600)  # 5 minute timeout
                 logger.debug("Optimized multipart upload completed", s3_key=key)
             except Exception as e:
                 logger.error("Multipart upload failed", s3_key=key, error=str(e))

@@ -361,7 +361,7 @@ class ConnectionManager:
                 'password': conn_config_obj.password,
                 'database': conn_config_obj.database,
                 'autocommit': False,
-                'connection_timeout': 30,
+                'connection_timeout': 1800,  # 30 minutes
                 'charset': 'utf8mb4',
                 'use_unicode': True,
                 'sql_mode': 'TRADITIONAL',

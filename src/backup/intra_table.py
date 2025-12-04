@@ -187,7 +187,7 @@ class IntraTableBackupStrategy(BaseBackupStrategy):
                 'password': self.config.database.password.get_secret_value(),
                 'database': self.config.database.database,
                 'autocommit': False,
-                'connection_timeout': 30,
+                'connection_timeout': 1800,  # 30 minutes
                 'charset': 'utf8mb4',
                 'use_unicode': True,
                 'sql_mode': 'TRADITIONAL',

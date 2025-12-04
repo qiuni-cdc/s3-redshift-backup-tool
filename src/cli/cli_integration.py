@@ -194,7 +194,7 @@ connections:
 
 # Global connection settings
 connection_settings:
-  default_timeout: 30
+  default_timeout: 1800  # 30 minutes
   connection_retry_delay: 5
   pool_recycle_time: 3600
   health_check_interval: 300

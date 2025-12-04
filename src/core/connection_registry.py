@@ -91,9 +91,9 @@ class ConnectionRegistry:
         self.mysql_pools: Dict[str, mysql.connector.pooling.MySQLConnectionPool] = {}
         self.redshift_pools: Dict[str, psycopg2.pool.ThreadedConnectionPool] = {}
         self.ssh_tunnels: Dict[str, SSHTunnelForwarder] = {}
-        
+
         # Connection settings
-        self.default_timeout = 30
+        self.default_timeout = 1800  # 30 minutes
         self.connection_retry_delay = 5
         self.pool_recycle_time = 3600
         self.health_check_interval = 300
@@ -246,7 +246,7 @@ class ConnectionRegistry:
                 }
             },
             'connection_settings': {
-                'default_timeout': 30,
+                'default_timeout': 1800,  # 30 minutes
                 'connection_retry_delay': 5,
                 'pool_recycle_time': 3600,
                 'health_check_interval': 300
@@ -266,7 +266,7 @@ class ConnectionRegistry:
             
             # Apply global connection settings
             global_settings = config.get('connection_settings', {})
-            self.default_timeout = global_settings.get('default_timeout', 30)
+            self.default_timeout = global_settings.get('default_timeout', 1800)  # 30 minutes default
             self.connection_retry_delay = global_settings.get('connection_retry_delay', 5)
             self.pool_recycle_time = global_settings.get('pool_recycle_time', 3600)
             self.health_check_interval = global_settings.get('health_check_interval', 300)

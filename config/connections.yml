@@ -283,7 +283,7 @@ s3_configs:
 backup:
   batch_size: 1000000
   max_workers: 4
-  timeout_seconds: 600
+  timeout_seconds: 3600
   
   # Memory management
   memory_limit_mb: 6144
