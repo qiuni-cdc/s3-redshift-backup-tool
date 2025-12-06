@@ -2114,4 +2114,6 @@ python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_uni
 python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline_direct -t unidw.dw_parcel_detail_tool 2>&1 | tee parcel_detail_sync.log
 
 python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log
-python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log
+python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log 
+
+cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_hourly_log
