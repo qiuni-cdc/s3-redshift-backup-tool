@@ -282,6 +282,62 @@ def get_redshift_table_count(table_name: str, target_connection: str, min_insert
         raise
 
 
+def delete_redshift_records_by_inserted_at(table_name: str, target_connection: str, min_inserted_at: str, max_inserted_at: str) -> bool:
+    """
+    Delete records from Redshift table based on inserted_at range.
+
+    This is used to clean up partial/incorrect loads before retrying.
+
+    Args:
+        table_name: Name of the Redshift table (e.g., 'dw_parcel_detail_tool')
+        target_connection: Redshift connection name from connections.yml
+        min_inserted_at: Minimum inserted_at value (ISO format string)
+        max_inserted_at: Maximum inserted_at value (ISO format string)
+
+    Returns:
+        bool: True if deletion successful, False otherwise
+    """
+    try:
+        # Initialize connection registry (uses project root's connections.yml)
+        config_path = PROJECT_ROOT / "config" / "connections.yml"
+        conn_registry = ConnectionRegistry(config_path=str(config_path))
+
+        logger.info(f"🗑️ Cleaning up Redshift table: {table_name}")
+        logger.info(f"📡 Using connection: {target_connection}")
+        logger.info(f"⏰ inserted_at range: {min_inserted_at} to {max_inserted_at}")
+
+        # Use the Redshift connection specified
+        with conn_registry.get_redshift_connection(target_connection) as conn:
+            cursor = conn.cursor()
+            try:
+                # Delete records in the inserted_at range
+                delete_query = f"""
+                    DELETE FROM {table_name}
+                    WHERE inserted_at >= %s AND inserted_at <= %s
+                """
+                logger.info(f"🗑️ Executing Redshift delete: DELETE FROM {table_name} WHERE inserted_at BETWEEN {min_inserted_at} AND {max_inserted_at}")
+
+                cursor.execute(delete_query, (min_inserted_at, max_inserted_at))
+                deleted_count = cursor.rowcount
+                conn.commit()
+
+                logger.info(f"✅ Successfully deleted {deleted_count:,} records from {table_name}")
+                return True
+
+            finally:
+                # Always close cursor in finally block with error suppression
+                try:
+                    cursor.close()
+                except:
+                    pass  # Suppress any errors from cursor cleanup
+
+    except Exception as e:
+        logger.error(f"❌ Failed to delete records from Redshift table {table_name}: {e}")
+        import traceback
+        logger.error(f"Stack trace: {traceback.format_exc()}")
+        return False
+
+
 def delete_mysql_table_records(table_name: str, source_connection: str) -> bool:
     """Delete all records from a MySQL table using existing connection infrastructure"""
     try:
@@ -695,7 +751,24 @@ def validate_parcel_detail_sync(table_name: str, table_results: dict, overall_st
         # Check Redshift count matches if available
         if redshift_count is not None:
             if redshift_count != mysql_count:
-                validation_details.append(f"   ✗ Redshift load count mismatch!")
+                validation_details.append(f"   ✗ Redshift load count mismatch! (Expected: {mysql_count:,}, Found: {redshift_count:,})")
+
+                # Automatic cleanup: Delete mismatched data from Redshift
+                logger.warning(f"⚠️  Redshift count mismatch detected - initiating automatic cleanup")
+
+                target_table = 'dw_parcel_detail_tool'
+                cleanup_success = delete_redshift_records_by_inserted_at(
+                    table_name=target_table,
+                    target_connection=target_connection,
+                    min_inserted_at=min_inserted_at,
+                    max_inserted_at=max_inserted_at
+                )
+
+                if cleanup_success:
+                    validation_details.append(f"   ✓ Automatic Redshift cleanup completed")
+                else:
+                    validation_details.append(f"   ✗ Automatic Redshift cleanup failed")
+
                 validation_passed = False
             else:
                 validation_details.append(f"   ✓ Redshift load counts match!")
