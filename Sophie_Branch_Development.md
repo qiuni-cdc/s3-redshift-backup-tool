@@ -2116,4 +2116,6 @@ python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline_di
 python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log
 python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log 
 
-cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_hourly_log
+cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_hourly_log 
+
+./parcel_download_rerun.sh "2025-12-04 23:00:00" "2025-12-05 00:00:00" "us_dw_unidw_2_settlement_dws_pipeline_direct"
