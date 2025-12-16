@@ -642,31 +642,27 @@
     uti.bag_no,
     uti.reference,
     uti.sub_reference,
-    eoi.start_address, 
+    eoi.start_address,
     time_204.path_time AS `time_204`,
+    time_208.path_time AS `time_208`,
     time_211.path_time AS `time_211`,
     time_213.path_time AS `time_213`,
     time_231.path_time AS `time_231`,
     time_232.path_time AS `time_232`,
     time_230.path_time AS `time_230`,
+    time_233.path_time AS `time_233`,
     od.channel_code AS channel_code,
     eoi.start_zipcode,
     umb.scan_time AS box_scan_time,
 	uti.total_value,
     uti.storage_info,
-	COALESCE(
-    	IF(
-        	NULLIF(od.custom_field, '') IS NULL OR JSON_CONTAINS_PATH(od.custom_field, 'one', '$."Package Id"') = 0,
-        	NULL,
-        	JSON_UNQUOTE(JSON_EXTRACT(od.custom_field, '$."Package Id"'))
-    	), 
-    	NULL
-	) AS package_id,
+  od.package_id,
     upi.flight_no,
     CASE WHEN eta=0 THEN NULL ELSE from_unixtime(upi.eta) END AS flight_landing_time,
 	uti.segment,
 	ucd.name as failed_reason,
-    uti.shipper as thirdparty_tno
+    uti.shipper as thirdparty_tno,
+    eoi.type
 FROM  
     kuaisong.uni_tracking_info uti force index (idx_state_updatetime) 
 JOIN 
@@ -742,6 +738,18 @@ LEFT JOIN kuaisong.uni_customer uc
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
     FROM uni_tracking_spath uts
+    WHERE uts.code = 204
+) AS time_204
+ON uti.order_id = time_204.order_id
+LEFT JOIN (
+    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
+    FROM uni_tracking_spath uts
+    WHERE uts.code = 208
+) AS time_208
+ON uti.order_id = time_208.order_id
+LEFT JOIN (
+    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
+    FROM uni_tracking_spath uts
     WHERE uts.code = 211
 ) AS time_211
 ON uti.order_id = time_211.order_id
@@ -769,6 +777,12 @@ LEFT JOIN (
     WHERE uts.code = 230
 ) AS time_230
 ON uti.order_id = time_230.order_id
+LEFT JOIN (
+    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
+    FROM uni_tracking_spath uts
+    WHERE uts.code = 233
+) AS time_233
+ON uti.order_id = time_233.order_id
 LEFT JOIN order_details od              
 	ON uti.tno = od.tno
 LEFT JOIN kuaisong.uni_mawb_box umb     
@@ -779,16 +793,10 @@ LEFT JOIN (
 	SELECT code, name FROM driver_app.uni_common_dict
 	WHERE type = 'DELIVERY.FAILED.REASON'
 ) AS ucd
-	ON time_211.failed_reason_type = ucd.code	  
-LEFT JOIN (
-    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
-    FROM uni_tracking_spath uts
-    WHERE uts.code = 204
-) AS time_204
-ON uti.order_id = time_204.order_id	
+	ON time_211.failed_reason_type = ucd.code		
 WHERE uti.state >= 190 
-  and uti.update_time &lt; UNIX_TIMESTAMP(DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00'))
-  and uti.update_time >= UNIX_TIMESTAMP(DATE_FORMAT(DATE_ADD('${beg_datetime}', INTERVAL ${hours} HOUR),'%Y-%m-%d %H:00:00'))
+ and uti.update_time &lt; UNIX_TIMESTAMP(DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00'))
+ and uti.update_time >= UNIX_TIMESTAMP(DATE_FORMAT(DATE_ADD('${beg_datetime}', INTERVAL ${hours} HOUR),'%Y-%m-%d %H:00:00'))
 ;</sql>
     <limit>0</limit>
     <lookup/>

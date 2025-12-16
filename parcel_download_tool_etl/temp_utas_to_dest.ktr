@@ -562,13 +562,15 @@
 	utas.bag_no,
 	utas.reference,
 	utas.sub_reference,
-    utas.start_address, 
+    utas.start_address,
     MIN(utas.time_204) AS time_204,
+	MIN(utas.time_208) AS time_208,
     MIN(utas.time_211) AS time_211,
     MIN(utas.time_213) AS time_213,
     MIN(utas.time_231) AS time_231,
     MIN(utas.time_232) AS time_232,
     MIN(utas.time_230) AS time_230,
+	MIN(utas.time_233) AS time_233,
     utas.box_scan_time,
 	utas.channel_code,
 	utas.flight_landing_time,
@@ -583,12 +585,13 @@
       ORDER BY t.time_211 ASC 
       LIMIT 1
     ) AS failed_reason,
-	utas.thirdparty_tno
-FROM unidw.dw_parcel_detail_tool_temp_utas_2 utas 
-left join unidw.dw_parcel_detail_tool_temp_uti_2 uti
+	utas.thirdparty_tno,
+	utas.type as type_in_eoi
+FROM unidw.dw_parcel_detail_tool_temp_utas utas 
+left join unidw.dw_parcel_detail_tool_temp_uti uti
   on utas.order_id = uti.order_id 
 where uti.order_id is null
-GROUP BY utas.order_id </sql>
+GROUP BY utas.order_id</sql>
     <limit>0</limit>
     <lookup/>
     <execute_each_row>N</execute_each_row>
@@ -2124,6 +2127,18 @@ GROUP BY utas.order_id </sql>
       <field>
         <column_name>thirdparty_tno</column_name>
         <stream_name>thirdparty_tno</stream_name>
+      </field> 
+      <field>
+        <column_name>time_208</column_name>
+        <stream_name>time_208</stream_name>
+      </field>
+      <field>
+        <column_name>time_233</column_name>
+        <stream_name>time_233</stream_name>
+      </field>
+      <field>
+        <column_name>type_in_eoi</column_name>
+        <stream_name>type_in_eoi</stream_name>
       </field>
     </fields>
     <attributes/>

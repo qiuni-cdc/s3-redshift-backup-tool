@@ -72,7 +72,8 @@ ehthumbs.db
 Desktop.ini 
 
 # Markdown files
-Codes_Explain.md
+Codes_Explain.md 
+Add_columns.md
 
 # Process files
 nohup.out

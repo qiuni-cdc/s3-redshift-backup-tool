@@ -562,13 +562,15 @@
     ANY_VALUE(bag_no) AS bag_no,
     ANY_VALUE(reference) AS reference,
     ANY_VALUE(sub_reference) AS sub_reference,
-    ANY_VALUE(start_address) AS start_address, 
-    MIN(time_204) AS time_204,
+    ANY_VALUE(start_address) AS start_address,
+	MIN(time_204) AS time_204,
+	MIN(time_208) AS time_208,
     MIN(time_211) AS time_211,
     MIN(time_213) AS time_213,
     MIN(time_231) AS time_231,
     MIN(time_232) AS time_232,
     MIN(time_230) AS time_230,
+	MIN(time_233) AS time_233,
     ANY_VALUE(box_scan_time) AS box_scan_time,
     ANY_VALUE(channel_code) AS channel_code,
     ANY_VALUE(flight_landing_time) AS flight_landing_time,
@@ -584,8 +586,9 @@
       ORDER BY t.time_211 ASC 
       LIMIT 1
     ) AS failed_reason,
-    ANY_VALUE(thirdparty_tno) AS thirdparty_tno
-FROM unidw.dw_parcel_detail_tool_temp_uti_2 dpdtt 
+    ANY_VALUE(thirdparty_tno) AS thirdparty_tno,
+	ANY_VALUE(type) AS type_in_eoi
+FROM unidw.dw_parcel_detail_tool_temp_uti dpdtt 
 GROUP BY order_id;
 </sql>
     <limit>0</limit>
@@ -2150,6 +2153,18 @@ GROUP BY order_id;
       <field>
         <column_name>thirdparty_tno</column_name>
         <stream_name>thirdparty_tno</stream_name>
+      </field> 
+      <field>
+        <column_name>time_208</column_name>
+        <stream_name>time_208</stream_name>
+      </field>
+      <field>
+        <column_name>time_233</column_name>
+        <stream_name>time_233</stream_name>
+      </field>
+      <field>
+        <column_name>type_in_eoi</column_name>
+        <stream_name>type_in_eoi</stream_name>
       </field>
     </fields>
     <attributes/>
