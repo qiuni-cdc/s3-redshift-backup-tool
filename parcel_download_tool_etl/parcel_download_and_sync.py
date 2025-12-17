@@ -855,58 +855,67 @@ def main():
     else:
         logger.info("⏭️ Phase 1: Skipping download script (--sync-only mode)")
 
-    # Phase 2: Run sync command
-    phase_number = "2" if not args.sync_only else "1"
-    logger.info(f"🔄 Phase {phase_number}: Running sync command")
-    sync_success, sync_data, json_file = run_sync_command(
-        table_name=TABLE_NAME,
-        pipeline=PIPELINE,
-        source_connection=SOURCE_CONNECTION,
-        target_connection=TARGET_CONNECTION
-    )
+    # # Phase 2: Run sync command
+    # phase_number = "2" if not args.sync_only else "1"
+    # logger.info(f"🔄 Phase {phase_number}: Running sync command")
+    # sync_success, sync_data, json_file = run_sync_command(
+    #     table_name=TABLE_NAME,
+    #     pipeline=PIPELINE,
+    #     source_connection=SOURCE_CONNECTION,
+    #     target_connection=TARGET_CONNECTION
+    # )
 
-    # Report pipeline status
-    if download_success and sync_success:
-        if args.sync_only:
-            logger.info("🎉 Sync-only pipeline completed successfully!")
-        else:
-            logger.info("🎉 Full pipeline completed successfully!")
-        logger.info(f"📄 Sync results: {json_file}")
-    else:
-        if args.sync_only:
-            logger.error("❌ Sync-only pipeline failed")
-        else:
-            logger.error("❌ Pipeline failed")
-        if json_file:
-            logger.info(f"📄 Sync results: {json_file}")
+    # # Report pipeline status
+    # if download_success and sync_success:
+    #     if args.sync_only:
+    #         logger.info("🎉 Sync-only pipeline completed successfully!")
+    #     else:
+    #         logger.info("🎉 Full pipeline completed successfully!")
+    #     logger.info(f"📄 Sync results: {json_file}")
+    # else:
+    #     if args.sync_only:
+    #         logger.error("❌ Sync-only pipeline failed")
+    #     else:
+    #         logger.error("❌ Pipeline failed")
+    #     if json_file:
+    #         logger.info(f"📄 Sync results: {json_file}")
 
-    # Always run cleanup steps regardless of sync success/failure
-    logger.info("🧹 Starting cleanup steps...")
+    # # Always run cleanup steps regardless of sync success/failure
+    # logger.info("🧹 Starting cleanup steps...")
+    # logger.info("=" * 50)
+
+    # # Only delete MySQL records if sync was successful
+    # delete_success = True  # Default to true if we skip deletion
+    # if sync_success:
+    #     logger.info(f"🗑️ Step 1: Deleting all records from {TABLE_NAME}")
+    #     delete_success = delete_mysql_table_records(TABLE_NAME, SOURCE_CONNECTION)
+    # else:
+    #     logger.info("⏭️ Step 1: Skipping MySQL record deletion (sync failed)")
+
+    # # Always run S3 cleanup (regardless of sync success)
+    # logger.info(f"🧹 Step 2: Running S3 cleanup for {TABLE_NAME}")
+    # s3clean_success = run_s3clean_command(TABLE_NAME, PIPELINE)
+
+    # # Always run watermark reset (regardless of sync success)
+    # logger.info(f"🔄 Step 3: Resetting watermark for {TABLE_NAME}")
+    # watermark_success = run_watermark_reset_command(TABLE_NAME, PIPELINE)
+
+    # # Final status
+    # logger.info("=" * 50)
+    # if sync_success and delete_success and s3clean_success and watermark_success:
+    #     logger.info("🎉 Pipeline and all cleanup steps completed successfully!")
+    #     sys.exit(0)
+    # else:
+    #     logger.error("❌ Critical cleanup steps failed")
+    #     sys.exit(1)
+
+    # Final status - Download phase only
     logger.info("=" * 50)
-
-    # Only delete MySQL records if sync was successful
-    delete_success = True  # Default to true if we skip deletion
-    if sync_success:
-        logger.info(f"🗑️ Step 1: Deleting all records from {TABLE_NAME}")
-        delete_success = delete_mysql_table_records(TABLE_NAME, SOURCE_CONNECTION)
-    else:
-        logger.info("⏭️ Step 1: Skipping MySQL record deletion (sync failed)")
-
-    # Always run S3 cleanup (regardless of sync success)
-    logger.info(f"🧹 Step 2: Running S3 cleanup for {TABLE_NAME}")
-    s3clean_success = run_s3clean_command(TABLE_NAME, PIPELINE)
-
-    # Always run watermark reset (regardless of sync success)
-    logger.info(f"🔄 Step 3: Resetting watermark for {TABLE_NAME}")
-    watermark_success = run_watermark_reset_command(TABLE_NAME, PIPELINE)
-
-    # Final status
-    logger.info("=" * 50)
-    if sync_success and delete_success and s3clean_success and watermark_success:
-        logger.info("🎉 Pipeline and all cleanup steps completed successfully!")
+    if download_success:
+        logger.info("🎉 Download phase completed successfully!")
         sys.exit(0)
     else:
-        logger.error("❌ Critical cleanup steps failed")
+        logger.error("❌ Download phase failed")
         sys.exit(1)
 
 
