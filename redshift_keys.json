@@ -1,16 +1,10 @@
 {
   "settlement.settlement_normal_delivery_detail": {
     "distkey": "ant_parcel_no",
-    "sortkey": {
-      "type": "compound",
-      "columns": ["billing_num", "create_at"]
-    }
+    "sortkey": ["billing_num", "create_at"]
   },
   "settlement.settle_orders": {
     "distkey": "tracking_number",
-    "sortkey": {
-      "type": "interleaved",
-      "columns": ["tracking_number", "created_at"]
-    }
+    "sortkey": ["tracking_number", "created_at"]
   }
 }
