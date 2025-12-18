@@ -21,7 +21,7 @@ mkdir -p "$LOG_DIR"
 
 {
     source "$VENV_PATH/bin/activate" && \
-    python parcel_download_only.py -d "" --hours "-1" --pipeline "us_dw_unidw_2_settlement_dws_pipeline_direct"
+    python parcel_download_and_sync.py -d "" --hours "-1" --pipeline "us_dw_unidw_2_settlement_dws_pipeline_direct"
     PYTHON_EXIT_CODE=$?
     deactivate
     exit $PYTHON_EXIT_CODE
