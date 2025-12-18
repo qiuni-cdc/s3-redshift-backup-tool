@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Nohup wrapper for parcel download rerun
-# Usage: ./nohup_parcel_download_run.sh <start_time> <end_time> [pipeline]
-# Example: ./nohup_parcel_download_run.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00"
-# Example: ./nohup_parcel_download_run.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00" "us_dw_unidw_2_settlement_dws_pipeline"
+# Usage: ./nohup_parcel_download_rerun.sh <start_time> <end_time> [pipeline]
+# Example: ./nohup_parcel_download_rerun.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00"
+# Example: ./nohup_parcel_download_rerun.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00" "us_dw_unidw_2_settlement_dws_pipeline"
 #
 # This script runs parcel_download_rerun.sh in the background using nohup,
 # allowing it to continue running even after SSH disconnection.
@@ -15,9 +15,9 @@
 #   kill <PID>
 
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: ./nohup_parcel_download_run.sh <start_time> <end_time> [pipeline]"
-    echo "Example: ./nohup_parcel_download_run.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\""
-    echo "Example: ./nohup_parcel_download_run.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\" \"us_dw_unidw_2_settlement_dws_pipeline\""
+    echo "Usage: ./nohup_parcel_download_rerun.sh <start_time> <end_time> [pipeline]"
+    echo "Example: ./nohup_parcel_download_rerun.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\""
+    echo "Example: ./nohup_parcel_download_rerun.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\" \"us_dw_unidw_2_settlement_dws_pipeline\""
     exit 1
 fi
 

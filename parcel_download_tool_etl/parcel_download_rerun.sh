@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # Parcel Download ETL - Hour by Hour Processing
-# Usage: ./parcel_download_run.sh <start_time> <end_time> [pipeline]
-# Example: ./parcel_download_run.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00"
-# Example: ./parcel_download_run.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00" "us_dw_unidw_2_settlement_dws_pipeline"
+# Usage: ./parcel_download_rerun.sh <start_time> <end_time> [pipeline]
+# Example: ./parcel_download_rerun.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00"
+# Example: ./parcel_download_rerun.sh "2025-11-04 22:00:00" "2025-11-05 19:00:00" "us_dw_unidw_2_settlement_dws_pipeline"
 
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: ./parcel_download_run.sh <start_time> <end_time> [pipeline]"
-    echo "Example: ./parcel_download_run.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\""
-    echo "Example: ./parcel_download_run.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\" \"us_dw_unidw_2_settlement_dws_pipeline\""
+    echo "Usage: ./parcel_download_rerun.sh <start_time> <end_time> [pipeline]"
+    echo "Example: ./parcel_download_rerun.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\""
+    echo "Example: ./parcel_download_rerun.sh \"2025-11-04 22:00:00\" \"2025-11-05 19:00:00\" \"us_dw_unidw_2_settlement_dws_pipeline\""
     exit 1
 fi
 
