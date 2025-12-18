@@ -11,6 +11,7 @@ FULL PIPELINE (default):
 4. If sync successful: Deletes all records from MySQL table
 5. If sync successful: Runs S3 cleanup command
 6. If sync successful: Resets watermark
+7. If all steps successful: Refreshes materialized view settlement_dws.mv_parcel_latest_key
 
 SYNC-ONLY MODE (--sync-only):
 1. Skips the download phase entirely
@@ -19,11 +20,13 @@ SYNC-ONLY MODE (--sync-only):
 4. If sync successful: Deletes all records from MySQL table
 5. If sync successful: Runs S3 cleanup command
 6. If sync successful: Resets watermark
+7. If all steps successful: Refreshes materialized view settlement_dws.mv_parcel_latest_key
 
 Special Features:
 - Enhanced validation for unidw.dw_parcel_detail_tool_temp table
 - Verifies sync success by comparing rows_processed with actual MySQL source table count
 - Uses existing connection infrastructure for secure MySQL access
+- Automatically refreshes materialized view after successful pipeline completion
 
 Usage:
   python parcel_download_and_sync.py                                              # Full pipeline (default: -0.5 hours)
@@ -458,22 +461,68 @@ def run_watermark_reset_command(table_name: str, pipeline: str) -> bool:
         return False
 
 
+def refresh_materialized_view(target_connection: str) -> bool:
+    """
+    Refresh the materialized view settlement_dws.mv_parcel_latest_key
+
+    Args:
+        target_connection: Redshift connection name from connections.yml
+
+    Returns:
+        bool: True if refresh successful, False otherwise
+    """
+    try:
+        # Initialize connection registry (uses project root's connections.yml)
+        config_path = PROJECT_ROOT / "config" / "connections.yml"
+        conn_registry = ConnectionRegistry(config_path=str(config_path))
+
+        logger.info(f"🔄 Refreshing materialized view: settlement_dws.mv_parcel_latest_key")
+        logger.info(f"📡 Using connection: {target_connection}")
+
+        # Use the Redshift connection specified
+        with conn_registry.get_redshift_connection(target_connection) as conn:
+            cursor = conn.cursor()
+            try:
+                # Refresh the materialized view
+                refresh_query = "REFRESH MATERIALIZED VIEW settlement_dws.mv_parcel_latest_key"
+                logger.info(f"📊 Executing Redshift query: {refresh_query}")
+
+                cursor.execute(refresh_query)
+                conn.commit()
+
+                logger.info(f"✅ Successfully refreshed materialized view settlement_dws.mv_parcel_latest_key")
+                return True
+
+            finally:
+                # Always close cursor in finally block with error suppression
+                try:
+                    cursor.close()
+                except:
+                    pass  # Suppress any errors from cursor cleanup
+
+    except Exception as e:
+        logger.error(f"❌ Failed to refresh materialized view: {e}")
+        import traceback
+        logger.error(f"Stack trace: {traceback.format_exc()}")
+        return False
+
+
 def execute_download_script(download_dir="parcel_download_tool_etl", start_datetime=None, hours_offset=None):
     """
     Execute download_tool.sh script from the specified directory with parameters
-    
+
     Args:
         download_dir: Directory containing download_tool.sh script
         start_datetime: Start datetime string (e.g., "2024-08-14 10:00:00")
         hours_offset: Hours offset string (e.g., "-2")
-        
+
     Returns:
         tuple: (success: bool, stdout: str, stderr: str)
     """
-    
+
     logger.info(f"🔄 Starting download script execution from {download_dir}")
     logger.info(f"   Parameters: start_datetime='{start_datetime}', hours_offset='{hours_offset}'")
-    
+
     # Check if directory exists
     if not Path(download_dir).exists():
         logger.error(f"❌ Directory {download_dir} not found")
@@ -483,7 +532,7 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
     if not download_script.exists():
         logger.error(f"❌ download_tool.sh not found in {download_dir}")
         return False, "", f"download_tool.sh not found in {download_dir}"
-    
+
     try:
         # Execute download script with parameters
         result = subprocess.run(
@@ -493,7 +542,7 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
             text=True,
             timeout=7200  # 2 hour timeout
         )
-        
+
         if result.returncode == 0:
             logger.info("✅ Download script completed successfully")
             return True, result.stdout, result.stderr
@@ -501,7 +550,7 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
             logger.error(f"❌ Download script failed with exit code {result.returncode}")
             logger.error(f"Error output: {result.stderr}")
             return False, result.stdout, result.stderr
-            
+
     except subprocess.TimeoutExpired:
         logger.error("❌ Download script timed out after 2 hour")
         return False, "", "Script execution timed out"
@@ -539,7 +588,7 @@ def run_sync_command(table_name, pipeline, source_connection, target_connection,
     safe_table = table_name.replace(".", "_").replace(":", "_")
     safe_pipeline = pipeline.replace(".", "_").replace(":", "_")
     json_filename = str(json_folder / f"sync_{safe_pipeline}_{safe_table}_{timestamp}.json")
-    
+
     # Build sync command with JSON output file path (using pipeline subcommand for Airflow integration)
     cmd = [
         "python", "-m", "src.cli.main", "sync", "pipeline",
@@ -547,16 +596,16 @@ def run_sync_command(table_name, pipeline, source_connection, target_connection,
         "-t", table_name,
         "--json-output", json_filename
     ]
-    
+
     if limit:
         cmd.extend(["--limit", str(limit)])
     if backup_only:
         cmd.append("--backup-only")
     if redshift_only:
         cmd.append("--redshift-only")
-    
+
     logger.info(f"Executing command: {' '.join(cmd)}")
-    
+
     try:
         # Execute sync command with real-time output
         logger.info("🔄 Starting sync command execution...")
@@ -573,7 +622,7 @@ def run_sync_command(table_name, pipeline, source_connection, target_connection,
 
         logger.info("-" * 60)
         logger.info("🏁 Sync command execution completed")
-        
+
         if result.returncode == 0:
             # Read JSON output from file (since --json-output writes to file)
             try:
@@ -584,7 +633,7 @@ def run_sync_command(table_name, pipeline, source_connection, target_connection,
                 else:
                     logger.error(f"❌ JSON output file not found: {json_filename}")
                     return False, {}, ""
-                
+
                 # Parse the Airflow integration JSON structure
                 execution_id = json_data.get('execution_id', 'unknown')
                 start_time = json_data.get('start_time', '')
@@ -633,7 +682,7 @@ def run_sync_command(table_name, pipeline, source_connection, target_connection,
                 else:
                     logger.error("❌ Sync failed")
                     return False, json_data, json_filename
-                
+
             except json.JSONDecodeError as e:
                 logger.error(f"❌ Failed to parse JSON output: {e}")
                 logger.error("Check the JSON output file for formatting issues")
@@ -642,7 +691,7 @@ def run_sync_command(table_name, pipeline, source_connection, target_connection,
             logger.error(f"❌ Sync command failed with exit code {result.returncode}")
             logger.error("Check the console output above for error details")
             return False, {}, ""
-            
+
     except subprocess.TimeoutExpired:
         logger.error("❌ Sync command timed out after 2 hours")
         return False, {}, ""
@@ -855,67 +904,66 @@ def main():
     else:
         logger.info("⏭️ Phase 1: Skipping download script (--sync-only mode)")
 
-    # # Phase 2: Run sync command
-    # phase_number = "2" if not args.sync_only else "1"
-    # logger.info(f"🔄 Phase {phase_number}: Running sync command")
-    # sync_success, sync_data, json_file = run_sync_command(
-    #     table_name=TABLE_NAME,
-    #     pipeline=PIPELINE,
-    #     source_connection=SOURCE_CONNECTION,
-    #     target_connection=TARGET_CONNECTION
-    # )
+    # Phase 2: Run sync command
+    phase_number = "2" if not args.sync_only else "1"
+    logger.info(f"🔄 Phase {phase_number}: Running sync command")
+    sync_success, sync_data, json_file = run_sync_command(
+        table_name=TABLE_NAME,
+        pipeline=PIPELINE,
+        source_connection=SOURCE_CONNECTION,
+        target_connection=TARGET_CONNECTION
+    )
 
-    # # Report pipeline status
-    # if download_success and sync_success:
-    #     if args.sync_only:
-    #         logger.info("🎉 Sync-only pipeline completed successfully!")
-    #     else:
-    #         logger.info("🎉 Full pipeline completed successfully!")
-    #     logger.info(f"📄 Sync results: {json_file}")
-    # else:
-    #     if args.sync_only:
-    #         logger.error("❌ Sync-only pipeline failed")
-    #     else:
-    #         logger.error("❌ Pipeline failed")
-    #     if json_file:
-    #         logger.info(f"📄 Sync results: {json_file}")
+    # Report pipeline status
+    if download_success and sync_success:
+        if args.sync_only:
+            logger.info("🎉 Sync-only pipeline completed successfully!")
+        else:
+            logger.info("🎉 Full pipeline completed successfully!")
+        logger.info(f"📄 Sync results: {json_file}")
+    else:
+        if args.sync_only:
+            logger.error("❌ Sync-only pipeline failed")
+        else:
+            logger.error("❌ Pipeline failed")
+        if json_file:
+            logger.info(f"📄 Sync results: {json_file}")
 
-    # # Always run cleanup steps regardless of sync success/failure
-    # logger.info("🧹 Starting cleanup steps...")
-    # logger.info("=" * 50)
-
-    # # Only delete MySQL records if sync was successful
-    # delete_success = True  # Default to true if we skip deletion
-    # if sync_success:
-    #     logger.info(f"🗑️ Step 1: Deleting all records from {TABLE_NAME}")
-    #     delete_success = delete_mysql_table_records(TABLE_NAME, SOURCE_CONNECTION)
-    # else:
-    #     logger.info("⏭️ Step 1: Skipping MySQL record deletion (sync failed)")
-
-    # # Always run S3 cleanup (regardless of sync success)
-    # logger.info(f"🧹 Step 2: Running S3 cleanup for {TABLE_NAME}")
-    # s3clean_success = run_s3clean_command(TABLE_NAME, PIPELINE)
-
-    # # Always run watermark reset (regardless of sync success)
-    # logger.info(f"🔄 Step 3: Resetting watermark for {TABLE_NAME}")
-    # watermark_success = run_watermark_reset_command(TABLE_NAME, PIPELINE)
-
-    # # Final status
-    # logger.info("=" * 50)
-    # if sync_success and delete_success and s3clean_success and watermark_success:
-    #     logger.info("🎉 Pipeline and all cleanup steps completed successfully!")
-    #     sys.exit(0)
-    # else:
-    #     logger.error("❌ Critical cleanup steps failed")
-    #     sys.exit(1)
-
-    # Final status - Download phase only
+    # Always run cleanup steps regardless of sync success/failure
+    logger.info("🧹 Starting cleanup steps...")
     logger.info("=" * 50)
-    if download_success:
-        logger.info("🎉 Download phase completed successfully!")
+
+    # Only delete MySQL records if sync was successful
+    delete_success = True  # Default to true if we skip deletion
+    if sync_success:
+        logger.info(f"🗑️ Step 1: Deleting all records from {TABLE_NAME}")
+        delete_success = delete_mysql_table_records(TABLE_NAME, SOURCE_CONNECTION)
+    else:
+        logger.info("⏭️ Step 1: Skipping MySQL record deletion (sync failed)")
+
+    # Always run S3 cleanup (regardless of sync success)
+    logger.info(f"🧹 Step 2: Running S3 cleanup for {TABLE_NAME}")
+    s3clean_success = run_s3clean_command(TABLE_NAME, PIPELINE)
+
+    # Always run watermark reset (regardless of sync success)
+    logger.info(f"🔄 Step 3: Resetting watermark for {TABLE_NAME}")
+    watermark_success = run_watermark_reset_command(TABLE_NAME, PIPELINE)
+
+    # Refresh materialized view if all previous steps succeeded
+    mv_refresh_success = True  # Default to true if we skip refresh
+    if sync_success and delete_success and s3clean_success and watermark_success:
+        logger.info(f"🔄 Step 4: Refreshing materialized view settlement_dws.mv_parcel_latest_key")
+        mv_refresh_success = refresh_materialized_view(TARGET_CONNECTION)
+    else:
+        logger.info("⏭️ Step 4: Skipping materialized view refresh (previous steps failed)")
+
+    # Final status
+    logger.info("=" * 50)
+    if sync_success and delete_success and s3clean_success and watermark_success and mv_refresh_success:
+        logger.info("🎉 Pipeline and all cleanup steps completed successfully!")
         sys.exit(0)
     else:
-        logger.error("❌ Download phase failed")
+        logger.error("❌ Critical cleanup steps failed")
         sys.exit(1)
 
 
