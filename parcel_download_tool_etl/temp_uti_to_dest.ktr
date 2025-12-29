@@ -588,7 +588,7 @@
     ) AS failed_reason,
     ANY_VALUE(thirdparty_tno) AS thirdparty_tno,
 	ANY_VALUE(type) AS type_in_eoi
-FROM unidw.dw_parcel_detail_tool_temp_uti dpdtt 
+FROM unidw.dw_parcel_detail_tool_temp_uti_2 dpdtt 
 GROUP BY order_id;
 </sql>
     <limit>0</limit>

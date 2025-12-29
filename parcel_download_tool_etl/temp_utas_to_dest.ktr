@@ -587,8 +587,8 @@
     ) AS failed_reason,
 	utas.thirdparty_tno,
 	utas.type as type_in_eoi
-FROM unidw.dw_parcel_detail_tool_temp_utas utas 
-left join unidw.dw_parcel_detail_tool_temp_uti uti
+FROM unidw.dw_parcel_detail_tool_temp_utas_2 utas 
+left join unidw.dw_parcel_detail_tool_temp_uti_2 uti
   on utas.order_id = uti.order_id 
 where uti.order_id is null
 GROUP BY utas.order_id</sql>
