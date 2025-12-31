@@ -1,0 +1,43 @@
+# US Data Warehouse Settlement to Redshift Settlement DWS Pipeline (Direct Connection)
+# Clear naming: us_dw_settlement_2_settlement_dws_pipeline_direct
+# Uses direct database connections (no SSH tunnel) for high-speed transfers
+
+pipeline:
+  name: "us_dw_settlement_2_settlement_dws_pipeline_direct"
+  description: "US Data Warehouse Settlement DB → Redshift Settlement DWS Schema (Direct)"
+  source: "US_DW_RO_DIRECT_WEST"         # settlement database - DIRECT connection
+  target: "redshift_settlement_dws_direct"      # settlement dws schema - DIRECT connection
+  s3_config: "s3_qa"
+  version: "1.2.0"
+
+  processing:
+    strategy: "sequential"
+    batch_size: 1000000              # Large batches for direct connection efficiency
+    timeout_minutes: 300             # 5 hours for large tables
+    max_parallel_tables: 5           # More parallelism without SSH overhead
+
+  s3:
+    isolation_prefix: "us_dw_settlement/"
+    partition_strategy: "table"
+    compression: "snappy"
+
+  default_table_config:
+    backup_strategy: "sequential"
+    watermark_strategy: "automatic"
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 3.0
+
+# Settlement database tables
+tables:
+  settlement.settle_orders:
+    cdc_strategy: "hybrid"
+    cdc_timestamp_column: "created_at"
+    cdc_id_column: "id"
+    description: "Settlement orders with hybrid CDC (timestamp + ID) - Direct connection"
+    target_name: "settle_orders"
+    processing:
+      batch_size: 1000000            # Optimized for direct connection speed
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 2.0
