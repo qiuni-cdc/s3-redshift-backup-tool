@@ -131,7 +131,7 @@ connections:
     US_QA_RO_DIRECT:
       host: us-west-2.ro.db.qa.uniuni.com.internal
       port: 3306
-      database: unidw
+      database: kuaisong
       username: "${DB_USER}"
       password: "${DB_US_QA_PASSWORD}"
       description: "US QA MySQL (US-WEST-2) direct connection"
