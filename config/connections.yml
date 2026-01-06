@@ -206,7 +206,7 @@ connections:
       database: dw
       username: "${REDSHIFT_USER}"
       password: "${REDSHIFT_PASSWORD}"  # References .env variable
-      schema: public
+      schema: settlement_public
       
       # Redshift SSH tunnel (your separate bastion)
       ssh_tunnel:
