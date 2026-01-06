@@ -5,8 +5,8 @@
 pipeline:
   name: "us_qa_kuaisong_reference_tables"
   description: "US QA Kuaisong reference tables - daily full sync"
-  source: "US_QA_SSH"         # US QA direct
-  target: "redshift_default"       # QA Redshift cluster
+  source: "US_QA_RO_DIRECT"         # US QA direct
+  target: "redshift_default_direct"       # QA Redshift cluster
   version: "1.0.0"                 # v1.2.0 CDC Intelligence Engine
   sync_frequency: "0 2 * * *"      # Daily at 2 AM
   
