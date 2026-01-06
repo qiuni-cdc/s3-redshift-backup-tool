@@ -7,7 +7,8 @@ pipeline:
   description: "US QA Kuaisong reference tables - daily full sync"
   source: "US_QA_RO_DIRECT"         # US QA direct
   target: "redshift_default_direct"       # QA Redshift cluster
-  version: "1.0.0"                 # v1.2.0 CDC Intelligence Engine
+  s3_config: "s3_qa" 
+  version: "1.2.0"                 # v1.2.0 CDC Intelligence Engine
   sync_frequency: "0 2 * * *"      # Daily at 2 AM
   
   processing:
@@ -63,7 +64,7 @@ tables:
       batch_size: 50000
       enable_parallel_processing: false
       
-  # 5. ECS Staff - ~500 rows (LOW priority)
+  # 4. ECS Staff - ~500 rows (LOW priority)
   kuaisong.ecs_staff:
     cdc_strategy: "full_sync"
     full_sync_mode: "replace"        # TRUNCATE table before loading
@@ -89,7 +90,7 @@ tables:
         - carry_pay
         - newdriver_pay
       
-  # 6. MAWB Box - ~10K rows (LOW priority)
+  # 5. MAWB Box - ~10K rows (LOW priority)
   kuaisong.uni_mawb_box:
     cdc_strategy: "full_sync"
     full_sync_mode: "replace"        # TRUNCATE table before loading
