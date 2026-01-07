@@ -340,7 +340,6 @@ class ConnectionRegistry:
         for name, config in self.connections.items():
             try:
                 self._validate_single_config(config)
-                logger.debug(f"Connection configuration validated: {name}")
             except Exception as e:
                 logger.error(f"Invalid configuration for {name}: {e}")
                 raise ValidationError(f"Configuration validation failed for {name}: {e}")

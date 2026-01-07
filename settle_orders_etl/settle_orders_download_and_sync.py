@@ -70,12 +70,12 @@ except ModuleNotFoundError as e:
     sys.exit(1)
 
 # Configure logging
+# Only StreamHandler - bash script redirects output to timestamped logs in settle_orders_daily_log/
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(PROJECT_ROOT / 'settle_orders_etl' / 'settle_orders_etl.log')
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)

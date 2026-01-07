@@ -76,12 +76,12 @@ except ModuleNotFoundError as e:
     sys.exit(1)
 
 # Configure logging
+# Only StreamHandler - bash script redirects output to timestamped logs in parcel_download_hourly_log/
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(PROJECT_ROOT / 'parcel_download_tool_etl' / 'parcel_download_tool_etl.log')
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
