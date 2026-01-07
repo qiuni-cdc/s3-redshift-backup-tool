@@ -2067,6 +2067,293 @@ The MySQL DELETE context manager fix is now **production-ready** with:
    - Double cleanup causes "generator didn't stop after throw()" errors
    - Use error suppression (`except: pass`) to isolate cleanup steps
 
+## S3 Prefix Change - Target-Based Scoping (v2.1) (Resolved)
+
+### Issue: Watermark Conflicts in Multi-Target Pipelines
+
+**Problem:** Two pipelines reading from the same source but writing to different targets shared the same watermark, causing sync conflicts.
+
+**Scenario:**
+- Pipeline 1: `US_DW_RO_SSH` → `redshift_settlement_ods`
+- Pipeline 2: `US_DW_RO_SSH` → `redshift_settlement_dws`
+- Both syncing `settlement.settle_orders` table
+- Watermark key: `watermarks/v2/us_dw_ro_ssh_settlement_settle_orders.json` (same for both!)
+- S3 files: `incremental/table=us_dw_ro_ssh_settlement_settle_orders/...` (same path!)
+
+**Symptoms:**
+```bash
+# Both pipelines showed identical watermarks
+$ python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline
+$ python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
+# Results were identical - WRONG!
+
+# S3 files were mixed together
+$ python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline
+# Showed 120 files
+
+$ python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
+# Also showed 120 files (same files!)
+```
+
+**Root Cause:** Watermarks and S3 paths were scoped only by source connection, not by target.
+
+### Fix Applied: Comprehensive Target-Based Scoping
+
+#### 1. Watermark Key Scoping
+
+**Code Location:** `src/core/simple_watermark_manager.py:32-63, 547-563`
+
+```python
+# BEFORE (v2.0): Only source in key
+def __init__(self, config: Dict[str, Any]):
+    self.source_connection = config.get('source_connection', {}).get('name', 'default')
+    # No target connection!
+
+def _clean_table_name(self, table_name: str) -> str:
+    return table_name.replace(':', '_').replace('.', '_').lower()
+    # Key: watermarks/v2/us_dw_ro_ssh_settlement_settle_orders.json
+
+# AFTER (v2.1): Source + target in key
+def __init__(self, config: Dict[str, Any]):
+    self.source_connection = config.get('source_connection', {}).get('name', 'default')
+    self.target_connection = config.get('target_connection', {}).get('name', 'default')  # ✅ Added
+    logger.info(f"Initialized watermark manager with source={self.source_connection}, target={self.target_connection}")
+
+def _clean_table_name(self, table_name: str) -> str:
+    base_name = table_name.replace(':', '_').replace('.', '_').lower()
+    target_suffix = self.target_connection.replace(':', '_').replace('.', '_').lower()
+    return f"{base_name}_{target_suffix}"  # ✅ Append target
+    # Key: watermarks/v2/us_dw_ro_ssh_settlement_settle_orders_redshift_settlement_ods.json
+```
+
+#### 2. S3 Path Isolation
+
+**Added isolation_prefix to S3Config** (`src/config/settings.py:60`):
+```python
+class S3Config(BaseModel):
+    isolation_prefix: str = Field("", description="S3 isolation prefix for multi-target pipelines (v2.1)")
+```
+
+**Pipeline Configuration** (YAML):
+```yaml
+# us_dw_settlement_2_settlement_ods_pipeline.yml
+pipeline:
+  s3:
+    isolation_prefix: "us_dw_ods/"      # ✅ ODS-specific path
+    partition_strategy: "table"
+
+# us_dw_settlement_2_settlement_dws_pipeline.yml
+pipeline:
+  s3:
+    isolation_prefix: "us_dw_settlement/"  # ✅ DWS-specific path
+    partition_strategy: "table"
+```
+
+**Result:**
+- ODS pipeline: `s3://bucket/us_dw_ods/incremental/table=settle_orders/...`
+- DWS pipeline: `s3://bucket/us_dw_settlement/incremental/table=settle_orders/...`
+- Old files: `s3://bucket/incremental/table=settle_orders/...` (isolated, not accessed)
+
+#### 3. Configuration Chain Updates
+
+**Modified 7 files to pass isolation_prefix:**
+
+**A. ConfigurationManager** (`src/core/configuration_manager.py:1164, 1279, 1302-1305`):
+```python
+# Added isolation_prefix parameter
+def create_app_config(self, source_connection: str, target_connection: str,
+                     s3_config_name: str, isolation_prefix: str = "") -> 'AppConfig':
+
+    # Pass to S3Config
+    isolation_prefix=isolation_prefix,  # v2.1
+
+    # Store connection names in AppConfig
+    app_config._source_connection_name = source_connection
+    app_config._target_connection_name = target_connection
+```
+
+**B. AppConfig Properties** (`src/config/settings.py:278-290, 318-324`):
+```python
+@property
+def source_connection_name(self) -> str:
+    if not hasattr(self, '_source_connection_name'):
+        return 'default'
+    return self._source_connection_name
+
+@property
+def target_connection_name(self) -> str:
+    if not hasattr(self, '_target_connection_name'):
+        return 'default'
+    return self._target_connection_name
+
+def to_dict(self) -> Dict[str, Any]:
+    return {
+        'source_connection': {'name': self.source_connection_name},
+        'target_connection': {'name': self.target_connection_name},  # ✅ Passed to watermark
+        # ...
+    }
+```
+
+**C. CLI Commands** (`src/cli/main.py:1607-1624, 2304-2318`):
+```python
+# Extract isolation_prefix from pipeline YAML
+pipeline_info = pipeline_config.get('pipeline', {})
+s3_info = pipeline_info.get('s3', {})
+isolation_prefix = s3_info.get('isolation_prefix', '')  # ✅ Extract
+
+# Pass to config creation
+config = config_manager.create_app_config(
+    source_connection=source_name,
+    target_connection=target_name,
+    s3_config_name=pipeline_s3_config,
+    isolation_prefix=isolation_prefix  # ✅ Pass through
+)
+```
+
+**D. Multi-Schema Commands** (`src/cli/multi_schema_commands.py:855-864`):
+```python
+# Extract and pass isolation_prefix
+isolation_prefix = pipeline_config.s3.get('isolation_prefix', '')
+
+config = multi_schema_ctx.config_manager.create_app_config(
+    source_connection=pipeline_config.source,
+    target_connection=pipeline_config.target,
+    s3_config_name=pipeline_config.s3_config,
+    isolation_prefix=isolation_prefix  # ✅ Added
+)
+```
+
+**E. S3Manager** (`src/core/s3_manager.py:57-65`):
+```python
+# Build S3 path with target-based isolation (v2.1)
+isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+base_path = config.s3.incremental_path.strip('/')
+
+if isolation_prefix:
+    self.incremental_path = f"{isolation_prefix}/{base_path}"
+else:
+    self.incremental_path = base_path
+```
+
+**F. GeminiRedshiftLoader** (`src/core/gemini_redshift_loader.py:41-48, 404-409`):
+```python
+# Build S3 path with target-based isolation
+isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+base_path = config.s3.incremental_path.strip('/')
+
+if isolation_prefix:
+    self.s3_data_path = f"{isolation_prefix}/{base_path}"
+else:
+    self.s3_data_path = base_path
+```
+
+**G. RedshiftLoader (CSV-based)** (`src/core/redshift_loader.py:40-47`):
+```python
+# Same isolation logic as GeminiRedshiftLoader
+isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+base_path = config.s3.incremental_path.strip('/')
+
+if isolation_prefix:
+    self.s3_data_path = f"{isolation_prefix}/{base_path}"
+else:
+    self.s3_data_path = base_path
+```
+
+#### 4. CLI Command Updates
+
+**S3 Clean Commands** (`src/cli/main.py:2432-2443, 2618-2627`):
+```python
+# Apply isolation to list and clean operations
+isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+base_path = config.s3.incremental_path.strip('/')
+
+if isolation_prefix:
+    effective_path = f"{isolation_prefix}/{base_path}"
+else:
+    effective_path = base_path
+
+prefix = f"{effective_path}/"
+```
+
+### Debugging Journey
+
+**Error 1: Watermark showing default values**
+```
+Initialized watermark manager with source=default, target=default
+```
+**Cause:** `_s3_list_files()` manually created watermark config without source/target
+**Fix:** Changed to use `config.to_dict()` which includes all fields
+
+**Error 2: isolation_prefix empty despite YAML configuration**
+```
+DEBUG: isolation_prefix = ''  # Should be "us_dw_ods/"
+```
+**Cause:** Code read from `pipeline_config.get('s3')` (top-level) instead of `pipeline_info.get('s3')`
+**Fix:** Read from correct YAML location under `pipeline` section
+
+**Error 3: s3clean showing 120 files for both pipelines**
+```
+# Both ODS and DWS showed same 120 files
+```
+**Cause:** `_s3_list_files()` didn't apply isolation_prefix to S3 prefix
+**Fix:** Added isolation logic to build correct effective path
+
+### Results
+
+**Before Fix:**
+```
+Watermark: watermarks/v2/us_dw_ro_ssh_settlement_settle_orders.json (shared!)
+S3 Path: incremental/table=us_dw_ro_ssh_settlement_settle_orders/ (shared!)
+Files: 120 files (both pipelines see same files)
+```
+
+**After Fix:**
+```
+ODS Watermark: watermarks/v2/us_dw_ro_ssh_settlement_settle_orders_redshift_settlement_ods.json
+ODS S3 Path: us_dw_ods/incremental/table=settle_orders/...
+ODS Files: 0 files (new isolated path)
+
+DWS Watermark: watermarks/v2/us_dw_ro_ssh_settlement_settle_orders_redshift_settlement_dws.json
+DWS S3 Path: us_dw_settlement/incremental/table=settle_orders/...
+DWS Files: 0 files (new isolated path)
+
+Old Files: incremental/table=us_dw_ro_ssh_settlement_settle_orders/... (120 files, isolated, not accessed)
+```
+
+### Complete File Coverage
+
+**Files Modified (7 total):**
+1. `src/core/simple_watermark_manager.py` - Added target to watermark key
+2. `src/config/settings.py` - Added isolation_prefix, connection name properties
+3. `src/core/configuration_manager.py` - Store connection names, pass isolation_prefix
+4. `src/cli/main.py` - Extract isolation_prefix from YAML, apply to S3 paths
+5. `src/cli/multi_schema_commands.py` - Extract and pass isolation_prefix
+6. `src/core/s3_manager.py` - Build isolated incremental_path
+7. `src/core/gemini_redshift_loader.py` - Build isolated s3_data_path
+8. `src/core/redshift_loader.py` - Build isolated s3_data_path
+
+**Backup Strategies:** Inherit isolation logic from base classes (no changes needed)
+
+### Backward Compatibility
+
+- Old files at `incremental/` remain but are isolated (not accessed by new pipelines)
+- Old watermarks without target suffix still exist in S3
+- New pipelines create new watermarks with target suffix
+- No data migration needed - fresh start with isolated paths
+
+### Production Status
+
+The target-based scoping system is now **production-ready** with:
+- ✅ Independent watermarks per source-target pair
+- ✅ Isolated S3 paths preventing file conflicts
+- ✅ Complete configuration chain from YAML to S3
+- ✅ All components (backup, load, CLI) updated
+- ✅ Backward compatible with existing data
+- ✅ Verified with actual pipeline configurations
+
+**Date:** January 6-7, 2026
+**Version:** v2.1 - Target-Based Scoping 
+
 ## Usually Used Commands
 python -m src.cli.main watermark reset -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_public_pipeline 
 --id 
@@ -2116,6 +2403,7 @@ python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline_di
 python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders --limit 1000000 2>&1 | tee settle_orders_sync.log  
 python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders --redshift-only 
 python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders --backup-only --limit 50000000 2>&1 | tee settle_orders_backup.log
+
 python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
 python -m src.cli.main watermark reset -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline  
 python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
@@ -2126,4 +2414,8 @@ python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sy
 
 cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl/parcel_download_hourly_log 
 
-./parcel_download_rerun.sh "2025-12-04 23:00:00" "2025-12-05 00:00:00" "us_dw_unidw_2_settlement_dws_pipeline_direct"
+./parcel_download_rerun.sh "2025-12-04 23:00:00" "2025-12-05 00:00:00" "us_dw_unidw_2_settlement_dws_pipeline_direct" 
+
+python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline
+python -m src.cli.main watermark set -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline --id 127946703 --timestamp "2026-01-06 20:52:22"
+python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline

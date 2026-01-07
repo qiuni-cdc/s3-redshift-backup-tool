@@ -57,8 +57,9 @@ class S3Config(BaseSettings):
     secret_key: SecretStr = Field(..., description="AWS secret key")
     region: str = Field("us-east-1", description="AWS region")
     incremental_path: str = Field("/incremental/", description="S3 path for incremental data")
+    isolation_prefix: str = Field("", description="S3 isolation prefix for multi-target pipelines (v2.1)")
     high_watermark_key: str = Field(
-        "/high_watermark/last_run_timestamp.txt", 
+        "/high_watermark/last_run_timestamp.txt",
         description="S3 key for high watermark file"
     )
     
@@ -274,7 +275,21 @@ class AppConfig(BaseSettings):
         if not hasattr(self, '_redshift_ssh'):
             return None  # Return None if Redshift SSH not explicitly configured
         return self._redshift_ssh
-    
+
+    @property
+    def source_connection_name(self) -> str:
+        """Get source connection name for watermark scoping (v2.1)"""
+        if not hasattr(self, '_source_connection_name'):
+            return 'default'  # Fallback for legacy configs
+        return self._source_connection_name
+
+    @property
+    def target_connection_name(self) -> str:
+        """Get target connection name for watermark scoping (v2.1)"""
+        if not hasattr(self, '_target_connection_name'):
+            return 'default'  # Fallback for legacy configs
+        return self._target_connection_name
+
     @validator('log_level')
     def validate_log_level(cls, v):
         """Validate log level is valid"""
@@ -293,7 +308,7 @@ class AppConfig(BaseSettings):
     def to_dict(self) -> Dict[str, Any]:
         """
         Convert AppConfig to dictionary with all nested configurations.
-        
+
         This method properly serializes all configuration sections including
         nested objects that are accessed via properties. Unlike model_dump(),
         this includes all the actual configuration data needed by components.
@@ -301,12 +316,21 @@ class AppConfig(BaseSettings):
         return {
             'log_level': self.log_level,
             'debug': self.debug,
+            # Connection names for watermark scoping (v2.1)
+            'source_connection': {
+                'name': self.source_connection_name
+            },
+            'target_connection': {
+                'name': self.target_connection_name
+            },
             's3': {
                 'bucket_name': self.s3.bucket_name,
                 'region': self.s3.region,
                 'access_key_id': self.s3.access_key,  # Map access_key to access_key_id
                 'secret_access_key': self.s3.secret_key.get_secret_value(),  # Extract secret value
                 'watermark_prefix': getattr(self.s3, 'watermark_prefix', 'watermarks/v2/'),
+                'incremental_path': self.s3.incremental_path,
+                'isolation_prefix': self.s3.isolation_prefix,
                 'multipart_threshold': self.s3.multipart_threshold,
                 'multipart_chunksize': self.s3.multipart_chunksize,
                 'max_concurrency': self.s3.max_concurrency,

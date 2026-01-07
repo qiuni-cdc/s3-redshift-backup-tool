@@ -852,11 +852,15 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
         # Use v1.0.0 backup strategy with proper configuration
         # The existing backup strategies are designed to work with AppConfig, not direct connections
         try:
+            # Extract S3 isolation prefix for target-based scoping (v2.1)
+            isolation_prefix = pipeline_config.s3.get('isolation_prefix', '')
+
             # Use YAML-based configuration (migrated from AppConfig)
             config = multi_schema_ctx.config_manager.create_app_config(
                 source_connection=pipeline_config.source,
                 target_connection=pipeline_config.target,
-                s3_config_name=pipeline_config.s3_config  # Pass S3 config from pipeline
+                s3_config_name=pipeline_config.s3_config,  # Pass S3 config from pipeline
+                isolation_prefix=isolation_prefix  # v2.1: Target-based S3 isolation
             )
             
             # Determine backup strategy based on pipeline configuration  

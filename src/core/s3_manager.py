@@ -53,8 +53,17 @@ class S3Manager:
         self.config = config
         self.s3_client = s3_client
         self.bucket_name = config.s3.bucket_name
-        self.incremental_path = config.s3.incremental_path.strip('/')
-        
+
+        # Build S3 path with target-based isolation (v2.1)
+        # Format: {isolation_prefix}/{incremental_path}
+        isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+        base_path = config.s3.incremental_path.strip('/')
+
+        if isolation_prefix:
+            self.incremental_path = f"{isolation_prefix}/{base_path}"
+        else:
+            self.incremental_path = base_path
+
         # Upload statistics
         self._upload_stats = {
             'total_files': 0,
