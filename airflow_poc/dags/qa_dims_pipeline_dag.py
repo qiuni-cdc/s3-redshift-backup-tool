@@ -54,7 +54,7 @@ sync_data = BashOperator(
     task_id='sync_mysql_to_redshift',
     bash_command=f'''
     cd {SYNC_TOOL_PATH} && \\
-    source venv/bin/activate && \\
+    source s3_backup_venv/bin/activate && \\
     source .env && \\
     python -m src.cli.main sync pipeline \\
         -p {PIPELINE_NAME} \\
