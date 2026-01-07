@@ -2416,6 +2416,6 @@ cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl/parc
 
 ./parcel_download_rerun.sh "2025-12-04 23:00:00" "2025-12-05 00:00:00" "us_dw_unidw_2_settlement_dws_pipeline_direct" 
 
-python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline
+python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline_direct
 python -m src.cli.main watermark set -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline --id 127946703 --timestamp "2026-01-06 20:52:22"
 python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline
