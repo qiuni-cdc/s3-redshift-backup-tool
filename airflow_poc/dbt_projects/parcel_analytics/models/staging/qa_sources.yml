@@ -19,4 +19,4 @@ sources:
             tests:
               - not_null
           - name: name
-              description: "Warehouse name"
+            description: "Warehouse name"
