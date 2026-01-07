@@ -130,7 +130,7 @@ with TaskGroup("dbt_transformations", dag=dag) as dbt_group:
         source {SYNC_TOOL_PATH}/airflow_poc/airflow_env/bin/activate && \\
         export REDSHIFT_USER=$(grep REDSHIFT_USER {SYNC_TOOL_PATH}/.env | cut -d '=' -f2) && \\
         export REDSHIFT_PASSWORD=$(grep REDSHIFT_PASSWORD {SYNC_TOOL_PATH}/.env | cut -d '=' -f2) && \\
-        dbt test --profiles-dir ~/.dbt --select stg_uni_warehouses dim_warehouses
+        dbt test --profiles-dir ~/.dbt --select stg_uni_warehouses_qa dim_warehouses
         ''',
         dag=dag
     )
