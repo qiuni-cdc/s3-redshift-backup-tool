@@ -1,0 +1,22 @@
+# Define source tables from the sync tool
+version: 2
+
+sources:
+  - name: kuaisong.uni_warehouses
+    description: Raw data synced from MySQL via the sync tool
+    schema: settlement_public
+    tables:
+      - name: uni_warehouses_ref
+        description: "Raw parcel detail data synced from MySQL unidw.dw_parcel_detail_tool"
+        columns:
+          - name: id
+            description: "Primary key - unique identifier for each record"
+            tests:
+              - not_null
+              - unique
+          - name: city
+            description: "city id of the warehouse"
+            tests:
+              - not_null
+          - name: name
+              description: "Warehouse name"
