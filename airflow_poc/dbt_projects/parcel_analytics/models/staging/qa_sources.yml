@@ -2,7 +2,7 @@
 version: 2
 
 sources:
-  - name: kuaisong.uni_warehouses
+  - name: redshift_raw_data
     description: Raw data synced from MySQL via the sync tool
     schema: settlement_public
     tables:

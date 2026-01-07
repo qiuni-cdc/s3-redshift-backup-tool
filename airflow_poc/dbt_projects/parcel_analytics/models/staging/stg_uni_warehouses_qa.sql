@@ -3,5 +3,5 @@
 
   select
       *
-  from {{ source('kuaisong', 'uni_warehouses') }}
+  from {{ source('redshift_raw_data', 'uni_warehouses_ref') }}
   where id is not null
