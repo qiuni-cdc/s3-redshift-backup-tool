@@ -188,8 +188,8 @@ connections:
       host: redshift-dw.qa.uniuni.com
       port: 5439
       database: dw
-      username: "${REDSHIFT_USER}"
-      password: "${REDSHIFT_PASSWORD}"  # References .env variable
+      username: "${REDSHIFT_QA_USER}"
+      password: "${REDSHIFT_QA_PASSWORD}"  # References .env variable
       schema: public
       
       # Redshift SSH tunnel (your separate bastion)
@@ -204,8 +204,8 @@ connections:
       host: redshift-dw.qa.uniuni.com
       port: 5439
       database: dw
-      username: "${REDSHIFT_USER}"
-      password: "${REDSHIFT_PASSWORD}"  # References .env variable
+      username: "${REDSHIFT_QA_USER}"
+      password: "${REDSHIFT_QA_PASSWORD}"  # References .env variable
       schema: public
       
       # Redshift SSH tunnel (your separate bastion)
