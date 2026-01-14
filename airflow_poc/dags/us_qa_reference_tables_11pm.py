@@ -165,9 +165,9 @@ def validate_and_fix_schema(table_config, **context):
         # ===== STEP 2: Get Redshift Schema =====
         print("📊 Fetching Redshift schema...")
 
-        # Check if SSH tunnel is running
-        redshift_host = 'localhost'
-        redshift_port = 46407
+        # Direct connection to Redshift (no SSH tunnel)
+        redshift_host = 'redshift-dw.qa.uniuni.com'
+        redshift_port = 5439
 
         try:
             redshift_conn = psycopg2.connect(
@@ -266,7 +266,7 @@ def validate_and_fix_schema(table_config, **context):
 
         except psycopg2.OperationalError as e:
             print(f"⚠️  Cannot connect to Redshift: {e}")
-            print("⚠️  Make sure SSH tunnel is running on port 46407")
+            print("⚠️  Check network connectivity to redshift-dw.qa.uniuni.com:5439")
             print("✅ Continuing anyway - sync will handle table creation")
             return
 
