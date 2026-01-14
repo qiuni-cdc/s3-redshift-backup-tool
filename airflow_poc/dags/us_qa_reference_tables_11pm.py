@@ -138,21 +138,36 @@ def validate_and_fix_schema(table_config, **context):
 
         mysql_cursor.execute(f"""
             SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
-                   NUMERIC_PRECISION, NUMERIC_SCALE
+                   CHARACTER_SET_NAME, NUMERIC_PRECISION, NUMERIC_SCALE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '{schema}'
             AND TABLE_NAME = '{table}'
             ORDER BY ORDINAL_POSITION
         """)
 
+        # Character set to bytes per character mapping
+        charset_bytes = {
+            'latin1': 1, 'ascii': 1, 'utf8': 3, 'utf8mb4': 4,
+            'ucs2': 2, 'utf16': 4, 'utf16le': 4, 'utf32': 4, 'binary': 1
+        }
+
         for row in mysql_cursor.fetchall():
             col_name = row['COLUMN_NAME']
             data_type = row['DATA_TYPE']
             max_length = row['CHARACTER_MAXIMUM_LENGTH']
+            charset = row.get('CHARACTER_SET_NAME')
+
+            # Calculate byte requirements for VARCHAR columns
+            bytes_needed = max_length
+            if data_type in ['varchar', 'char'] and max_length and charset:
+                bytes_per_char = charset_bytes.get(charset.lower(), 4)
+                bytes_needed = max_length * bytes_per_char
 
             mysql_schema[col_name] = {
                 'type': data_type,
                 'length': max_length,
+                'charset': charset,
+                'bytes_needed': bytes_needed,
                 'precision': row['NUMERIC_PRECISION'],
                 'scale': row['NUMERIC_SCALE']
             }
@@ -225,16 +240,21 @@ def validate_and_fix_schema(table_config, **context):
 
                 redshift_col = redshift_schema[col_name]
 
-                # Compare VARCHAR lengths
+                # Compare VARCHAR lengths (considering character set encoding)
                 if mysql_col['type'] in ['varchar', 'char']:
-                    mysql_len = mysql_col['length']
+                    mysql_bytes_needed = mysql_col.get('bytes_needed', mysql_col['length'])
+                    mysql_char_len = mysql_col['length']
+                    mysql_charset = mysql_col.get('charset', 'unknown')
                     redshift_len = redshift_col['length']
 
-                    # Redshift should have at least as much length as MySQL data
-                    if redshift_len and mysql_len and redshift_len < mysql_len:
+                    # Redshift VARCHAR is byte-based, MySQL is character-based
+                    # Redshift should have enough bytes to store MySQL data with charset encoding
+                    if redshift_len and mysql_bytes_needed and redshift_len < mysql_bytes_needed:
                         mismatches.append(
                             f"  ❌ Column '{col_name}': "
-                            f"Redshift VARCHAR({redshift_len}) < MySQL VARCHAR({mysql_len})"
+                            f"Redshift VARCHAR({redshift_len} bytes) < "
+                            f"MySQL VARCHAR({mysql_char_len} chars, charset={mysql_charset}) "
+                            f"which needs {mysql_bytes_needed} bytes"
                         )
                         schema_mismatch = True
 

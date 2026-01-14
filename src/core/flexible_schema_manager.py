@@ -37,10 +37,23 @@ class FlexibleSchemaManager:
         self._schema_cache_timestamp: Dict[str, float] = {}
         self._mysql_to_pyarrow_map = self._build_type_mapping()
         self._mysql_to_redshift_map = self._build_redshift_mapping()
-        
+
+        # MySQL character set to max bytes per character mapping
+        self._charset_bytes = {
+            'latin1': 1,
+            'ascii': 1,
+            'utf8': 3,      # MySQL's utf8 is limited to 3 bytes (BMP only)
+            'utf8mb4': 4,   # Full UTF-8 with 4-byte support (emoji, etc.)
+            'ucs2': 2,
+            'utf16': 4,
+            'utf16le': 4,
+            'utf32': 4,
+            'binary': 1,
+        }
+
         # Load custom Redshift optimization configuration
         self._redshift_optimizations = self._load_redshift_optimizations()
-        
+
         # Initialize column mapper
         self.column_mapper = ColumnMapper()
     
@@ -147,13 +160,15 @@ class FlexibleSchemaManager:
             schema_name = 'settlement'  # Default schema
             table_only = mysql_table_name
         
-        # Get comprehensive column information
+        # Get comprehensive column information including character set
         cursor.execute(f"""
-        SELECT 
+        SELECT
             COLUMN_NAME,
             DATA_TYPE,
             IS_NULLABLE,
             CHARACTER_MAXIMUM_LENGTH,
+            CHARACTER_SET_NAME,
+            COLLATION_NAME,
             NUMERIC_PRECISION,
             NUMERIC_SCALE,
             COLUMN_DEFAULT,
@@ -161,7 +176,7 @@ class FlexibleSchemaManager:
             ORDINAL_POSITION,
             COLUMN_TYPE,
             COLUMN_COMMENT
-        FROM INFORMATION_SCHEMA.COLUMNS 
+        FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME = %s
         AND TABLE_SCHEMA = %s
         ORDER BY ORDINAL_POSITION
@@ -293,20 +308,21 @@ class FlexibleSchemaManager:
             column_type = col['COLUMN_TYPE'].lower()
             is_nullable = col['IS_NULLABLE'] == 'YES'
             max_length = col['CHARACTER_MAXIMUM_LENGTH']
+            charset = col.get('CHARACTER_SET_NAME')  # Get character set
             precision = col['NUMERIC_PRECISION']
             scale = col['NUMERIC_SCALE']
             extra = col.get('EXTRA', '').lower()
-            
+
             # Track original column name
             original_columns.append(col_name)
-            
+
             # Sanitize column name for Redshift (can't start with number)
             safe_col_name = self._sanitize_column_name_for_redshift(col_name)
             column_mapping[col_name] = safe_col_name
-            
-            # Get Redshift type
+
+            # Get Redshift type with charset awareness
             rs_type = self._map_mysql_to_redshift(
-                data_type, column_type, max_length, precision, scale
+                data_type, column_type, max_length, precision, scale, charset
             )
             
             # Add nullable constraint
@@ -472,6 +488,22 @@ class FlexibleSchemaManager:
         
         return "\n".join(ddl_lines)
     
+    def _get_charset_bytes(self, charset: Optional[str]) -> int:
+        """
+        Get maximum bytes per character for a given MySQL character set.
+
+        Args:
+            charset: MySQL character set name (e.g., 'utf8mb4', 'latin1')
+
+        Returns:
+            Maximum bytes per character (defaults to 4 for unknown charsets for safety)
+        """
+        if not charset:
+            return 4  # Default to 4 bytes for safety (utf8mb4)
+
+        charset_lower = charset.lower()
+        return self._charset_bytes.get(charset_lower, 4)  # Default to 4 for unknown charsets
+
     def _load_redshift_optimizations(self) -> Dict[str, Dict]:
         """Load custom Redshift optimization settings from redshift_keys.json"""
         try:
@@ -493,13 +525,35 @@ class FlexibleSchemaManager:
     
     def _map_mysql_to_redshift(self, data_type: str, column_type: str,
                                max_length: Optional[int], precision: Optional[int],
-                               scale: Optional[int]) -> str:
-        """Map MySQL types to Redshift types"""
-        
+                               scale: Optional[int], charset: Optional[str] = None) -> str:
+        """
+        Map MySQL types to Redshift types with character set awareness.
+
+        Args:
+            data_type: MySQL data type (e.g., 'varchar', 'int')
+            column_type: Full MySQL column type (e.g., 'varchar(255)')
+            max_length: Character maximum length
+            precision: Numeric precision
+            scale: Numeric scale
+            charset: MySQL character set name (e.g., 'utf8mb4', 'latin1')
+
+        Returns:
+            Redshift type definition
+        """
+
         if data_type in ['varchar', 'char']:
             if max_length and max_length <= 65535:
-                # Add safety buffer for VARCHAR columns to handle longer actual data
-                safe_length = min(max_length * 2, 65535) if max_length < 32768 else 65535
+                # Calculate bytes needed based on character set
+                bytes_per_char = self._get_charset_bytes(charset)
+
+                # Calculate safe length: chars × bytes_per_char
+                safe_length = min(max_length * bytes_per_char, 65535)
+
+                logger.debug(
+                    f"VARCHAR mapping: {max_length} chars × {bytes_per_char} bytes/char "
+                    f"(charset={charset}) = {safe_length} bytes in Redshift"
+                )
+
                 return f"VARCHAR({safe_length})"
             return "VARCHAR(65535)"
         
