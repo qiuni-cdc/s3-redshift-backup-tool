@@ -17,6 +17,14 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import json
+import os
+import sys
+
+# Add sync tool to path for imports
+sys.path.insert(0, '/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool')
+
+import mysql.connector
+import psycopg2
 
 # ============================================================================
 # CONFIGURATION
@@ -84,9 +92,197 @@ dag = DAG(
 )
 
 # ============================================================================
+# SCHEMA VALIDATION FUNCTION
+# ============================================================================
+
+def validate_and_fix_schema(table_config, **context):
+    """
+    Compare MySQL and Redshift schemas. Drop Redshift table if mismatch detected.
+    This prevents VARCHAR length errors and other schema drift issues.
+    """
+    source_table = table_config['name']  # e.g., kuaisong.uni_customer
+    target_table = table_config['target']  # e.g., uni_customer_ref
+    schema_name = 'settlement_public'
+
+    print(f"\n{'='*80}")
+    print(f"🔍 SCHEMA VALIDATION: {source_table} → {target_table}")
+    print(f"{'='*80}\n")
+
+    # Load environment variables
+    env_file = f"{SYNC_TOOL_PATH}/.env"
+    env_vars = {}
+    with open(env_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                env_vars[key] = value.strip('"').strip("'")
+
+    mysql_schema = {}
+    redshift_schema = {}
+    schema_mismatch = False
+
+    try:
+        # ===== STEP 1: Get MySQL Schema =====
+        print("📊 Fetching MySQL schema...")
+        mysql_conn = mysql.connector.connect(
+            host='us-west-2.ro.db.qa.uniuni.com.internal',
+            port=3306,
+            database='kuaisong',
+            user=env_vars.get('DB_USER'),
+            password=env_vars.get('DB_US_QA_PASSWORD')
+        )
+
+        mysql_cursor = mysql_conn.cursor(dictionary=True)
+        schema, table = source_table.split('.')
+
+        mysql_cursor.execute(f"""
+            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                   NUMERIC_PRECISION, NUMERIC_SCALE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = '{schema}'
+            AND TABLE_NAME = '{table}'
+            ORDER BY ORDINAL_POSITION
+        """)
+
+        for row in mysql_cursor.fetchall():
+            col_name = row['COLUMN_NAME']
+            data_type = row['DATA_TYPE']
+            max_length = row['CHARACTER_MAXIMUM_LENGTH']
+
+            mysql_schema[col_name] = {
+                'type': data_type,
+                'length': max_length,
+                'precision': row['NUMERIC_PRECISION'],
+                'scale': row['NUMERIC_SCALE']
+            }
+
+        mysql_cursor.close()
+        mysql_conn.close()
+
+        print(f"✅ MySQL: Found {len(mysql_schema)} columns")
+
+        # ===== STEP 2: Get Redshift Schema =====
+        print("📊 Fetching Redshift schema...")
+
+        # Check if SSH tunnel is running
+        redshift_host = 'localhost'
+        redshift_port = 46407
+
+        try:
+            redshift_conn = psycopg2.connect(
+                host=redshift_host,
+                port=redshift_port,
+                dbname='dw',
+                user=env_vars.get('REDSHIFT_USER'),
+                password=env_vars.get('REDSHIFT_PASSWORD')
+            )
+
+            redshift_cursor = redshift_conn.cursor()
+
+            # Check if table exists
+            redshift_cursor.execute(f"""
+                SELECT column_name, data_type, character_maximum_length,
+                       numeric_precision, numeric_scale
+                FROM information_schema.columns
+                WHERE table_schema = '{schema_name}'
+                AND table_name = '{target_table}'
+                ORDER BY ordinal_position
+            """)
+
+            rows = redshift_cursor.fetchall()
+
+            if not rows:
+                print(f"⚠️  Redshift: Table {schema_name}.{target_table} does not exist")
+                print("✅ No action needed - table will be created on first sync")
+                redshift_cursor.close()
+                redshift_conn.close()
+                return
+
+            for row in rows:
+                col_name = row[0]
+                data_type = row[1]
+                max_length = row[2]
+
+                redshift_schema[col_name] = {
+                    'type': data_type,
+                    'length': max_length,
+                    'precision': row[3],
+                    'scale': row[4]
+                }
+
+            print(f"✅ Redshift: Found {len(redshift_schema)} columns")
+
+            # ===== STEP 3: Compare Schemas =====
+            print("\n🔍 Comparing schemas...")
+
+            mismatches = []
+
+            for col_name, mysql_col in mysql_schema.items():
+                if col_name not in redshift_schema:
+                    mismatches.append(f"  ❌ Column '{col_name}' missing in Redshift")
+                    continue
+
+                redshift_col = redshift_schema[col_name]
+
+                # Compare VARCHAR lengths
+                if mysql_col['type'] in ['varchar', 'char']:
+                    mysql_len = mysql_col['length']
+                    redshift_len = redshift_col['length']
+
+                    # Redshift should have at least as much length as MySQL data
+                    if redshift_len and mysql_len and redshift_len < mysql_len:
+                        mismatches.append(
+                            f"  ❌ Column '{col_name}': "
+                            f"Redshift VARCHAR({redshift_len}) < MySQL VARCHAR({mysql_len})"
+                        )
+                        schema_mismatch = True
+
+            # Check for extra columns in Redshift
+            for col_name in redshift_schema:
+                if col_name not in mysql_schema:
+                    mismatches.append(f"  ⚠️  Column '{col_name}' exists in Redshift but not in MySQL")
+
+            if mismatches:
+                print(f"\n⚠️  Found {len(mismatches)} schema differences:")
+                for mismatch in mismatches:
+                    print(mismatch)
+            else:
+                print("✅ Schemas match perfectly!")
+
+            # ===== STEP 4: Drop Table if Mismatch =====
+            if schema_mismatch:
+                print(f"\n🔧 FIXING: Dropping table {schema_name}.{target_table} to allow recreation with correct schema")
+
+                redshift_cursor.execute(f"DROP TABLE IF EXISTS {schema_name}.{target_table} CASCADE")
+                redshift_conn.commit()
+
+                print(f"✅ Table dropped successfully - will be recreated on next sync with correct schema")
+            else:
+                print(f"\n✅ Schema validation passed - no changes needed")
+
+            redshift_cursor.close()
+            redshift_conn.close()
+
+        except psycopg2.OperationalError as e:
+            print(f"⚠️  Cannot connect to Redshift: {e}")
+            print("⚠️  Make sure SSH tunnel is running on port 46407")
+            print("✅ Continuing anyway - sync will handle table creation")
+            return
+
+    except Exception as e:
+        print(f"❌ Schema validation error: {e}")
+        print("⚠️  Continuing anyway - sync will attempt to proceed")
+        import traceback
+        traceback.print_exc()
+
+    print(f"\n{'='*80}\n")
+
+# ============================================================================
 # TASK GENERATION - One task per table
 # ============================================================================
 
+validate_tasks = []
 sync_tasks = []
 parse_tasks = []
 
@@ -95,6 +291,19 @@ for idx, table in enumerate(TABLES):
     short_name = table['short_name']
     target_name = table['target']
     limit = table['limit']
+
+    # Validation task - runs before sync
+    def create_validate_function(table_config):
+        """Closure to capture table config"""
+        def validate_wrapper(**context):
+            return validate_and_fix_schema(table_config, **context)
+        return validate_wrapper
+
+    validate_task = PythonOperator(
+        task_id=f'validate_schema_{short_name}',
+        python_callable=create_validate_function(table),
+        dag=dag
+    )
 
     # Sync task for each table
     sync_task = BashOperator(
@@ -148,9 +357,10 @@ for idx, table in enumerate(TABLES):
         dag=dag
     )
 
-    # Set dependency: sync → parse for each table
-    sync_task >> parse_task
+    # Set dependency: validate → sync → parse for each table
+    validate_task >> sync_task >> parse_task
 
+    validate_tasks.append(validate_task)
     sync_tasks.append(sync_task)
     parse_tasks.append(parse_task)
 
