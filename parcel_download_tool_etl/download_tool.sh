@@ -19,7 +19,7 @@ echo "Running ETL with datetime: $BEG_DATETIME, hours: $HOURS"
 
 # Create logs directory in current working directory (relative path)
 mkdir -p ./logs && \
-$KITCHEN_PATH \
+timeout 40m $KITCHEN_PATH \
     -file=./download_tool_job.kjb \
     -level=Basic \
     -param:beg_datetime="$BEG_DATETIME" \
