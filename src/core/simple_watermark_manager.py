@@ -43,14 +43,25 @@ class DateTimeEncoder(json.JSONEncoder):
 class SimpleWatermarkManager:
     """
     Simplified watermark manager with clean design.
-    
+
     No accumulation bugs, no complex state management, just simple and reliable.
+
+    Watermark Scoping (v2.1 - Target-Based):
+    - Watermarks are scoped by BOTH source AND target connections
+    - This allows independent sync progress when reading from the same source
+      but writing to different targets (e.g., ODS vs DWS)
+    - S3 Key Format: watermarks/v2/{source}_{table}_{target}.json
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         """Initialize the watermark manager."""
         self.config = config
-        
+
+        # Extract source and target connection names for scoping
+        # These are used to create unique watermark keys per pipeline
+        self.source_connection = config.get('source_connection', {}).get('name', 'default')
+        self.target_connection = config.get('target_connection', {}).get('name', 'default')
+
         # Initialize S3 client with timeout protection
         from botocore.config import Config
 
@@ -65,15 +76,17 @@ class SimpleWatermarkManager:
             aws_secret_access_key=config['s3'].get('secret_access_key'),
             config=boto_config
         )
-        
+
         self.bucket_name = config['s3']['bucket_name']
         self.watermark_prefix = config['s3'].get('watermark_prefix', 'watermarks/v2/')
-        
+
         # Cache for processed file sets (optimization for large file lists)
         self._processed_files_cache = {}
-        
+
         # Redshift connection for absolute row counts
         self._redshift_conn = None
+
+        logger.info(f"Initialized watermark manager with source={self.source_connection}, target={self.target_connection}")
     
     def get_watermark(self, table_name: str) -> Dict[str, Any]:
         """
@@ -536,9 +549,29 @@ class SimpleWatermarkManager:
         raise WatermarkError(f"Failed to save watermark after {max_retries} attempts: {last_error}")
     
     def _clean_table_name(self, table_name: str) -> str:
-        """Clean table name for S3 key usage."""
-        # Handle scoped names like "US_DW_RO:schema.table"
-        return table_name.replace(':', '_').replace('.', '_').lower()
+        """
+        Clean table name for S3 key usage with target-based scoping.
+
+        S3 Key Format: {source}_{table}_{target}
+
+        This ensures watermarks are unique per source-target pair, allowing
+        independent sync progress when the same source table feeds multiple targets.
+
+        Examples:
+        - table_name="US_DW_RO_SSH:settlement.settle_orders", target="redshift_settlement_ods"
+          → "us_dw_ro_ssh_settlement_settle_orders_redshift_settlement_ods"
+
+        - table_name="settlement.settle_orders", target="redshift_settlement_dws"
+          → "{source}_settlement_settle_orders_redshift_settlement_dws"
+        """
+        # Handle scoped names like "US_DW_RO_SSH:schema.table"
+        base_name = table_name.replace(':', '_').replace('.', '_').lower()
+
+        # Append target connection for unique scoping per source-target pair
+        # This prevents watermark conflicts when same source feeds multiple targets
+        target_suffix = self.target_connection.replace(':', '_').replace('.', '_').lower()
+
+        return f"{base_name}_{target_suffix}"
     
     def _query_redshift_count(self, table_name: str) -> int:
         """

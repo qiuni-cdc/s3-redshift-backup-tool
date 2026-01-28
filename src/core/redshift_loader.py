@@ -36,6 +36,15 @@ class RedshiftLoader:
         self.watermark_manager = create_watermark_manager(config.to_dict())
         self.s3_client = None
         self._init_s3_client()
+
+        # Build S3 path with target-based isolation (v2.1) - same logic as S3Manager
+        isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+        base_path = config.s3.incremental_path.strip('/')
+
+        if isolation_prefix:
+            self.s3_data_path = f"{isolation_prefix}/{base_path}"
+        else:
+            self.s3_data_path = base_path
         
     def _init_s3_client(self):
         """Initialize S3 client"""
@@ -179,11 +188,11 @@ class RedshiftLoader:
             if since_time is None:
                 since_time = datetime.now() - timedelta(hours=24)
             
-            # Generate search prefix based on table name
+            # Generate search prefix based on table name (v2.1: uses isolation_prefix)
             table_prefix = table_name.replace('.', '_')
-            s3_prefix = self.config.s3.incremental_path.strip('/')
-            
-            logger.debug(f"Searching S3 for files with prefix: {s3_prefix} and pattern: {table_prefix}")
+            s3_prefix = self.s3_data_path
+
+            logger.debug(f"Searching S3 for files with prefix: {s3_prefix} and pattern: {table_prefix} (includes isolation_prefix)")
             
             # List objects in S3
             response = self.s3_client.list_objects_v2(

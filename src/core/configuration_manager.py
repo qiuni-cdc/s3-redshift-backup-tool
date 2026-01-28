@@ -1161,7 +1161,7 @@ class ConfigurationManager:
         else:
             raise ValidationError(f"Connection '{connection_name}' not found in connections.yml")
 
-    def create_app_config(self, source_connection: str, target_connection: str, s3_config_name: str) -> 'AppConfig':
+    def create_app_config(self, source_connection: str, target_connection: str, s3_config_name: str, isolation_prefix: str = "") -> 'AppConfig':
         """
         Create AppConfig from connections.yml (v1.2.0 multi-pipeline system).
 
@@ -1171,6 +1171,7 @@ class ConfigurationManager:
             source_connection: Required source connection name
             target_connection: Required target connection name
             s3_config_name: Required S3 config name
+            isolation_prefix: Optional S3 isolation prefix for multi-target pipelines (v2.1)
 
         Returns:
             AppConfig instance populated from connections.yml
@@ -1275,6 +1276,7 @@ class ConfigurationManager:
             secret_key=SecretStr(s3_config.get('secret_access_key')) if s3_config.get('secret_access_key') else None,
             region=s3_config.get('region', 'us-west-2'),
             incremental_path=s3_config.get('incremental_path', 'incremental/'),
+            isolation_prefix=isolation_prefix,  # v2.1: Target-based S3 isolation
             high_watermark_key=s3_config.get('high_watermark_key', 'high_watermark'),
             multipart_threshold=s3_config.get('performance', {}).get('multipart_threshold', 8388608),
             multipart_chunksize=s3_config.get('performance', {}).get('multipart_chunksize', 8388608),
@@ -1298,6 +1300,11 @@ class ConfigurationManager:
             target_rows_per_chunk=backup_config.get('target_rows_per_chunk', 50000),
             max_rows_per_chunk=backup_config.get('max_rows_per_chunk', 100000)
         )
+
+        # Store connection names for watermark scoping (v2.1)
+        # This enables target-based watermark scoping for independent sync progress
+        app_config._source_connection_name = source_connection
+        app_config._target_connection_name = target_connection
 
         logger.info(
             f"Created AppConfig from connections.yml: "

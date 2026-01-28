@@ -188,8 +188,8 @@ connections:
       host: redshift-dw.qa.uniuni.com
       port: 5439
       database: dw
-      username: "${REDSHIFT_USER}"
-      password: "${REDSHIFT_PASSWORD}"  # References .env variable
+      username: "${REDSHIFT_QA_USER}"
+      password: "${REDSHIFT_QA_PASSWORD}"  # References .env variable
       schema: public
       
       # Redshift SSH tunnel (your separate bastion)
@@ -204,9 +204,9 @@ connections:
       host: redshift-dw.qa.uniuni.com
       port: 5439
       database: dw
-      username: "${REDSHIFT_USER}"
-      password: "${REDSHIFT_PASSWORD}"  # References .env variable
-      schema: settlement_public
+      username: "${REDSHIFT_QA_USER}"
+      password: "${REDSHIFT_QA_PASSWORD}"  # References .env variable
+      schema: public
       
       # Redshift SSH tunnel (your separate bastion)
       ssh_tunnel:
@@ -226,7 +226,24 @@ connections:
         host: 35.83.114.196
         username: "${REDSHIFT_SSH_BASTION_USER}"
         private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}"
-        local_port: 0  # Auto-assign 
+        local_port: 0  # Auto-assign  
+    
+    redshift_settlement_ods: 
+      host: redshift-dw.uniuni.com 
+      port: 5439 
+      database: dw 
+      username: "${REDSHIFT_PRO_USER}" 
+      password: "${REDSHIFT_PRO_PASSWORD}" 
+      schema: settlement_ods 
+
+      # Redshift SSH tunnel (your separate bastion)
+      ssh_tunnel:
+        enabled: true
+        host: 35.83.114.196
+        username: "${REDSHIFT_SSH_BASTION_USER}"
+        private_key_path: "${REDSHIFT_SSH_BASTION_KEY_PATH}"
+        local_port: 0  # Auto-assign  
+
     
     redshift_settlement_dws_direct: 
       host: redshift-dw.uniuni.com
@@ -238,6 +255,18 @@ connections:
 
       # Redshift SSH tunnel (your separate bastion)
       ssh_tunnel:
+        enabled: false 
+    
+    redshift_settlement_ods_direct: 
+      host: redshift-dw.uniuni.com 
+      port: 5439 
+      database: dw 
+      username: "${REDSHIFT_PRO_USER}" 
+      password: "${REDSHIFT_PRO_PASSWORD}" 
+      schema: settlement_ods 
+
+      # Redshift SSH tunnel (your separate bastion) 
+      ssh_tunnel:
         enabled: false
 
 # S3 Configurations (Multiple environments supported)
@@ -246,8 +275,8 @@ s3_configs:
   s3_qa:
     bucket_name: redshift-dw-qa-uniuni-com
     region: us-west-2
-    access_key_id: "${AWS_ACCESS_KEY_ID}"
-    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+    access_key_id: "${AWS_ACCESS_KEY_ID_QA}"
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY_QA}"
     incremental_path: incremental/
     high_watermark_key: watermark/last_run_timestamp.txt
     description: "QA environment S3 bucket"
@@ -264,8 +293,8 @@ s3_configs:
   s3_prod:
     bucket_name: redshift-dw-uniuni-com
     region: us-west-2
-    access_key_id: "${AWS_ACCESS_KEY_ID}"
-    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+    access_key_id: "${AWS_ACCESS_KEY_ID_PROD}"
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY_PROD}"
     incremental_path: incremental/
     high_watermark_key: watermark/last_run_timestamp.txt
     description: "Production environment S3 bucket"

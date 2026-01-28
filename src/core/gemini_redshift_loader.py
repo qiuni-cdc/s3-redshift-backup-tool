@@ -37,7 +37,16 @@ class GeminiRedshiftLoader:
     def __init__(self, config: AppConfig, connection_registry=None):
         self.config = config
         self.connection_manager = ConnectionManager(config)
-        
+
+        # Build S3 path with target-based isolation (v2.1) - same logic as S3Manager
+        isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+        base_path = config.s3.incremental_path.strip('/')
+
+        if isolation_prefix:
+            self.s3_data_path = f"{isolation_prefix}/{base_path}"
+        else:
+            self.s3_data_path = base_path
+
         # Use provided connection registry (with active SSH tunnels) or create new one
         if connection_registry is None:
             try:
@@ -45,7 +54,7 @@ class GeminiRedshiftLoader:
                 connection_registry = ConnectionRegistry()
             except Exception as e:
                 logger.warning(f"Failed to load connection registry: {e}")
-        
+
         self.schema_manager = FlexibleSchemaManager(self.connection_manager, connection_registry=connection_registry)
         self.watermark_manager = create_watermark_manager(config.to_dict())
         self.column_mapper = ColumnMapper()
@@ -392,12 +401,12 @@ class GeminiRedshiftLoader:
             # Get S3 client
             s3_client = self.connection_manager.get_s3_client()
 
-            # Build S3 prefix for this table's data
+            # Build S3 prefix for this table's data (v2.1: uses isolation_prefix)
             clean_table_name = self._clean_table_name_with_scope(table_name)
-            base_prefix = f"{self.config.s3.incremental_path.strip('/')}/"
+            base_prefix = f"{self.s3_data_path}/"
 
             logger.info(f"🔍 DEBUG: clean_table_name={clean_table_name}")
-            logger.info(f"🔍 DEBUG: base_prefix={base_prefix}")
+            logger.info(f"🔍 DEBUG: base_prefix={base_prefix} (includes isolation_prefix)")
 
             # Try table-specific partition first, then general prefix
             table_partition_prefix = f"{base_prefix}table={clean_table_name}/"

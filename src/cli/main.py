@@ -1604,6 +1604,11 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 target_name = pipeline_info.get('target')
                 pipeline_s3_config = pipeline_info.get('s3_config')
 
+                # Extract S3 isolation prefix for target-based scoping (v2.1)
+                # s3 config is under pipeline section in YAML
+                s3_info = pipeline_info.get('s3', {})
+                isolation_prefix = s3_info.get('isolation_prefix', '')
+
                 if not source_name:
                     raise ValueError(f"Pipeline '{effective_pipeline}' missing 'source' configuration")
                 if not target_name:
@@ -1611,11 +1616,12 @@ def watermark(ctx, operation: str, table: str, timestamp: str, id: int, show_fil
                 if not pipeline_s3_config:
                     raise ValueError(f"Pipeline '{effective_pipeline}' missing 's3_config' configuration")
 
-                # Recreate config with correct S3 config
+                # Recreate config with correct S3 config and isolation prefix
                 config = config_manager.create_app_config(
                     source_connection=source_name,
                     target_connection=target_name,
-                    s3_config_name=pipeline_s3_config
+                    s3_config_name=pipeline_s3_config,
+                    isolation_prefix=isolation_prefix
                 )
             except Exception as e:
                 import traceback
@@ -2049,6 +2055,11 @@ def watermark_count(ctx, operation: str, table: str, count: int, pipeline: str, 
                 target_name = pipeline_info.get('target')
                 pipeline_s3_config = pipeline_info.get('s3_config')
 
+                # Extract S3 isolation prefix for target-based scoping (v2.1)
+                # s3 config is under pipeline section in YAML
+                s3_info = pipeline_info.get('s3', {})
+                isolation_prefix = s3_info.get('isolation_prefix', '')
+
                 if not source_name:
                     raise ValueError(f"Pipeline '{effective_pipeline}' missing 'source' configuration")
                 if not target_name:
@@ -2056,11 +2067,12 @@ def watermark_count(ctx, operation: str, table: str, count: int, pipeline: str, 
                 if not pipeline_s3_config:
                     raise ValueError(f"Pipeline '{effective_pipeline}' missing 's3_config' configuration")
 
-                # Recreate config with correct S3 config
+                # Recreate config with correct S3 config and isolation prefix
                 config = config_manager.create_app_config(
                     source_connection=source_name,
                     target_connection=target_name,
-                    s3_config_name=pipeline_s3_config
+                    s3_config_name=pipeline_s3_config,
+                    isolation_prefix=isolation_prefix
                 )
             except Exception as e:
                 click.echo(f"⚠️  Warning: Failed to load pipeline config: {e}")
@@ -2293,11 +2305,17 @@ def s3clean(ctx, operation: str, table: str, older_than: str, pattern: str, dry_
                         source_name = pipeline_info.get('source')
                         target_name = pipeline_info.get('target')
 
-                        # Recreate config with correct S3 config
+                        # Extract S3 isolation prefix for target-based scoping (v2.1)
+                        # s3 config is under pipeline section in YAML
+                        s3_info = pipeline_info.get('s3', {})
+                        isolation_prefix = s3_info.get('isolation_prefix', '')
+
+                        # Recreate config with correct S3 config and isolation prefix
                         config = config_manager.create_app_config(
                             source_connection=source_name,
                             target_connection=target_name,
-                            s3_config_name=pipeline_s3_config
+                            s3_config_name=pipeline_s3_config,
+                            isolation_prefix=isolation_prefix
                         )
                 except Exception as e:
                     click.echo(f"⚠️  Warning: Failed to recreate config with pipeline S3 config: {e}", err=True)
@@ -2413,7 +2431,16 @@ def _parse_time_delta(time_str: str):
 def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str, cutoff_time, show_timestamps: bool = False):
     """List S3 files with filtering and processing status"""
     try:
-        prefix = f"{config.s3.incremental_path.strip('/')}/"
+        # Build S3 path with target-based isolation (v2.1) - same logic as S3Manager
+        isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+        base_path = config.s3.incremental_path.strip('/')
+
+        if isolation_prefix:
+            effective_path = f"{isolation_prefix}/{base_path}"
+        else:
+            effective_path = base_path
+
+        prefix = f"{effective_path}/"
 
         # Handle pagination to get ALL files, not just first 1000
         all_files = []
@@ -2475,18 +2502,9 @@ def _s3_list_files(s3_client, config, table: str, older_than: str, pattern: str,
 
         if table:
             try:
-                # Initialize watermark manager
+                # Initialize watermark manager with full config (includes source/target for v2.1 scoping)
                 from src.core.watermark_adapter import create_watermark_manager
-                watermark_config = {
-                    's3': {
-                        'bucket_name': config.s3.bucket_name,
-                        'access_key_id': config.s3.access_key,
-                        'secret_access_key': config.s3.secret_key.get_secret_value(),
-                        'region': config.s3.region,
-                        'watermark_prefix': 'watermarks/v2/'
-                    }
-                }
-                watermark_manager = create_watermark_manager(watermark_config)
+                watermark_manager = create_watermark_manager(config.to_dict())
 
                 # Get S3 URIs for status check
                 files_to_display = filtered_files if (older_than or pattern) else all_files
@@ -2599,8 +2617,17 @@ def _s3_clean_table(s3_client, config, table: str, older_than: str, pattern: str
         else:
             # Unscoped table (v1.0.0 compatibility)
             clean_table_name = table.replace('.', '_').replace('-', '_')
-            
-        prefix = f"{config.s3.incremental_path.strip('/')}/"
+
+        # Build S3 path with target-based isolation (v2.1) - same logic as S3Manager
+        isolation_prefix = config.s3.isolation_prefix.strip('/') if config.s3.isolation_prefix else ''
+        base_path = config.s3.incremental_path.strip('/')
+
+        if isolation_prefix:
+            effective_path = f"{isolation_prefix}/{base_path}"
+        else:
+            effective_path = base_path
+
+        prefix = f"{effective_path}/"
         
         # Find files to delete (handle pagination)
         files_to_delete = []

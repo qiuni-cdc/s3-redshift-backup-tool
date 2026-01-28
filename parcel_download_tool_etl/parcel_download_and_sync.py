@@ -76,12 +76,12 @@ except ModuleNotFoundError as e:
     sys.exit(1)
 
 # Configure logging
+# Only StreamHandler - bash script redirects output to timestamped logs in parcel_download_hourly_log/
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(PROJECT_ROOT / 'parcel_download_tool_etl' / 'parcel_download_tool_etl.log')
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -540,7 +540,7 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
             cwd=download_dir,
             capture_output=True,
             text=True,
-            timeout=7200  # 2 hour timeout
+            timeout=2400  # 40 minute timeout
         )
 
         if result.returncode == 0:
@@ -552,7 +552,7 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
             return False, result.stdout, result.stderr
 
     except subprocess.TimeoutExpired:
-        logger.error("❌ Download script timed out after 2 hour")
+        logger.error("❌ Download script timed out after 40 minutes")
         return False, "", "Script execution timed out"
     except Exception as e:
         logger.error(f"❌ Error executing download script: {e}")
