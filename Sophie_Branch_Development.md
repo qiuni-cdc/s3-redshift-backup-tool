@@ -2400,14 +2400,14 @@ python -m src.cli.main watermark set -t unidw.dw_parcel_detail_tool -p us_dw_uni
 python -m src.cli.main watermark get -t unidw.dw_parcel_detail_tool -p us_dw_unidw_2_settlement_dws_pipeline_direct 
 python -m src.cli.main sync pipeline -p us_dw_unidw_2_settlement_dws_pipeline_direct -t unidw.dw_parcel_detail_tool 2>&1 | tee parcel_detail_sync.log 
 
-python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders --limit 1000000 2>&1 | tee settle_orders_sync.log  
+python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders_old 2>&1 | tee settle_orders_old_sync.log  
 python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders --redshift-only 
 python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_orders --backup-only --limit 50000000 2>&1 | tee settle_orders_backup.log
 
-python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
-python -m src.cli.main watermark reset -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline  
-python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
-python -m src.cli.main s3clean clean -t settlement.settle_orders -p us_dw_settlement_2_settlement_dws_pipeline
+python -m src.cli.main watermark get -t settlement.settle_orders_old -p us_dw_settlement_2_settlement_dws_pipeline
+python -m src.cli.main watermark reset -t settlement.settle_orders_old -p us_dw_settlement_2_settlement_dws_pipeline  
+python -m src.cli.main s3clean list -t settlement.settle_orders_old -p us_dw_settlement_2_settlement_dws_pipeline
+python -m src.cli.main s3clean clean -t settlement.settle_orders_old -p us_dw_settlement_2_settlement_dws_pipeline
 
 python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline_direct --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log
 python parcel_download_and_sync.py -p us_dw_unidw_2_settlement_dws_pipeline --sync-only 2>&1 | tee parcel_detail_sync_only_$(date '+%Y%m%d_%H%M%S').log 
@@ -2418,4 +2418,7 @@ cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl/parc
 
 python -m src.cli.main watermark get -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline_direct
 python -m src.cli.main watermark set -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline_direct --id 127946703 --timestamp "2026-01-06 20:52:22"
-python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline
+python -m src.cli.main s3clean list -t settlement.settle_orders -p us_dw_settlement_2_settlement_ods_pipeline 
+
+python -m src.cli.main watermark get -t settlement.settle_partners -p us_dw_settlement_2_settlement_dws_pipeline 
+python -m src.cli.main sync pipeline -p us_dw_settlement_2_settlement_dws_pipeline -t settlement.settle_partners

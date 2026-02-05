@@ -407,7 +407,7 @@
       <offset>0.0</offset>
       <maxdiff>0.0</maxdiff>
     </maxdate>
-    <size_rowset>5000</size_rowset>
+    <size_rowset>10000</size_rowset>
     <sleep_time_empty>50</sleep_time_empty>
     <sleep_time_full>50</sleep_time_full>
     <unique_connections>N</unique_connections>
@@ -437,20 +437,20 @@
   </notepads>
   <connection>
     <name>server_analysis</name>
-    <server>${my_dw_rw_dns}</server>
+    <server>${d_ip_dns}</server>
     <type>MYSQL</type>
     <access>Native</access>
-    <database>${my_dw_rw_db}</database>
-    <port>${my_dw_rw_port}</port>
-    <username>${my_dw_rw_user}</username>
-    <password>${my_dw_rw_password}</password>
+    <database>${d_db_name}</database>
+    <port>${d_port}</port>
+    <username>${d_user}</username>
+    <password>${d_password}</password>
     <servername/>
     <data_tablespace/>
     <index_tablespace/>
     <attributes>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
-        <attribute>200</attribute>
+        <attribute>500</attribute>
       </attribute>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.useCursorFetch</code>
@@ -470,7 +470,7 @@
       </attribute>
       <attribute>
         <code>PORT_NUMBER</code>
-        <attribute>${my_dw_rw_port}</attribute>
+        <attribute>${d_port}</attribute>
       </attribute>
       <attribute>
         <code>PRESERVE_RESERVED_WORD_CASE</code>

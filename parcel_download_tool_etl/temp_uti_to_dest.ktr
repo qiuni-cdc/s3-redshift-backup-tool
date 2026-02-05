@@ -408,7 +408,7 @@
       <offset>0.0</offset>
       <maxdiff>0.0</maxdiff>
     </maxdate>
-    <size_rowset>5000</size_rowset>
+    <size_rowset>10000</size_rowset>
     <sleep_time_empty>50</sleep_time_empty>
     <sleep_time_full>50</sleep_time_full>
     <unique_connections>N</unique_connections>
@@ -451,7 +451,7 @@
     <attributes>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
-        <attribute>200</attribute>
+        <attribute>500</attribute>
       </attribute>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.useCursorFetch</code>
@@ -522,74 +522,81 @@
       <schema_name/>
     </partitioning>
     <connection>server_analysis</connection>
-    <sql>SELECT 
-    order_id,
-    ANY_VALUE(tno) AS tno,
-    ANY_VALUE(package_id) AS package_id,
-    ANY_VALUE(partner_id) AS partner_id,
-    ANY_VALUE(`190_time`) AS `190_time`,
-    ANY_VALUE(Injection_Warehouse) AS Injection_Warehouse,
-    ANY_VALUE(gateway_Warehouse) AS gateway_Warehouse,
-    ANY_VALUE(dest_zip) AS dest_zip,
-    ANY_VALUE(ZONE) AS ZONE,
-    ANY_VALUE(Manifest_Weight) AS Manifest_Weight,
-    ANY_VALUE(Scaled_Weight) AS Scaled_Weight,
-    ANY_VALUE(weight_uom) AS weight_uom,
-    ANY_VALUE(Dim_Weight_KGS) AS Dim_Weight_KGS,
-    ANY_VALUE(Dim_Weight_LBS) AS Dim_Weight_LBS,
-    ANY_VALUE(length) AS length,
-    ANY_VALUE(width) AS width,
-    ANY_VALUE(height) AS height,
-    ANY_VALUE(dim_uom) AS dim_uom,
-    ANY_VALUE(APV) AS APV,
-    ANY_VALUE(Dest_Warehouse) AS Dest_Warehouse,
-    ANY_VALUE(Broker_Handover_Time) AS Broker_Handover_Time,
-    ANY_VALUE(Ascan_Time) AS Ascan_Time,
-    ANY_VALUE(Dscan_Time) AS Dscan_Time,
-    ANY_VALUE(Last_Event) AS Last_Event,
-    ANY_VALUE(internal_account_number) AS internal_account_number,
-    MIN(time_195) AS time_195,
-    MIN(time_199_2nd) AS time_199_2nd,
-    MIN(time_255) AS time_255,
-    MIN(time_200) AS time_200,
-    MIN(time_202) AS time_202,
-    ANY_VALUE(time_203) AS time_203,
-    ANY_VALUE(route_no) AS route_no,
-    ANY_VALUE(staff_id) AS staff_id,
-    ANY_VALUE(team_id) AS team_id,
-    ANY_VALUE(customer_id) AS customer_id,
-    ANY_VALUE(locality_type) AS locality_type,
-    ANY_VALUE(bag_no) AS bag_no,
-    ANY_VALUE(reference) AS reference,
-    ANY_VALUE(sub_reference) AS sub_reference,
-    ANY_VALUE(start_address) AS start_address,
-	MIN(time_204) AS time_204,
-	MIN(time_208) AS time_208,
-    MIN(time_211) AS time_211,
-    MIN(time_213) AS time_213,
-    MIN(time_231) AS time_231,
-    MIN(time_232) AS time_232,
-    MIN(time_230) AS time_230,
-	MIN(time_233) AS time_233,
-    ANY_VALUE(box_scan_time) AS box_scan_time,
-    ANY_VALUE(channel_code) AS channel_code,
-    ANY_VALUE(flight_landing_time) AS flight_landing_time,
-    ANY_VALUE(flight_no) AS flight_number,
-    ANY_VALUE(start_zipcode) AS start_zipcode,
-    ANY_VALUE(storage_info) AS storage_info,
-    ANY_VALUE(total_value) AS total_value,
-    ANY_VALUE(segment) AS segment,
-    (
-      SELECT t.failed_reason 
-      FROM unidw.dw_parcel_detail_tool_temp_uti_2 t 
-      WHERE t.order_id = dpdtt.order_id 
-      ORDER BY t.time_211 ASC 
-      LIMIT 1
-    ) AS failed_reason,
-    ANY_VALUE(thirdparty_tno) AS thirdparty_tno,
-	ANY_VALUE(type) AS type_in_eoi
-FROM unidw.dw_parcel_detail_tool_temp_uti_2 dpdtt 
-GROUP BY order_id;
+    <sql>SELECT
+    dpdtt.order_id,
+    ANY_VALUE(dpdtt.tno) AS tno,
+    ANY_VALUE(dpdtt.package_id) AS package_id,
+    ANY_VALUE(dpdtt.partner_id) AS partner_id,
+    ANY_VALUE(dpdtt.`190_time`) AS `190_time`,
+    ANY_VALUE(dpdtt.Injection_Warehouse) AS Injection_Warehouse,
+    ANY_VALUE(dpdtt.gateway_Warehouse) AS gateway_Warehouse,
+    ANY_VALUE(dpdtt.dest_zip) AS dest_zip,
+    ANY_VALUE(dpdtt.ZONE) AS ZONE,
+    ANY_VALUE(dpdtt.Manifest_Weight) AS Manifest_Weight,
+    ANY_VALUE(dpdtt.Scaled_Weight) AS Scaled_Weight,
+    ANY_VALUE(dpdtt.weight_uom) AS weight_uom,
+    ANY_VALUE(dpdtt.Dim_Weight_KGS) AS Dim_Weight_KGS,
+    ANY_VALUE(dpdtt.Dim_Weight_LBS) AS Dim_Weight_LBS,
+    ANY_VALUE(dpdtt.length) AS length,
+    ANY_VALUE(dpdtt.width) AS width,
+    ANY_VALUE(dpdtt.height) AS height,
+    ANY_VALUE(dpdtt.dim_uom) AS dim_uom,
+    ANY_VALUE(dpdtt.APV) AS APV,
+    ANY_VALUE(dpdtt.Dest_Warehouse) AS Dest_Warehouse,
+    ANY_VALUE(dpdtt.Broker_Handover_Time) AS Broker_Handover_Time,
+    ANY_VALUE(dpdtt.Ascan_Time) AS Ascan_Time,
+    ANY_VALUE(dpdtt.Dscan_Time) AS Dscan_Time,
+    ANY_VALUE(dpdtt.Last_Event) AS Last_Event,
+    ANY_VALUE(dpdtt.internal_account_number) AS internal_account_number,
+    MIN(dpdtt.time_195) AS time_195,
+    MIN(dpdtt.time_199_2nd) AS time_199_2nd,
+    MIN(dpdtt.time_255) AS time_255,
+    MIN(dpdtt.time_200) AS time_200,
+    MIN(dpdtt.time_202) AS time_202,
+    ANY_VALUE(dpdtt.time_203) AS time_203,
+    ANY_VALUE(dpdtt.route_no) AS route_no,
+    ANY_VALUE(dpdtt.staff_id) AS staff_id,
+    ANY_VALUE(dpdtt.team_id) AS team_id,
+    ANY_VALUE(dpdtt.customer_id) AS customer_id,
+    ANY_VALUE(dpdtt.locality_type) AS locality_type,
+    ANY_VALUE(dpdtt.bag_no) AS bag_no,
+    ANY_VALUE(dpdtt.reference) AS reference,
+    ANY_VALUE(dpdtt.sub_reference) AS sub_reference,
+    ANY_VALUE(dpdtt.start_address) AS start_address,
+    MIN(dpdtt.time_204) AS time_204,
+    MIN(dpdtt.time_208) AS time_208,
+    MIN(dpdtt.time_211) AS time_211,
+    MIN(dpdtt.time_213) AS time_213,
+    MIN(dpdtt.time_231) AS time_231,
+    MIN(dpdtt.time_232) AS time_232,
+    MIN(dpdtt.time_230) AS time_230,
+    MIN(dpdtt.time_233) AS time_233,
+    ANY_VALUE(dpdtt.box_scan_time) AS box_scan_time,
+    ANY_VALUE(dpdtt.channel_code) AS channel_code,
+    ANY_VALUE(dpdtt.flight_landing_time) AS flight_landing_time,
+    ANY_VALUE(dpdtt.flight_no) AS flight_number,
+    ANY_VALUE(dpdtt.start_zipcode) AS start_zipcode,
+    ANY_VALUE(dpdtt.storage_info) AS storage_info,
+    ANY_VALUE(dpdtt.total_value) AS total_value,
+    ANY_VALUE(dpdtt.segment) AS segment,
+    ANY_VALUE(fr.failed_reason) AS failed_reason,
+    ANY_VALUE(dpdtt.thirdparty_tno) AS thirdparty_tno,
+    ANY_VALUE(dpdtt.type) AS type_in_eoi,
+    ANY_VALUE(dpdtt.whs_199_2nd) AS whs_199_2nd,
+    MIN(dpdtt.time_1870) AS time_1870,
+    ANY_VALUE(dpdtt.carrier_id) AS carrier_id
+FROM unidw.dw_parcel_detail_tool_temp_uti_2 dpdtt
+LEFT JOIN (
+    SELECT order_id, failed_reason
+    FROM (
+        SELECT order_id, failed_reason,
+               ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY time_211 ASC) as rn
+        FROM unidw.dw_parcel_detail_tool_temp_uti_2
+        WHERE failed_reason IS NOT NULL
+    ) ranked
+    WHERE rn = 1
+) fr ON dpdtt.order_id = fr.order_id
+GROUP BY dpdtt.order_id;
 </sql>
     <limit>0</limit>
     <lookup/>
@@ -617,8 +624,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -640,8 +647,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -663,8 +670,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -686,8 +693,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -709,8 +716,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -732,8 +739,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -755,8 +762,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -778,8 +785,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -801,8 +808,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -824,8 +831,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -847,8 +854,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -870,8 +877,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -893,8 +900,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -916,8 +923,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -939,8 +946,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -962,8 +969,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -985,8 +992,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1008,8 +1015,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1031,8 +1038,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1054,8 +1061,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1077,8 +1084,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1100,8 +1107,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1123,8 +1130,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1146,8 +1153,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1169,8 +1176,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1192,8 +1199,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1215,8 +1222,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1238,8 +1245,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1261,8 +1268,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1284,8 +1291,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1307,8 +1314,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1330,8 +1337,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1353,8 +1360,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1376,8 +1383,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1399,8 +1406,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1422,8 +1429,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1445,8 +1452,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1468,8 +1475,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1491,8 +1498,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1514,8 +1521,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1537,8 +1544,31 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Timestamp</type>
+        <storagetype>normal</storagetype>
+        <name>time_208</name>
+        <length>0</length>
+        <precision>-1</precision>
+        <origin>Table_input_dest</origin>
+        <comments>time_208</comments>
+        <conversion_Mask/>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1560,8 +1590,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1583,8 +1613,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1606,8 +1636,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1629,8 +1659,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1652,8 +1682,31 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Timestamp</type>
+        <storagetype>normal</storagetype>
+        <name>time_233</name>
+        <length>0</length>
+        <precision>-1</precision>
+        <origin>Table_input_dest</origin>
+        <comments>time_233</comments>
+        <conversion_Mask/>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1675,8 +1728,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1698,8 +1751,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1721,8 +1774,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1744,8 +1797,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1767,8 +1820,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1790,8 +1843,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1813,8 +1866,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1836,8 +1889,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1859,8 +1912,8 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1882,8 +1935,31 @@ GROUP BY order_id;
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Integer</type>
+        <storagetype>normal</storagetype>
+        <name>type_in_eoi</name>
+        <length>4</length>
+        <precision>0</precision>
+        <origin>Table_input_dest</origin>
+        <comments>type_in_eoi</comments>
+        <conversion_Mask>####0;-####0</conversion_Mask>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
     </row-meta>
@@ -1907,7 +1983,7 @@ GROUP BY order_id;
     <description/>
     <distribute>Y</distribute>
     <custom_distribution/>
-    <copies>3</copies>
+    <copies>1</copies>
     <partitioning>
       <method>none</method>
       <schema_name/>
@@ -2153,7 +2229,7 @@ GROUP BY order_id;
       <field>
         <column_name>thirdparty_tno</column_name>
         <stream_name>thirdparty_tno</stream_name>
-      </field> 
+      </field>
       <field>
         <column_name>time_208</column_name>
         <stream_name>time_208</stream_name>
@@ -2165,6 +2241,18 @@ GROUP BY order_id;
       <field>
         <column_name>type_in_eoi</column_name>
         <stream_name>type_in_eoi</stream_name>
+      </field>
+      <field>
+        <column_name>whs_199_2nd</column_name>
+        <stream_name>whs_199_2nd</stream_name>
+      </field>
+      <field>
+        <column_name>time_1870</column_name>
+        <stream_name>time_1870</stream_name>
+      </field>
+      <field>
+        <column_name>carrier_id</column_name>
+        <stream_name>carrier_id</stream_name>
       </field>
     </fields>
     <attributes/>

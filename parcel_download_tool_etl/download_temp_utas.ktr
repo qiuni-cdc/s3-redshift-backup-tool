@@ -408,7 +408,7 @@
       <offset>0.0</offset>
       <maxdiff>0.0</maxdiff>
     </maxdate>
-    <size_rowset>5000</size_rowset>
+    <size_rowset>10000</size_rowset>
     <sleep_time_empty>50</sleep_time_empty>
     <sleep_time_full>50</sleep_time_full>
     <unique_connections>N</unique_connections>
@@ -451,7 +451,7 @@
     <attributes>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
-        <attribute>200</attribute>
+        <attribute>500</attribute>
       </attribute>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.useCursorFetch</code>
@@ -518,7 +518,7 @@
     <attributes>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
-        <attribute>200</attribute>
+        <attribute>500</attribute>
       </attribute>
       <attribute>
         <code>EXTRA_OPTION_MYSQL.useCursorFetch</code>
@@ -589,8 +589,7 @@
       <schema_name/>
     </partitioning>
     <connection>server_prod_us</connection>
-    <sql>
-SELECT
+    <sql>SELECT
     uti.tno AS tno,
     uti.order_id AS order_id,
     eoi.partner_id as partner_id,
@@ -641,8 +640,8 @@ SELECT
     eoi.customer_id,
     uc.locality_type,
     uti.bag_no,
-    uti.reference,
-    uti.sub_reference,
+    COALESCE(eoi.referer, uti.reference) AS reference,
+    COALESCE(eoi.sub_referer, uti.sub_reference) AS sub_reference,
     eoi.start_address,
     time_204.path_time AS `time_204`,
     time_208.path_time AS `time_208`,
@@ -656,14 +655,17 @@ SELECT
     eoi.start_zipcode,
     umb.scan_time AS box_scan_time,
 	case when uti.total_value >= 10000000000 then null else uti.total_value end AS total_value,
-  uti.storage_info,
-od.package_id,
+    uti.storage_info,
+	od.package_id,
     upi.flight_no,
     CASE WHEN eta=0 THEN NULL ELSE from_unixtime(upi.eta) END AS flight_landing_time,
 	uti.segment,
 	ucd.name as failed_reason,
 	uti.shipper as thirdparty_tno,
-	eoi.type
+	eoi.type,
+  uw_199_2nd.id AS `whs_199_2nd`,
+  time_1870.path_time AS `time_1870`,
+  eoi.carrier_id
 FROM  kuaisong.uni_tracking_addon_spath utas force index (idx_create_at)
 join  kuaisong.uni_tracking_info uti 
   ON uti.tno = utas.tno
@@ -680,7 +682,9 @@ LEFT JOIN (
 LEFT JOIN uni_warehouses uw1
     ON uti.warehouse = uw1.id
 LEFT JOIN uni_warehouses uw2
-    ON time_199.Gateway_whs = uw2.id 
+    ON time_199.Gateway_whs = uw2.id  
+LEFT JOIN uni_warehouses uw_199_2nd
+    ON second_199.Dest_whs = uw_199_2nd.id 
 LEFT JOIN uni_warehouses uw_inj
     ON eoi.pickup_warehouse = uw_inj.id
 LEFT JOIN (
@@ -792,6 +796,12 @@ LEFT JOIN (
 	WHERE type = 'DELIVERY.FAILED.REASON'
 ) AS ucd
 	ON time_211.failed_reason_type = ucd.code
+LEFT JOIN (
+    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
+    FROM uni_tracking_spath uts
+    WHERE uts.code = 1870
+) AS time_1870
+    ON uti.order_id = time_1870.order_id
 WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
   and utas.create_at >=  DATE_FORMAT(DATE_ADD('${beg_datetime}', INTERVAL ${hours} HOUR),'%Y-%m-%d %H:00:00')
 ;
@@ -823,8 +833,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -846,8 +856,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -869,8 +879,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -892,8 +902,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -915,8 +925,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -938,8 +948,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -961,8 +971,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -984,8 +994,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1007,8 +1017,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1030,8 +1040,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1053,8 +1063,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1076,8 +1086,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1099,8 +1109,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1122,8 +1132,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1145,8 +1155,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1168,8 +1178,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1191,8 +1201,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1214,8 +1224,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1237,8 +1247,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1260,8 +1270,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1283,8 +1293,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1306,8 +1316,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1329,8 +1339,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1352,8 +1362,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1375,8 +1385,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1398,8 +1408,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1421,8 +1431,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1444,8 +1454,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1467,8 +1477,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1490,8 +1500,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1513,8 +1523,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1536,8 +1546,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1559,8 +1569,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1582,8 +1592,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1605,8 +1615,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1628,8 +1638,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1651,8 +1661,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1674,8 +1684,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1697,8 +1707,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1720,8 +1730,31 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Timestamp</type>
+        <storagetype>normal</storagetype>
+        <name>time_208</name>
+        <length>0</length>
+        <precision>-1</precision>
+        <origin>table_input_utas</origin>
+        <comments>time_208</comments>
+        <conversion_Mask/>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1743,8 +1776,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1766,8 +1799,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1789,8 +1822,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1812,8 +1845,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1835,8 +1868,31 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Timestamp</type>
+        <storagetype>normal</storagetype>
+        <name>time_233</name>
+        <length>0</length>
+        <precision>-1</precision>
+        <origin>table_input_utas</origin>
+        <comments>time_233</comments>
+        <conversion_Mask/>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1858,8 +1914,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1881,8 +1937,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1904,8 +1960,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1927,8 +1983,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1950,15 +2006,15 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
         <type>String</type>
         <storagetype>normal</storagetype>
         <name>package_id</name>
-        <length>536870911</length>
+        <length>50</length>
         <precision>-1</precision>
         <origin>table_input_utas</origin>
         <comments>package_id</comments>
@@ -1973,8 +2029,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -1996,8 +2052,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -2019,8 +2075,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -2042,8 +2098,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -2065,8 +2121,8 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
       <value-meta>
@@ -2088,8 +2144,31 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <sort_descending>N</sort_descending>
         <output_padding>N</output_padding>
         <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en</date_format_locale>
-        <date_format_timezone>UTC</date_format_timezone>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
+        <lenient_string_to_number>N</lenient_string_to_number>
+      </value-meta>
+      <value-meta>
+        <type>Integer</type>
+        <storagetype>normal</storagetype>
+        <name>type</name>
+        <length>4</length>
+        <precision>0</precision>
+        <origin>table_input_utas</origin>
+        <comments>type</comments>
+        <conversion_Mask>####0;-####0</conversion_Mask>
+        <decimal_symbol>.</decimal_symbol>
+        <grouping_symbol>,</grouping_symbol>
+        <currency_symbol/>
+        <trim_type>none</trim_type>
+        <case_insensitive>N</case_insensitive>
+        <collator_disabled>Y</collator_disabled>
+        <collator_strength>0</collator_strength>
+        <sort_descending>N</sort_descending>
+        <output_padding>N</output_padding>
+        <date_format_lenient>N</date_format_lenient>
+        <date_format_locale>en_CA</date_format_locale>
+        <date_format_timezone>America/New_York</date_format_timezone>
         <lenient_string_to_number>N</lenient_string_to_number>
       </value-meta>
     </row-meta>
@@ -2113,7 +2192,7 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
     <description/>
     <distribute>Y</distribute>
     <custom_distribution/>
-    <copies>3</copies>
+    <copies>1</copies>
     <partitioning>
       <method>none</method>
       <schema_name/>
@@ -2297,6 +2376,10 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
         <stream_name>time_204</stream_name>
       </field>
       <field>
+        <column_name>time_208</column_name>
+        <stream_name>time_208</stream_name>
+      </field>
+      <field>
         <column_name>time_211</column_name>
         <stream_name>time_211</stream_name>
       </field>
@@ -2315,6 +2398,10 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
       <field>
         <column_name>time_230</column_name>
         <stream_name>time_230</stream_name>
+      </field>
+      <field>
+        <column_name>time_233</column_name>
+        <stream_name>time_233</stream_name>
       </field>
       <field>
         <column_name>channel_code</column_name>
@@ -2359,6 +2446,22 @@ WHERE utas.create_at &lt; DATE_FORMAT('${beg_datetime}', '%Y-%m-%d %H:00:00')
       <field>
         <column_name>thirdparty_tno</column_name>
         <stream_name>thirdparty_tno</stream_name>
+      </field>
+      <field>
+        <column_name>type</column_name>
+        <stream_name>type</stream_name>
+      </field>
+      <field>
+        <column_name>whs_199_2nd</column_name>
+        <stream_name>whs_199_2nd</stream_name>
+      </field>
+      <field>
+        <column_name>time_1870</column_name>
+        <stream_name>time_1870</stream_name>
+      </field>
+      <field>
+        <column_name>carrier_id</column_name>
+        <stream_name>carrier_id</stream_name>
       </field>
     </fields>
     <attributes/>

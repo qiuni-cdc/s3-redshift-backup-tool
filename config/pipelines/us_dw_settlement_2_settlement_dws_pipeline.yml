@@ -6,7 +6,7 @@ pipeline:
   description: "US Data Warehouse Settlement DB → Redshift Settlement DWS Schema"
   source: "US_DW_RO_SSH"           # settlement database
   target: "redshift_settlement_dws"      
-  s3_config: "s3_qa"
+  s3_config: "s3_prod"
   version: "1.2.0"
   
   processing:
@@ -37,6 +37,28 @@ tables:
     target_name: "settle_orders"
     processing:
       batch_size: 1000000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 2.0 
+
+  settlement.settle_orders_old:
+    cdc_strategy: "hybrid"
+    cdc_timestamp_column: "created_at"
+    cdc_id_column: "id"
+    description: "Settlement orders with hybrid CDC (timestamp + ID)" 
+    target_name: "settle_orders"
+    processing:
+      batch_size: 1000000
+    validation:
+      enable_data_quality_checks: true
+      max_null_percentage: 2.0 
+
+  settlement.settle_partners:
+    cdc_strategy: "full_sync"
+    full_sync_mode: "replace"
+    description: "Partner Config"
+    processing:
+      batch_size: 5000
     validation:
       enable_data_quality_checks: true
       max_null_percentage: 2.0
