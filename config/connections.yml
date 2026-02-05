@@ -109,8 +109,20 @@ connections:
       username: "${DB_USER}"
       password: "${DB_US_PROD_RO_PASSWORD}"
       description: "US Production Read-Only MySQL (US-WEST-2) direct connection"
-      
+
       # No SSH tunnel configuration - direct connection
+      ssh_tunnel:
+        enabled: false
+
+    # LOCAL DOCKER TESTING - connects to SSH tunnel on Windows host
+    US_PROD_RO_DOCKER_LOCAL:
+      host: host.docker.internal
+      port: 3317
+      database: kuaisong
+      username: "${DB_USER}"
+      password: "${DB_US_PROD_RO_PASSWORD}"
+      description: "Docker local testing - uses SSH tunnel on Windows host (port 3317)"
+
       ssh_tunnel:
         enabled: false
     
@@ -190,7 +202,7 @@ connections:
       database: dw
       username: "${REDSHIFT_QA_USER}"
       password: "${REDSHIFT_QA_PASSWORD}"  # References .env variable
-      schema: public
+      schema: settlement_public
       
       # Redshift SSH tunnel (your separate bastion)
       ssh_tunnel:

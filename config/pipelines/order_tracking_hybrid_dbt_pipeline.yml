@@ -1,0 +1,77 @@
+# Order Tracking Pipeline - Hybrid + dbt Approach
+# Simple time-based extraction with dbt processing
+# Used by: order_tracking_hybrid_dbt_dag.py
+
+pipeline:
+  name: "order_tracking_hybrid_dbt"
+  description: "15-min time-based extraction with dbt deduplication"
+  source: "US_PROD_RO_SSH"
+  target: "redshift_default"
+  s3_config: "s3_qa" 
+  version: "2.0.0"
+  sync_frequency: "*/15 * * * *"
+
+  processing:
+    strategy: "parallel"
+    batch_size: 100000
+    timeout_minutes: 30
+    max_parallel_tables: 3
+    query_timeout_seconds: 300         # 5 min - handles peak volumes
+
+  s3:
+    isolation_prefix: "order_tracking_hybrid_dbt/"
+    partition_strategy: "datetime"
+    compression: "snappy"
+
+  window_settings:
+    lookback_minutes: 15
+    buffer_minutes: 5
+
+  dbt_settings:
+    project_path: "/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/airflow_poc/dbt_projects/order_tracking"
+    raw_schema: "settlment_public"
+    staging_schema: "settlement_ods"
+
+tables:
+  kuaisong.ecs_order_info:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "add_time"
+    timestamp_format: "unix"
+    primary_key: "order_id"
+    description: "Order creation (~500K/day normal, ~2M/day peak)"
+    target_name: "ecs_order_info_raw"
+    target_schema: "settlement_public"
+    processing:
+      batch_size: 100000
+      query_timeout_seconds: 300
+
+  kuaisong.uni_tracking_info:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "update_time"
+    timestamp_format: "unix"
+    primary_key: "order_id"
+    description: "Latest tracking state (~500K/day normal, ~2M/day peak)"
+    target_name: "uni_tracking_info_raw"
+    target_schema: "settlement_public"
+    processing:
+      batch_size: 100000
+      query_timeout_seconds: 300
+
+  kuaisong.uni_tracking_spath:
+    cdc_strategy: "timestamp_only"
+    cdc_timestamp_column: "pathTime"
+    timestamp_format: "unix"
+    primary_key: ["order_id", "traceSeq"]
+    sequence_column: "traceSeq"
+    description: "Tracking events (~2M/day normal, ~8M/day peak)"
+    target_name: "uni_tracking_spath_raw"
+    target_schema: "settlement_public"
+    processing:
+      batch_size: 200000
+      query_timeout_seconds: 300
+    performance:
+      memory_limit_mb: 8192
+
+monitoring:
+  enable_progress_tracking: true
+  alert_on_failures: true

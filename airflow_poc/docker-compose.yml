@@ -1,0 +1,80 @@
+# docker-compose.yml - Airflow + dbt for Order Tracking Pipeline
+# Versions: Airflow 2.8.1, dbt 1.8.0 (matches QA server)
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.1
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+    - AIRFLOW__WEBSERVER__SECRET_KEY=my_secret_key_for_local_testing
+    - _PIP_ADDITIONAL_REQUIREMENTS=dbt-redshift==1.8.0 mysql-connector-python boto3 pyarrow pyyaml python-dotenv apache-airflow-providers-mysql apache-airflow-providers-postgres pydantic-settings pydantic sshtunnel paramiko structlog click tqdm pandas psycopg2-binary cerberus jsonschema typing-extensions
+    # Paths for DAG (inside container)
+    - SYNC_TOOL_PATH=/opt/airflow/sync_tool
+    - DBT_PROJECT_PATH=/opt/airflow/dbt_projects/order_tracking
+    - DBT_VENV_PATH=/home/airflow/.local
+    # dbt Redshift credentials (replace with actual values)
+    - REDSHIFT_USER=sett_ddl_owner
+    - "REDSHIFT_PASSWORD=Qx2[,y4*voli3)M>"
+    - REDSHIFT_QA_USER=sett_ddl_owner
+    - "REDSHIFT_QA_PASSWORD=Qx2[,y4*voli3)M>"
+    - DBT_REDSHIFT_DB=dw
+    # SSH tunnel for local Docker testing (set to false on server)
+    - DBT_USE_SSH_TUNNEL=true
+    - DBT_REDSHIFT_PORT=15439
+    # SSH key path inside container (for tunnel) - must match path in .env file
+    - REDSHIFT_SSH_KEY_PATH=/Users/Jasleen Tung/Downloads/jasleentung_keypair/jasleentung.pem
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./dbt_projects:/opt/airflow/dbt_projects
+    - ../:/opt/airflow/sync_tool
+    # Mount the actual SSH key FILE to the path expected by .env
+    - "C:/Users/Jasleen Tung/Downloads/jasleentung_keypair/jasleentung.pem:/Users/Jasleen Tung/Downloads/jasleentung_keypair/jasleentung.pem:ro"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init
+        airflow users create --username admin --password admin123 --firstname Admin --lastname User --role Admin --email admin@example.com
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+volumes:
+  postgres-db-volume:

@@ -20,9 +20,9 @@ CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${A
 echo "Installing Apache Airflow ${AIRFLOW_VERSION}..."
 pip install "apache-airflow[amazon]==${AIRFLOW_VERSION}" --constraint "${CONSTRAINT_URL}"
 
-# Install dbt-redshift
+# Install dbt-redshift (match QA server version)
 echo "Installing dbt-redshift..."
-pip install dbt-redshift==1.7.0
+pip install dbt-redshift==1.8.0
 
 # Install additional useful packages
 pip install pandas pyarrow

@@ -105,9 +105,10 @@ def add_multi_schema_commands(cli):
     @click.option('--parallel', is_flag=True, help='Override pipeline strategy to use parallel processing')
     @click.option('--json-output', type=click.Path(), help='Output execution metadata as JSON file for Airflow monitoring')
     @click.option('--s3-completion-bucket', type=str, help='S3 bucket for Airflow completion markers')
+    @click.option('--initial-lookback-minutes', type=int, help='For first run only: Start backup from N minutes ago instead of full history')
     def sync_pipeline(pipeline: str, table: List[str], backup_only: bool, redshift_only: bool,
                      limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], dry_run: bool, parallel: bool,
-                     json_output: Optional[str] = None, s3_completion_bucket: Optional[str] = None):
+                     json_output: Optional[str] = None, s3_completion_bucket: Optional[str] = None, initial_lookback_minutes: Optional[int] = None):
         """Sync tables using pipeline configuration (v1.1.0 enhanced syntax)"""
 
         multi_schema_ctx.ensure_initialized()
@@ -137,6 +138,10 @@ def add_multi_schema_commands(cli):
 
             if parallel and pipeline_config.processing.get('strategy') != 'parallel':
                 click.echo("⚡ Overriding to parallel processing")
+
+            # Check for explicit initial lookback request
+            if initial_lookback_minutes:
+                click.echo(f"🕒 First-run lookback enabled: {initial_lookback_minutes} minutes")
 
             # Check if Airflow integration is requested
             if json_output or s3_completion_bucket:
@@ -177,7 +182,8 @@ def add_multi_schema_commands(cli):
                         else:
                             result = _execute_table_sync(
                                 pipeline_config, table_config,
-                                backup_only, redshift_only, limit, parallel, max_workers, max_chunks
+                                backup_only, redshift_only, limit, parallel, max_workers, max_chunks,
+                                initial_lookback_minutes=initial_lookback_minutes
                             )
 
                             # FIXED: Use actual metrics from _execute_table_sync instead of hardcoded values
@@ -222,7 +228,8 @@ def add_multi_schema_commands(cli):
                     else:
                         success = _execute_table_sync(
                             pipeline_config, table_config,
-                            backup_only, redshift_only, limit, parallel, max_workers, max_chunks
+                            backup_only, redshift_only, limit, parallel, max_workers, max_chunks,
+                            initial_lookback_minutes=initial_lookback_minutes
                         )
                         if success:
                             success_count += 1
@@ -836,7 +843,8 @@ def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshi
 
 
 def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool,
-                       limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None) -> Dict[str, Any]:
+                       limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None,
+                       initial_lookback_minutes: Optional[int] = None) -> Dict[str, Any]:
     """Execute actual table sync with multi-schema configuration"""
 
     click.echo(f"🚀 Syncing: {table_config.full_name}")
@@ -956,7 +964,8 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     tables=table_list,
                     chunk_size=chunk_size,
                     max_total_rows=max_total_rows,
-                    source_connection=source_connection
+                    source_connection=source_connection,
+                    initial_lookback_minutes=initial_lookback_minutes
                 )
                 # Get connection registry for later cleanup
                 connection_registry = getattr(backup_strategy, 'connection_registry', None)

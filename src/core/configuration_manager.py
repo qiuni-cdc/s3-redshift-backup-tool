@@ -34,6 +34,7 @@ class TableConfig:
     depends_on: List[str] = field(default_factory=list)
     additional_where: Optional[str] = None  # NEW: Additional WHERE clause for index optimization
     cdc_ordering: Optional[List[str]] = None  # NEW: Custom ordering columns for index optimization
+    timestamp_format: str = "auto"
     
     def __post_init__(self):
         """Post-initialization validation and defaults"""
@@ -653,14 +654,15 @@ class ConfigurationManager:
                     target_name=merged_config.get('target_name'),
                     cdc_strategy=merged_config.get('cdc_strategy', 'hybrid'),
                     cdc_timestamp_column=merged_config.get('cdc_timestamp_column', 'updated_at'),
-                    cdc_id_column=merged_config.get('cdc_id_column', 'id'),
+                    cdc_id_column=merged_config.get('cdc_id_column', merged_config.get('primary_key', 'id')),
                     table_type=merged_config.get('table_type', 'fact'),
                     full_sync_mode=merged_config.get('full_sync_mode', 'append'),
                     processing=merged_config.get('processing', {}),
                     validation=merged_config.get('validation', {}),
                     depends_on=merged_config.get('depends_on', []),
                     additional_where=merged_config.get('additional_where'),  # NEW: Index optimization
-                    cdc_ordering=merged_config.get('cdc_ordering')  # NEW: Custom ordering
+                    cdc_ordering=merged_config.get('cdc_ordering'),  # NEW: Custom ordering
+                    timestamp_format=merged_config.get('timestamp_format', 'auto')
                 )
             except Exception as e:
                 logger.error(f"Failed to create table configuration for {table_name}: {e}")

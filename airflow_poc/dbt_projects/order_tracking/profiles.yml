@@ -1,0 +1,38 @@
+# dbt Profile for Order Tracking
+# ===============================
+# Credentials are loaded from environment variables.
+# Set these in your Airflow/Docker environment:
+#   - REDSHIFT_USER
+#   - REDSHIFT_PASSWORD
+#   - REDSHIFT_PRO_USER (for prod)
+#   - REDSHIFT_PRO_PASSWORD (for prod)
+
+order_tracking:
+  target: dev
+  outputs:
+    dev:
+      type: redshift
+      # Local Docker: localhost with SSH tunnel (port 15439)
+      # Server: Direct connection to Redshift (port 5439)
+      host: "{{ env_var('DBT_REDSHIFT_HOST', 'localhost') }}"
+      port: "{{ env_var('DBT_REDSHIFT_PORT', '15439') | int }}"
+      user: "{{ env_var('REDSHIFT_QA_USER') }}"
+      password: "{{ env_var('REDSHIFT_QA_PASSWORD') }}"
+      dbname: dw
+      schema: settlement_ods
+      threads: 1
+      connect_timeout: 900
+      keepalives_idle: 15
+      ra3_node: true
+
+    # Production target (server deployment - direct connection)
+    prod:
+      type: redshift
+      host: "{{ env_var('DBT_REDSHIFT_HOST', 'redshift-dw.uniuni.com') }}"
+      port: "{{ env_var('DBT_REDSHIFT_PORT', '5439') | int }}"
+      user: "{{ env_var('REDSHIFT_PRO_USER') }}"
+      password: "{{ env_var('REDSHIFT_PRO_PASSWORD') }}"
+      dbname: dw
+      schema: settlement_ods
+      threads: 4
+      connect_timeout: 30

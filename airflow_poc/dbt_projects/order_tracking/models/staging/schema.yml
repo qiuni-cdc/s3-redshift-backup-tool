@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: stg_ecs_order_info
+    description: Staged and deduplicated order records
+    columns:
+      - name: order_id
+        description: Primary key - unique order identifier
+        tests:
+          - unique
+          # - not_null
+
+  - name: stg_uni_tracking_info
+    description: Staged tracking state (latest state per order)
+    columns:
+      - name: order_id
+        description: Foreign key to ecs_order_info
+        tests:
+          - unique
+          # - not_null
+          - relationships:
+              to: ref('stg_ecs_order_info')
+              field: order_id
+              config:
+                severity: warn  # Warn on orphans, don't fail
+                alias: relationships_stg_uni_tracking_info
+                where: "update_time >= extract(epoch from current_timestamp - interval '24 hours')"
+
+  - name: stg_uni_tracking_spath
+    description: Staged tracking events (full history)
+    columns:
+      - name: order_id
+        description: Foreign key to ecs_order_info
+        tests:
+          # - not_null
+          - relationships:
+              to: ref('stg_ecs_order_info')
+              field: order_id
+              config:
+                severity: warn
+                alias: relationships_stg_uni_tracking_spath
+                where: "pathTime >= extract(epoch from current_timestamp - interval '24 hours')"
+      - name: traceSeq
+        description: Sequential event number (0, 1, 2, ...)
+        quote: true # Force case sensitivity for this column
+
+    # Note: Composite unique key test removed - enforced by model's unique_key config
+    # tests:
+    #   - unique:
+    #       column_name: "concat(order_id, '-', traceSeq)"
+
+  - name: int_sequence_gaps
+    description: Detected sequence gaps in tracking events
+    # Note: dbt_utils tests commented out - requires 'dbt deps' to install package
+    # tests:
+    #   - dbt_utils.expression_is_true:
+    #       expression: "count(*) < 100"
+    #       config:
+    #         severity: warn
+    #         error_if: ">= 100"
+    #         warn_if: ">= 10"

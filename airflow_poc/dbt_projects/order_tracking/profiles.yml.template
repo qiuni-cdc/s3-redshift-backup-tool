@@ -1,0 +1,33 @@
+# dbt Profile Template for Order Tracking
+# ========================================
+#
+# Copy this file to ~/.dbt/profiles.yml and fill in your credentials
+#
+# On Windows: C:\Users\<username>\.dbt\profiles.yml
+# On Linux/Mac: ~/.dbt/profiles.yml
+
+order_tracking:
+  target: dev
+  outputs:
+    dev:
+      type: redshift
+      host: localhost              # Use localhost if connecting via SSH tunnel
+      port: 5439                   # Your SSH tunnel port for Redshift
+      user: "{{ env_var('REDSHIFT_USER') }}"
+      password: "{{ env_var('REDSHIFT_PASSWORD') }}"
+      dbname: dev                  # Your Redshift database name
+      schema: settlement_ods            # Target schema for dbt models
+      threads: 4
+      connect_timeout: 30
+
+    # Production target (optional)
+    prod:
+      type: redshift
+      host: localhost
+      port: 5439
+      user: "{{ env_var('REDSHIFT_PRO_USER') }}"
+      password: "{{ env_var('REDSHIFT_PRO_PASSWORD') }}"
+      dbname: prod
+      schema: settlement_ods
+      threads: 4
+      connect_timeout: 30

@@ -1,0 +1,37 @@
+version: 2
+
+sources:
+  - name: settlment_public
+    description: "Raw tables loaded by the sync tool"
+    database: ""
+    schema: settlment_public
+    tables:
+      - name: ecs_order_info_raw
+        description: "Order creation data from kuaisong.ecs_order_info"
+        columns:
+          - name: order_id
+            description: "Primary key - unique order identifier"
+          - name: add_time
+            description: "Order creation timestamp (unix)"
+
+      - name: uni_tracking_info_raw
+        description: "Latest tracking state from kuaisong.uni_tracking_info"
+        columns:
+          - name: order_id
+            description: "Primary key - foreign key to ecs_order_info"
+          - name: update_time
+            description: "Last update timestamp (unix)"
+          - name: state
+            description: "Current tracking state code"
+
+      - name: uni_tracking_spath_raw
+        description: "Tracking event history from kuaisong.uni_tracking_spath"
+        columns:
+          - name: order_id
+            description: "Foreign key to ecs_order_info"
+          - name: traceSeq
+            description: "Sequence number for events (0, 1, 2...)"
+          - name: pathTime
+            description: "Event timestamp (unix)"
+          - name: code
+            description: "Event/state code"

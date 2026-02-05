@@ -361,11 +361,12 @@ class GeminiRedshiftLoader:
                 
                 if not table_exists:
                     logger.info(f"Creating Redshift table: {table_name}")
+                    logger.info(f"DDL to execute:\n{ddl}")
                     cursor.execute(ddl)
                     conn.commit()
                     logger.info(f"Successfully created table: {table_name}")
                 else:
-                    logger.debug(f"Redshift table already exists: {table_name}")
+                    logger.info(f"Redshift table already exists: {table_name} - will NOT recreate")
                 
                 cursor.close()
                 return True
@@ -677,7 +678,11 @@ class GeminiRedshiftLoader:
                         database=self.config.redshift.database,
                         user=self.config.redshift.user,
                         password=self.config.redshift.password.get_secret_value(),
-                        options=f'-c search_path={self.config.redshift.schema}'
+                        options=f'-c search_path={self.config.redshift.schema}',
+                        keepalives=1,
+                        keepalives_idle=60,
+                        keepalives_interval=10,
+                        keepalives_count=3
                     )
                     logger.debug("Connected to Redshift via SSH tunnel")
                     conn.autocommit = True
@@ -862,7 +867,11 @@ class GeminiRedshiftLoader:
                         database=self.config.redshift.database,
                         user=self.config.redshift.user,
                         password=self.config.redshift.password.get_secret_value(),
-                        options=f'-c search_path={self.config.redshift.schema}'
+                        options=f'-c search_path={self.config.redshift.schema}',
+                        keepalives=1,
+                        keepalives_idle=60,
+                        keepalives_interval=10,
+                        keepalives_count=3
                     )
                     logger.debug("Connected to Redshift via SSH tunnel")
                     conn.autocommit = True

@@ -1,10 +1,52 @@
 {
   "settlement.settlement_normal_delivery_detail": {
     "distkey": "ant_parcel_no",
-    "sortkey": ["billing_num", "create_at"]
+    "sortkey": [
+      "billing_num",
+      "create_at"
+    ]
   },
   "settlement.settle_orders": {
     "distkey": "tracking_number",
-    "sortkey": ["tracking_number", "created_at"]
+    "sortkey": [
+      "tracking_number",
+      "created_at"
+    ]
+  },
+  "settlement_public.ecs_order_info_raw": {
+    "distkey": "order_id",
+    "sortkey": [
+      "add_time"
+    ]
+  },
+  "kuaisong.ecs_order_info": {
+    "distkey": "order_id",
+    "sortkey": [
+      "add_time"
+    ]
+  },
+  "settlement_public.uni_tracking_info_raw": {
+    "distkey": "order_id",
+    "sortkey": [
+      "update_time"
+    ]
+  },
+  "kuaisong.uni_tracking_info": {
+    "distkey": "order_id",
+    "sortkey": [
+      "update_time"
+    ]
+  },
+  "settlement_public.uni_tracking_spath_raw": {
+    "distkey": "order_id",
+    "sortkey": [
+      "pathTime"
+    ]
+  },
+  "kuaisong.uni_tracking_spath": {
+    "distkey": "order_id",
+    "sortkey": [
+      "pathTime"
+    ]
   }
 }

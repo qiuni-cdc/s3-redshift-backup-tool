@@ -85,7 +85,7 @@ class WatermarkAdapter:
     def get_table_watermark(self, table_name: str) -> Optional[LegacyWatermarkObject]:
         """
         Get watermark using legacy API format.
-        
+
         Returns:
             LegacyWatermarkObject that matches old S3TableWatermark interface
         """
@@ -93,12 +93,39 @@ class WatermarkAdapter:
             watermark_data = self.simple_manager.get_watermark(table_name)
             if not watermark_data:
                 return None
-                
+
             return LegacyWatermarkObject(watermark_data)
-            
+
         except Exception as e:
             logger.error(f"Failed to get watermark for {table_name}: {e}")
             return None
+
+    def get_last_watermark(self, table_name: Optional[str] = None) -> str:
+        """
+        Get last watermark timestamp (legacy compatibility method).
+
+        Args:
+            table_name: Optional table name for table-specific watermark
+
+        Returns:
+            Watermark timestamp as string, or default value if not found
+        """
+        try:
+            if table_name:
+                watermark_data = self.simple_manager.get_watermark(table_name)
+            else:
+                # For global watermark, return a default
+                watermark_data = None
+
+            if watermark_data and 'timestamp' in watermark_data:
+                return watermark_data['timestamp']
+
+            # Default watermark for initial runs
+            return "1970-01-01 00:00:00"
+
+        except Exception as e:
+            logger.error(f"Failed to get last watermark: {e}")
+            return "1970-01-01 00:00:00"
     
     def _update_watermark_direct(self, table_name: str, watermark_data: Dict[str, Any]) -> bool:
         """

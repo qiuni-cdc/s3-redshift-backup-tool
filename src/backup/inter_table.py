@@ -8,7 +8,7 @@ many tables and sufficient system resources.
 
 from typing import List, Dict, Any, Tuple, Optional
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import threading
 from collections import defaultdict
@@ -35,25 +35,28 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         self._results_lock = threading.Lock()
         self._table_results = {}
     
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None, initial_lookback_minutes: Optional[int] = None) -> bool:
         """
         Execute inter-table parallel backup for all specified tables.
-        
+
         Args:
             tables: List of table names to backup
             chunk_size: Optional row limit per chunk (overrides config)
+            max_total_rows: Optional maximum total rows to process
             limit: Deprecated - use chunk_size instead (for backward compatibility)
             source_connection: Optional connection name to use instead of default
-        
+            initial_lookback_minutes: Optional minutes to look back (default: None)
+
         Returns:
             True if all tables backed up successfully, False otherwise
         """
         if not tables:
             self.logger.logger.warning("No tables specified for backup")
             return False
-        
+
         # Handle backward compatibility with old 'limit' parameter
         effective_chunk_size = chunk_size or limit
+        effective_max_total_rows = max_total_rows
         
         if len(tables) == 1:
             self.logger.logger.info("Single table provided, consider using sequential strategy")
@@ -77,14 +80,16 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                 # Submit all table processing tasks
                 future_to_table = {
                     executor.submit(
-                        self._process_table_thread, 
-                        table_name, 
+                        self._process_table_thread,
+                        table_name,
                         current_timestamp,
                         i + 1,
                         len(tables),
                         effective_chunk_size,
-                        max_total_rows
-                    ): table_name 
+                        effective_max_total_rows,
+                        source_connection,
+                        initial_lookback_minutes
+                    ): table_name
                     for i, table_name in enumerate(tables)
                 }
                 
@@ -128,9 +133,23 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             watermark_updated = False
             if successful_tables:
                 try:
-                    watermark_updated = self.update_watermarks(
-                        current_timestamp, successful_tables, table_specific=False
-                    )
+                    all_watermarks_updated = True
+                    extraction_time = datetime.now()
+                    for table_name in successful_tables:
+                        table_metrics = self.metrics.per_table_metrics.get(table_name, {})
+                        rows_extracted = table_metrics.get('rows', 0)
+
+                        success = self.update_watermarks(
+                            table_name=table_name,
+                            extraction_time=extraction_time,
+                            max_data_timestamp=current_timestamp,
+                            rows_extracted=rows_extracted,
+                            status='success'
+                        )
+                        if not success:
+                            all_watermarks_updated = False
+
+                    watermark_updated = all_watermarks_updated
                 except Exception as e:
                     self.logger.error_occurred(e, "watermark_update")
                     watermark_updated = False
@@ -175,23 +194,28 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             self.cleanup_resources()
     
     def _process_table_thread(
-        self, 
-        table_name: str, 
+        self,
+        table_name: str,
         current_timestamp: str,
         table_index: int,
         total_tables: int,
         chunk_size: Optional[int] = None,
-        max_total_rows: Optional[int] = None
+        max_total_rows: Optional[int] = None,
+        source_connection: Optional[str] = None,
+        initial_lookback_minutes: Optional[int] = None
     ) -> bool:
         """
         Process a single table in a separate thread.
-        
+
         Args:
             table_name: Name of the table to process
             current_timestamp: Current backup timestamp
             table_index: Index of this table (for progress tracking)
             total_tables: Total number of tables being processed
-        
+            chunk_size: Optional chunk size for processing
+            max_total_rows: Optional maximum total rows to process
+            source_connection: Optional source connection name
+
         Returns:
             True if table processed successfully
         """
@@ -217,7 +241,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             # Create dedicated database session for this thread
             with self.database_session(source_connection) as db_conn:
                 success = self._process_single_table_parallel(
-                    db_conn, table_name, current_timestamp, thread_id, source_connection
+                    db_conn, table_name, current_timestamp, thread_id, source_connection, chunk_size, initial_lookback_minutes
                 )
                 
                 table_duration = time.time() - table_start_time
@@ -245,23 +269,26 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             return False
     
     def _process_single_table_parallel(
-        self, 
-        db_conn, 
-        table_name: str, 
+        self,
+        db_conn,
+        table_name: str,
         current_timestamp: str,
         thread_id: int,
-        source_connection: Optional[str] = None
+        source_connection: Optional[str] = None,
+        chunk_size: Optional[int] = None,
+        initial_lookback_minutes: Optional[int] = None
     ) -> bool:
         """
         Process a single table with parallel-specific optimizations.
-        
+
         Args:
             db_conn: Database connection for this thread
             table_name: Name of the table to process
             current_timestamp: Current backup timestamp
             thread_id: Thread identifier
             source_connection: Optional connection name (for logging and context)
-        
+            chunk_size: Optional chunk size for processing
+
         Returns:
             True if table processed successfully
         """
@@ -279,16 +306,58 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                 )
                 return False
             
-            # Get last watermark
-            last_watermark = self.watermark_manager.get_last_watermark()
-            
-            # Log backup window
-            self.logger.logger.debug(
+            # Get last watermark for this specific table
+            last_watermark = self.watermark_manager.get_last_watermark(table_name)
+
+            # P1: Handle initial lookback override for first run
+            # Check for empty/reset watermark: None, 0, small unix timestamps, or 1970-01-01 dates
+            is_first_run = (
+                not last_watermark or
+                str(last_watermark).startswith('1970-01-01') or
+                (isinstance(last_watermark, (int, float)) and last_watermark < 86400) or  # < 1 day in unix
+                (isinstance(last_watermark, str) and last_watermark.isdigit() and int(last_watermark) < 86400)
+            )
+
+            if initial_lookback_minutes and is_first_run:
+                try:
+                    # Get timestamp format from pipeline config
+                    timestamp_format = 'datetime'  # Default
+                    if hasattr(self, 'pipeline_config') and self.pipeline_config:
+                        tables_config = self.pipeline_config.get('tables', {})
+                        for tbl_name, tbl_cfg in tables_config.items():
+                            if tbl_name in table_name or table_name.endswith(tbl_name):
+                                timestamp_format = tbl_cfg.get('timestamp_format', 'datetime')
+                                break
+
+                    if timestamp_format == 'unix':
+                        # For unix timestamps, calculate lookback as unix timestamp
+                        import time
+                        current_unix = int(time.time())
+                        new_watermark = current_unix - (initial_lookback_minutes * 60)
+                    else:
+                        # For datetime format
+                        current_dt = datetime.strptime(current_timestamp, '%Y-%m-%d %H:%M:%S')
+                        lookback_dt = current_dt - timedelta(minutes=initial_lookback_minutes)
+                        new_watermark = lookback_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                    self.logger.logger.info(
+                        f"First run detected: Using {initial_lookback_minutes}m lookback",
+                        table_name=table_name,
+                        original_watermark=last_watermark,
+                        new_watermark=new_watermark,
+                        timestamp_format=timestamp_format
+                    )
+                    last_watermark = new_watermark
+                except Exception as e:
+                    self.logger.logger.warning(f"Failed to calculate initial lookback: {e}")
+
+            # Log backup window with actual values for debugging
+            self.logger.logger.info(
                 "Processing backup window",
                 table_name=table_name,
                 thread_id=thread_id,
-                start_time=last_watermark,
-                end_time=current_timestamp
+                last_watermark=last_watermark,
+                current_timestamp=current_timestamp
             )
             
             # Get estimated row count

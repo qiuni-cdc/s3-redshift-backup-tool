@@ -409,7 +409,7 @@ class BaseBackupStrategy(ABC):
             raise
     
     @abstractmethod
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None, initial_lookback_minutes: Optional[int] = None) -> bool:
         """
         Execute backup strategy for given tables.
         
@@ -419,6 +419,7 @@ class BaseBackupStrategy(ABC):
             max_total_rows: Optional maximum total rows to process
             limit: Deprecated - use chunk_size instead (for backward compatibility)
             source_connection: Optional connection name to use instead of default
+            initial_lookback_minutes: Optional minutes to look back for first run (default: None)
         
         Returns:
             True if backup successful, False otherwise
@@ -426,34 +427,90 @@ class BaseBackupStrategy(ABC):
         pass
     
     def get_incremental_query(
-        self, 
-        table_name: str, 
-        last_watermark: str, 
+        self,
+        table_name: str,
+        last_watermark: str,
         current_timestamp: str,
         custom_where: Optional[str] = None,
         limit: Optional[int] = None
     ) -> str:
         """
         Generate incremental query for table.
-        
+
         Args:
             table_name: Name of the table
             last_watermark: Last backup timestamp
             current_timestamp: Current backup timestamp
             custom_where: Additional WHERE conditions
             limit: Optional LIMIT for testing large tables
-        
+
         Returns:
             SQL query string for incremental data
         """
-        where_conditions = [
-            f"`update_at` > '{last_watermark}'",  # CRITICAL FIX: Use exclusive comparison to prevent duplicate processing
-            f"`update_at` <= '{current_timestamp}'"
-        ]
-        
+        # Extract MySQL table name from scoped format
+        mysql_table_name = self._extract_mysql_table_name(table_name)
+
+        # Get CDC config from pipeline - timestamp column and format
+        timestamp_col = 'update_at'  # Default fallback
+        timestamp_format = 'datetime'  # Default fallback
+        id_col = 'ID'  # Default fallback
+
+        if hasattr(self, 'pipeline_config') and self.pipeline_config:
+            tables_config = self.pipeline_config.get('tables', {})
+            for tbl_name, tbl_cfg in tables_config.items():
+                if tbl_name in table_name or table_name.endswith(tbl_name):
+                    timestamp_col = tbl_cfg.get('cdc_timestamp_column', timestamp_col)
+                    timestamp_format = tbl_cfg.get('timestamp_format', timestamp_format)
+                    id_col = tbl_cfg.get('cdc_id_column', tbl_cfg.get('primary_key', id_col))
+                    break
+
+        # Build WHERE conditions based on timestamp format
+        if timestamp_format == 'unix':
+            # For Unix timestamps, convert watermark to Unix or compare as integers
+            # Watermark might be Unix timestamp int, string, or datetime string
+            try:
+                # Convert to string for consistent handling
+                watermark_str = str(last_watermark)
+                current_str = str(current_timestamp)
+
+                # If watermark is Unix timestamp (integer or digit string), use directly
+                if isinstance(last_watermark, (int, float)) or watermark_str.isdigit():
+                    watermark_value = watermark_str
+                else:
+                    # Convert datetime string to Unix timestamp
+                    from datetime import datetime as dt
+                    parsed = dt.strptime(watermark_str, '%Y-%m-%d %H:%M:%S')
+                    watermark_value = str(int(parsed.timestamp()))
+
+                # Current timestamp for end boundary
+                if isinstance(current_timestamp, (int, float)) or current_str.isdigit():
+                    current_value = current_str
+                else:
+                    from datetime import datetime as dt
+                    parsed = dt.strptime(current_str, '%Y-%m-%d %H:%M:%S')
+                    current_value = str(int(parsed.timestamp()))
+
+                where_conditions = [
+                    f"`{timestamp_col}` > {watermark_value}",
+                    f"`{timestamp_col}` <= {current_value}"
+                ]
+            except (ValueError, AttributeError) as e:
+                # Fallback to UNIX_TIMESTAMP function only for datetime strings
+                self.logger.logger.warning(f"Unix timestamp conversion failed: {e}, using UNIX_TIMESTAMP fallback")
+                where_conditions = [
+                    f"`{timestamp_col}` > UNIX_TIMESTAMP('{last_watermark}')",
+                    f"`{timestamp_col}` <= UNIX_TIMESTAMP('{current_timestamp}')"
+                ]
+        else:
+            # Standard datetime comparison
+            where_conditions = [
+                f"`{timestamp_col}` > '{last_watermark}'",
+                f"`{timestamp_col}` <= '{current_timestamp}'"
+            ]
+
         if custom_where:
             where_conditions.append(custom_where)
-        
+
         # Apply limit if specified (for testing purposes)
         if limit is not None:
             self.logger.logger.info(
@@ -462,25 +519,27 @@ class BaseBackupStrategy(ABC):
                 limit=limit,
                 reason="explicit_limit"
             )
-        
+
         query = f"""
-        SELECT * FROM {table_name}
+        SELECT * FROM {mysql_table_name}
         WHERE {' AND '.join(where_conditions)}
-        ORDER BY `update_at`, `ID`
+        ORDER BY `{timestamp_col}`, `{id_col}`
         """
-        
+
         if limit:
             query += f" LIMIT {limit}"
-        
-        self.logger.logger.debug(
+
+        self.logger.logger.info(
             "Generated incremental query",
             table_name=table_name,
+            timestamp_column=timestamp_col,
+            timestamp_format=timestamp_format,
             last_watermark=last_watermark,
             current_timestamp=current_timestamp,
             limit=limit,
-            query_preview=query[:200] + "..." if len(query) > 200 else query
+            query=query
         )
-        
+
         return query
     
     def detect_optimal_window_size(
@@ -951,7 +1010,9 @@ class BaseBackupStrategy(ABC):
                 columns = [row[0] for row in describe_results]
             
             # Check for required timestamp column (flexible names)
-            timestamp_candidates = ['updated_at', 'update_at', 'last_modified', 'modified_at']
+            # Include common timestamp columns plus Unix timestamp columns used in pipelines
+            timestamp_candidates = ['updated_at', 'update_at', 'last_modified', 'modified_at',
+                                    'add_time', 'update_time', 'pathTime', 'create_time', 'created_at']
             has_timestamp_column = any(col in columns for col in timestamp_candidates)
             if not has_timestamp_column:
                 self.logger.error_occurred(
@@ -1015,19 +1076,64 @@ class BaseBackupStrategy(ABC):
             return -1  # Indicate unknown count
         
         try:
+            # Extract MySQL table name from scoped format
+            mysql_table_name = self._extract_mysql_table_name(table_name)
+
+            # Try to get timestamp column and format from pipeline config
+            timestamp_col = 'add_time'  # Default for order tracking tables
+            timestamp_format = 'datetime'  # Default fallback
+            if hasattr(self, 'pipeline_config') and self.pipeline_config:
+                tables_config = self.pipeline_config.get('tables', {})
+                for tbl_name, tbl_cfg in tables_config.items():
+                    if tbl_name in table_name or table_name.endswith(tbl_name):
+                        timestamp_col = tbl_cfg.get('cdc_timestamp_column', timestamp_col)
+                        timestamp_format = tbl_cfg.get('timestamp_format', timestamp_format)
+                        break
+
+            # Build WHERE clause based on timestamp format
+            if timestamp_format == 'unix':
+                # Handle Unix timestamp comparison
+                try:
+                    # Convert to string for consistent handling
+                    watermark_str = str(last_watermark)
+                    current_str = str(current_timestamp)
+
+                    # If watermark is Unix timestamp (integer or digit string), use directly
+                    if isinstance(last_watermark, (int, float)) or watermark_str.isdigit():
+                        watermark_value = watermark_str
+                    else:
+                        # Convert datetime string to Unix timestamp
+                        from datetime import datetime as dt
+                        parsed = dt.strptime(watermark_str, '%Y-%m-%d %H:%M:%S')
+                        watermark_value = str(int(parsed.timestamp()))
+
+                    if isinstance(current_timestamp, (int, float)) or current_str.isdigit():
+                        current_value = current_str
+                    else:
+                        from datetime import datetime as dt
+                        parsed = dt.strptime(current_str, '%Y-%m-%d %H:%M:%S')
+                        current_value = str(int(parsed.timestamp()))
+
+                    where_clause = f"`{timestamp_col}` > {watermark_value} AND `{timestamp_col}` <= {current_value}"
+                except (ValueError, AttributeError) as e:
+                    # Fallback to UNIX_TIMESTAMP function only for datetime strings
+                    self.logger.logger.warning(f"Unix timestamp conversion failed: {e}, using UNIX_TIMESTAMP fallback")
+                    where_clause = f"`{timestamp_col}` > UNIX_TIMESTAMP('{last_watermark}') AND `{timestamp_col}` <= UNIX_TIMESTAMP('{current_timestamp}')"
+            else:
+                where_clause = f"`{timestamp_col}` > '{last_watermark}' AND `{timestamp_col}` <= '{current_timestamp}'"
+
             count_query = f"""
-            SELECT COUNT(*) FROM {table_name}
-            WHERE `update_at` > '{last_watermark}' 
-            AND `update_at` <= '{current_timestamp}'
+            SELECT COUNT(*) FROM {mysql_table_name}
+            WHERE {where_clause}
             """
-            
+
             # Debug log the actual query
             self.logger.logger.debug(
                 "Executing count query",
                 query=count_query.strip(),
-                table_name=table_name
+                table_name=mysql_table_name
             )
-            
+
             cursor.execute(count_query)
             result = cursor.fetchone()
             

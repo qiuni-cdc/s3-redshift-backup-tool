@@ -38,7 +38,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
         """Delegate to memory manager"""
         return self.memory_manager.force_gc_if_needed(batch_number)
     
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None, initial_lookback_minutes: Optional[int] = None) -> bool:
         """
         Execute sequential backup for all specified tables using row-based chunking.
         
@@ -48,6 +48,7 @@ class SequentialBackupStrategy(BaseBackupStrategy):
             max_total_rows: Optional maximum total rows to process  
             limit: Deprecated - use chunk_size instead (for backward compatibility)
             source_connection: Optional connection name to use instead of default
+            initial_lookback_minutes: Optional minutes to look back (currently ignored in sequential)
         
         Returns:
             True if all tables backed up successfully, False otherwise

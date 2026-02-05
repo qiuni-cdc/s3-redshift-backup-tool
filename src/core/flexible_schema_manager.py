@@ -198,8 +198,15 @@ class FlexibleSchemaManager:
         for col in schema_info:
             # Convert column name to lowercase for Redshift compatibility
             col_name = col['COLUMN_NAME'].lower()
-            data_type = col['DATA_TYPE'].lower()
-            column_type = col['COLUMN_TYPE'].lower()
+            # Handle bytes objects from MySQL connector (some connectors return bytes instead of str)
+            raw_data_type = col['DATA_TYPE']
+            raw_column_type = col['COLUMN_TYPE']
+            if isinstance(raw_data_type, bytes):
+                raw_data_type = raw_data_type.decode('utf-8')
+            if isinstance(raw_column_type, bytes):
+                raw_column_type = raw_column_type.decode('utf-8')
+            data_type = raw_data_type.lower()
+            column_type = raw_column_type.lower()
             is_nullable = col['IS_NULLABLE'] == 'YES'
             max_length = col['CHARACTER_MAXIMUM_LENGTH']
             precision = col['NUMERIC_PRECISION']
@@ -304,14 +311,24 @@ class FlexibleSchemaManager:
         
         for col in schema_info:
             col_name = col['COLUMN_NAME']
-            data_type = col['DATA_TYPE'].lower()
-            column_type = col['COLUMN_TYPE'].lower()
+            # Handle bytes objects from MySQL connector (some connectors return bytes instead of str)
+            raw_data_type = col['DATA_TYPE']
+            raw_column_type = col['COLUMN_TYPE']
+            if isinstance(raw_data_type, bytes):
+                raw_data_type = raw_data_type.decode('utf-8')
+            if isinstance(raw_column_type, bytes):
+                raw_column_type = raw_column_type.decode('utf-8')
+            data_type = raw_data_type.lower()
+            column_type = raw_column_type.lower()
             is_nullable = col['IS_NULLABLE'] == 'YES'
             max_length = col['CHARACTER_MAXIMUM_LENGTH']
             charset = col.get('CHARACTER_SET_NAME')  # Get character set
             precision = col['NUMERIC_PRECISION']
             scale = col['NUMERIC_SCALE']
             extra = col.get('EXTRA', '').lower()
+
+            # DEBUG: Log MySQL column info for troubleshooting
+            logger.info(f"DEBUG MySQL column: {col_name} -> DATA_TYPE='{data_type}', COLUMN_TYPE='{column_type}', max_length={max_length}, precision={precision}, scale={scale}")
 
             # Track original column name
             original_columns.append(col_name)
@@ -324,7 +341,10 @@ class FlexibleSchemaManager:
             rs_type = self._map_mysql_to_redshift(
                 data_type, column_type, max_length, precision, scale, charset
             )
-            
+
+            # DEBUG: Log the mapped Redshift type
+            logger.info(f"DEBUG Redshift mapping: {col_name} -> {rs_type}")
+
             # Add nullable constraint
             nullable_clause = "" if is_nullable else " NOT NULL"
             
@@ -480,13 +500,18 @@ class FlexibleSchemaManager:
             ddl_lines.append("\n" + "\n".join(optimization_clauses))
         
         ddl_lines.append(";")
-        
+
         # Save column mapping if any columns were renamed
         if any(orig != mapped for orig, mapped in column_mapping.items()):
             self.column_mapper.generate_mapping(table_name, original_columns)
             logger.info(f"Saved column mappings for {table_name}")
-        
-        return "\n".join(ddl_lines)
+
+        full_ddl = "\n".join(ddl_lines)
+
+        # DEBUG: Log the generated DDL for troubleshooting
+        logger.info(f"Generated Redshift DDL for {table_name}:\n{full_ddl}")
+
+        return full_ddl
     
     def _get_charset_bytes(self, charset: Optional[str]) -> int:
         """
