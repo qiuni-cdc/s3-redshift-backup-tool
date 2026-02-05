@@ -11,6 +11,8 @@ pydantic-settings>=2.0.0  # For settings management with .env support
 click>=8.0.0
 structlog>=22.0.0
 python-dotenv>=1.0.0  # For .env file support in v1.1.0
+apache-airflow-providers-postgres>=5.0.0 # For Redshift Hooks
+apache-airflow-providers-mysql>=5.0.0 # For MySql Hooks
 
 # V1.1.0 Multi-Schema Dependencies
 PyYAML>=6.0.0  # For YAML configuration files
