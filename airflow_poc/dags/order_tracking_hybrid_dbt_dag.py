@@ -63,7 +63,7 @@ DBT_VENV_PATH = os.environ.get(
 )
 # For local Docker testing, use the local_test pipeline which connects via Windows SSH tunnel
 # For production, change back to "order_tracking_hybrid_dbt_pipeline"
-PIPELINE_NAME = os.environ.get('SYNC_PIPELINE_NAME', 'order_tracking_local_test_pipeline')
+PIPELINE_NAME = os.environ.get('SYNC_PIPELINE_NAME', 'order_tracking_hybrid_dbt_pipeline')
 
 # Time window settings
 BUFFER_MINUTES = 5                    # Safety buffer to avoid incomplete transactions
