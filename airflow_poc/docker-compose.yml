@@ -14,23 +14,35 @@ x-airflow-common: &airflow-common
     - SYNC_TOOL_PATH=/opt/airflow/sync_tool
     - DBT_PROJECT_PATH=/opt/airflow/dbt_projects/order_tracking
     - DBT_VENV_PATH=/home/airflow/.local
+    # Source Database (MySQL)
+    -  DB_HOST=us-west-2.ro.db.uniuni.com.internal
+    -  DB_USER=jasleentung
+    -  DB_PASSWORD=86a05b5772c55c83c9db74a01c01441f
+    -  DB_DATABASE=kuaisong
     # dbt Redshift credentials (replace with actual values)
     - REDSHIFT_USER=sett_ddl_owner
     - "REDSHIFT_PASSWORD=Qx2[,y4*voli3)M>"
     - REDSHIFT_QA_USER=sett_ddl_owner
     - "REDSHIFT_QA_PASSWORD=Qx2[,y4*voli3)M>"
     - DBT_REDSHIFT_DB=dw
+    # SSH keys
+    - SSH_BASTION_KEY_PATH=/keys/jasleentung.pem
+    # Source (MySQL) - Connect via SSH Tunnel
+    - SSH_BASTION_HOST=35.83.114.196
+    - SSH_BASTION_USER=jasleentung
     # SSH tunnel for local Docker testing (set to false on server)
-    - DBT_USE_SSH_TUNNEL=true
-    - DBT_REDSHIFT_PORT=15439
+    - DBT_USE_SSH_TUNNEL=false
+    - DBT_REDSHIFT_HOST=redshift-dw.uniuni.com
+    - DBT_REDSHIFT_PORT=5439
     # SSH key path inside container (for tunnel) - must match path in .env file
-    - REDSHIFT_SSH_KEY_PATH=/Users/Jasleen Tung/Downloads/jasleentung_keypair/jasleentung.pem
+    - REDSHIFT_SSH_KEY_PATH= ~/etl/etl_dw/ssh/jasleentung.pem:/keys/jasleentung.pem:ro
   volumes:
     - ./dags:/opt/airflow/dags
     - ./dbt_projects:/opt/airflow/dbt_projects
-    - ../:/opt/airflow/sync_tool
+    - ../src:/opt/airflow/src
+    - ../config:/opt/airflow/config
     # Mount the actual SSH key FILE to the path expected by .env
-    - "C:/Users/Jasleen Tung/Downloads/jasleentung_keypair/jasleentung.pem:/Users/Jasleen Tung/Downloads/jasleentung_keypair/jasleentung.pem:ro"
+    - ~/etl/etl_dw/ssh/jasleentung.pem:/keys/jasleentung.pem:ro
   depends_on:
     postgres:
       condition: service_healthy
@@ -65,7 +77,7 @@ services:
     <<: *airflow-common
     command: webserver
     ports:
-      - "8080:8080"
+      - "8081:8080
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 10s
