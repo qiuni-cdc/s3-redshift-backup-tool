@@ -361,13 +361,14 @@ class ConnectionManager:
                 'password': conn_config_obj.password,
                 'database': conn_config_obj.database,
                 'autocommit': False,
-                'connection_timeout': 1800,  # 30 minutes
+                'connection_timeout': 30,  # Fail fast (30s) instead of hanging 30m
                 'charset': 'utf8mb4',
                 'use_unicode': True,
                 'sql_mode': 'TRADITIONAL',
                 'raise_on_warnings': True,
-                'compress': True,  # Enable compression to mitigate MTU issues over SSH tunnel
-                'ssl_disabled': True  # Disable SSL to further reduce packet size and avoid handshake hangs
+                'compress': True,  # Enable compression
+                'ssl_disabled': True,  # Disable SSL
+                'use_pure': True  # Force Pure Python mode to avoid C-ext deadlocks
             }
             
             # Establish connection with retry
