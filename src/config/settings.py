@@ -245,7 +245,10 @@ class AppConfig(BaseSettings):
     def ssh(self) -> Optional[SSHConfig]:
         """Get SSH configuration (None if SSH disabled)"""
         if not hasattr(self, '_ssh'):
-            return None  # Return None if SSH not explicitly configured
+            try:
+                self._ssh = SSHConfig()
+            except Exception:
+                self._ssh = None
         return self._ssh
     
     @property
@@ -273,7 +276,10 @@ class AppConfig(BaseSettings):
     def redshift_ssh(self) -> Optional[RedshiftSSHConfig]:
         """Get Redshift SSH configuration (None if SSH disabled)"""
         if not hasattr(self, '_redshift_ssh'):
-            return None  # Return None if Redshift SSH not explicitly configured
+            try:
+                self._redshift_ssh = RedshiftSSHConfig()
+            except Exception:
+                self._redshift_ssh = None
         return self._redshift_ssh
 
     @property
