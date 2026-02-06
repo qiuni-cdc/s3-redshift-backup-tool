@@ -366,7 +366,8 @@ class ConnectionManager:
                 'use_unicode': True,
                 'sql_mode': 'TRADITIONAL',
                 'raise_on_warnings': True,
-                'compress': True  # Enable compression to mitigate MTU issues over SSH tunnel
+                'compress': True,  # Enable compression to mitigate MTU issues over SSH tunnel
+                'ssl_disabled': True  # Disable SSL to further reduce packet size and avoid handshake hangs
             }
             
             # Establish connection with retry
