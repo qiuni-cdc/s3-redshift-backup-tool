@@ -683,8 +683,6 @@ LEFT JOIN uni_warehouses uw1
     ON uti.warehouse = uw1.id
 LEFT JOIN uni_warehouses uw2
     ON time_199.Gateway_whs = uw2.id  
-LEFT JOIN uni_warehouses uw_199_2nd
-    ON second_199.Dest_whs = uw_199_2nd.id 
 LEFT JOIN uni_warehouses uw_inj
     ON eoi.pickup_warehouse = uw_inj.id
 LEFT JOIN (
@@ -693,6 +691,8 @@ LEFT JOIN (
     WHERE uts.code = 199 AND uts.traceSeq > 2
 ) AS second_199
     ON uti.order_id = second_199.order_id
+LEFT JOIN uni_warehouses uw_199_2nd
+    ON second_199.Dest_whs = uw_199_2nd.id 
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
     FROM uni_tracking_spath uts
