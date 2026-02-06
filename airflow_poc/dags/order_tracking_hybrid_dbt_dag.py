@@ -229,7 +229,8 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f .env ] && source .env
+        [ -f venv/bin/activate ] && source venv/bin/activate
+        # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
         echo "Extracting ecs_order_info using pipeline timestamp_only strategy"
 
@@ -248,7 +249,8 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f .env ] && source .env
+        [ -f venv/bin/activate ] && source venv/bin/activate
+        # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
         echo "Extracting uni_tracking_info using pipeline timestamp_only strategy"
 
@@ -267,7 +269,8 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f .env ] && source .env
+        [ -f venv/bin/activate ] && source venv/bin/activate
+        # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
         echo "Extracting uni_tracking_spath using pipeline timestamp_only strategy"
 
