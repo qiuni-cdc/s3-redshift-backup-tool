@@ -40,13 +40,13 @@ import sys
 # Production defaults are used if env vars not set
 
 # DOCKER-AWARE PATH DETECTION
-# If we are in Docker (standard path), prefer that over host-specific defaults
+# The repository root is mounted to /opt/airflow/sync_tool
 DEFAULT_TOOL_PATH = '/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool'
-if os.path.exists('/opt/airflow/src'):
-    DEFAULT_TOOL_PATH = '/opt/airflow'
-    # Ensure src is importable
-    if '/opt/airflow' not in sys.path:
-        sys.path.append('/opt/airflow')
+if os.path.exists('/opt/airflow/sync_tool'):
+    DEFAULT_TOOL_PATH = '/opt/airflow/sync_tool'
+    # Ensure src is importable from sync_tool
+    if '/opt/airflow/sync_tool' not in sys.path:
+        sys.path.append('/opt/airflow/sync_tool')
     print(f"Detected Docker environment. Set SYNC_TOOL_PATH to {DEFAULT_TOOL_PATH}")
 
 SYNC_TOOL_PATH = os.environ.get(
@@ -59,7 +59,7 @@ DBT_PROJECT_PATH = os.environ.get(
 )
 DBT_VENV_PATH = os.environ.get(
     'DBT_VENV_PATH',
-    '/home/ubuntu/.dbt_venv' # Docker usually uses system python or venv in a known place, might need update later
+    '/home/airflow/.local' # Docker usually uses system python or venv in a known place, might need update later
 )
 # For local Docker testing, use the local_test pipeline which connects via Windows SSH tunnel
 # For production, change back to "order_tracking_hybrid_dbt_pipeline"
