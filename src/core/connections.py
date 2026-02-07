@@ -173,7 +173,9 @@ class ConnectionManager:
                 ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
-                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port))
+                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port)),
+                allow_agent=False,  # Disable agent lookup to prevent hangs
+                look_for_keys=False
             )
             
             # Start tunnel with retry logic
@@ -276,7 +278,7 @@ class ConnectionManager:
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression (Critical for MTU)
                 'ssl_disabled': True,  # Disable SSL
-                'use_pure': True,  # Force Pure Python mode
+                'use_pure': False,  # Switch to C-Extension (More robust)
                 'auth_plugin': 'mysql_native_password'  # Explicit auth plugin to avoid negotiation hangs
             }
             
@@ -364,7 +366,9 @@ class ConnectionManager:
                 ssh_username=self.config.redshift_ssh.username,
                 ssh_pkey=self.config.redshift_ssh.private_key_path,
                 remote_bind_address=(self.config.redshift.host, self.config.redshift.port),
-                local_bind_address=('127.0.0.1', self.config.redshift_ssh.local_port)
+                local_bind_address=('127.0.0.1', self.config.redshift_ssh.local_port),
+                allow_agent=False,  # Disable agent lookup to prevent hangs
+                look_for_keys=False
             )
             
             # Start tunnel with retry logic
