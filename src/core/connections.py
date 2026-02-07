@@ -274,8 +274,8 @@ class ConnectionManager:
                 'database': conn_config_obj.database,
                 'autocommit': False,
                 'raise_on_warnings': True,
-                'compress': True,  # Enable compression (Critical for MTU)
-                'use_pure': False  # Switch to C-Extension (Clean config)
+                'compress': False,  # Disable compression (Test C-ext MTU handling)
+                'use_pure': False   # Keep C-Extension (Clean config)
             }
             
             # Use safe timeout 
