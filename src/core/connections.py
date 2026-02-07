@@ -275,7 +275,7 @@ class ConnectionManager:
                 'autocommit': False,
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression (Critical for MTU)
-                'ssl_disabled': True,  # Disable SSL
+                'ssl_mode': 'DISABLED',  # Standard C-ext argument (replaces ssl_disabled)
                 'use_pure': False,  # Switch to C-Extension (More robust)
                 'auth_plugin': 'mysql_native_password'  # Explicit auth plugin to avoid negotiation hangs
             }
