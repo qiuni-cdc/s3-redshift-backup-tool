@@ -173,7 +173,8 @@ class ConnectionManager:
                 ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
-                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port))
+                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port)),
+                set_keepalive=15.0  # Send keepalive packets every 15s to keep session active
             )
             
             # Start tunnel with retry logic
@@ -367,8 +368,8 @@ class ConnectionManager:
                 'use_pure': True  # Force Pure Python mode
             }
             
-            # Use smaller timeout to fail fast if it hangs
-            conn_config['connection_timeout'] = 10
+            # Use safe timeout 
+            conn_config['connection_timeout'] = 30
             
             logger.info("Initiating database connection...", config={k: v for k, v in conn_config.items() if k != 'password'})
 
