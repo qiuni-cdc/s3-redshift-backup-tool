@@ -173,7 +173,8 @@ class ConnectionManager:
                 ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
-                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port))
+                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port)),
+                set_keepalive=30.0  # Proper constructor-based KeepAlive
             )
             
             # Start tunnel with retry logic
@@ -181,9 +182,7 @@ class ConnectionManager:
             for attempt in range(max_attempts):
                 try:
                     tunnel.start()
-                    # Add explicit KeepAlive to prevent silent drops
-                    if hasattr(tunnel, 'ssh_transport') and tunnel.ssh_transport:
-                        tunnel.ssh_transport.set_keepalive(30)  # Relaxed KeepAlive (30s)
+                    # KeepAlive handled by constructor argument
                     break
                 except Exception as e:
                     if attempt == max_attempts - 1:
