@@ -366,8 +366,8 @@ class ConnectionManager:
                 'use_unicode': True,
                 'sql_mode': 'TRADITIONAL',
                 'raise_on_warnings': True,
-                'compress': True,  # Enable compression
-                'ssl_mode': 'DISABLED',  # Disable SSL (Standard method)
+                # 'compress': True,  # Disable compression temporarily to debug hangs
+                'ssl_disabled': True,  # Disable SSL (Old argument for this driver version)
                 'use_pure': True  # Force Pure Python mode to avoid C-ext deadlocks
             }
             
