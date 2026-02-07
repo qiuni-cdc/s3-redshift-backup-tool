@@ -295,7 +295,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         cursor = None
         try:
             # Create cursor with dictionary output
-            cursor = db_conn.cursor(dictionary=True, buffered=False)
+            cursor = db_conn.cursor(dictionary=True, buffered=True)
             
             # Validate table structure
             if not self.validate_table_exists(cursor, table_name):
@@ -395,7 +395,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                 batch_start_time = time.time()
                 
                 # Fetch batch
-                batch_data = cursor.fetchmany(self.config.backup.batch_size)
+                batch_data = cursor.fetchmany(1000)
                 if not batch_data:
                     break
                 
