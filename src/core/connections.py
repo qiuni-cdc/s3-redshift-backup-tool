@@ -340,6 +340,94 @@ class ConnectionManager:
                 logger.info("Database connection closed")
     
     @contextmanager
+    def redshift_ssh_tunnel(self) -> Generator[int, None, None]:
+        """
+        Create SSH tunnel for Redshift connection and return local port.
+
+        Yields:
+            Local port number for the established Redshift tunnel
+
+        Raises:
+            ConnectionError: If tunnel establishment fails
+        """
+        # Guard: this method should only be called when Redshift SSH is configured
+        if self.config.redshift_ssh is None:
+            raise RuntimeError("Redshift SSH is not configured but redshift_ssh_tunnel was called")
+
+        tunnel = None
+        try:
+            logger.info("Establishing Redshift SSH tunnel", bastion_host=self.config.redshift_ssh.host)
+
+            # Create SSH tunnel for Redshift
+            tunnel = SSHTunnelForwarder(
+                (self.config.redshift_ssh.host, 22),
+                ssh_username=self.config.redshift_ssh.username,
+                ssh_pkey=self.config.redshift_ssh.private_key_path,
+                remote_bind_address=(self.config.redshift.host, self.config.redshift.port),
+                local_bind_address=('127.0.0.1', self.config.redshift_ssh.local_port)
+            )
+            
+            # Start tunnel with retry logic
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    tunnel.start()
+                    break
+                except Exception as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    logger.warning(
+                        "Redshift SSH tunnel attempt failed, retrying",
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        error=str(e)
+                    )
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
+            local_port = tunnel.local_bind_port
+            self._redshift_ssh_tunnel = tunnel
+            
+            logger.info(
+                "Redshift SSH tunnel established",
+                local_port=local_port,
+                remote_host=self.config.redshift.host,
+                remote_port=self.config.redshift.port
+            )
+            
+            # Test connectivity
+            if not self._test_tunnel_connectivity(local_port):
+                raise ConnectionError("Redshift SSH tunnel connectivity test failed")
+            
+            yield local_port
+            
+        except Exception as e:
+            if tunnel:
+                try:
+                    tunnel.stop()
+                except:
+                    pass
+            error_msg = f"Failed to establish Redshift SSH tunnel: {e}"
+            logger.error(error_msg, bastion_host=self.config.redshift_ssh.host)
+            raise_connection_error("redshift_ssh_tunnel", error_msg)
+        
+        finally:
+            if tunnel and tunnel.is_active:
+                tunnel.stop()
+                logger.info("Redshift SSH tunnel closed")
+                self._redshift_ssh_tunnel = None
+    
+    def _test_tunnel_connectivity(self, local_port: int) -> bool:
+        """Test if tunnel is working by attempting to connect to local port"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex(('127.0.0.1', local_port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+    
+    @contextmanager
     def database_session(self, connection_name: Optional[str] = None) -> Generator[mysql.connector.MySQLConnection, None, None]:
         """
         Create database session with SSH tunnel using connection configuration.
