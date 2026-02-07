@@ -367,10 +367,12 @@ class ConnectionManager:
                 'sql_mode': 'TRADITIONAL',
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression
-                'ssl_disabled': True,  # Disable SSL
+                'ssl_mode': 'DISABLED',  # Disable SSL (Standard method)
                 'use_pure': True  # Force Pure Python mode to avoid C-ext deadlocks
             }
             
+            logger.info("Initiating database connection...", config={k: v for k, v in conn_config.items() if k != 'password'})
+
             # Establish connection with retry
             max_attempts = 3
             for attempt in range(max_attempts):
