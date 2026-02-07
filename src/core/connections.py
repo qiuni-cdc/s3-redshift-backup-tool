@@ -174,13 +174,13 @@ class ConnectionManager:
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
                 'raise_on_warnings': True,
-                'compress': False,  # Disable compression (Simplify packet handling)
+                'compress': True,  # Enable compression (Critical for MTU)
                 'ssl_disabled': True,  # Disable SSL
                 'use_pure': True,  # Force Pure Python mode
-                'auth_plugin': 'mysql_native_password'  # Explicit auth plugin
+                'auth_plugin': 'mysql_native_password'  # Explicit auth plugin to avoid negotiation hangs
             }
             
-            # Increase timeout to be patient
+            # Use safe timeout 
             conn_config['connection_timeout'] = 60
             
             logger.info("Initiating database connection...", config={k: v for k, v in conn_config.items() if k != 'password'})
