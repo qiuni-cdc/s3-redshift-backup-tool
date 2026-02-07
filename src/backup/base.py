@@ -520,10 +520,17 @@ class BaseBackupStrategy(ABC):
                 reason="explicit_limit"
             )
 
+        # Prepare ORDER BY clause handling composite keys
+        if isinstance(id_col, list):
+            pk_cols = [f"`{col}`" for col in id_col]
+            order_by_clause = f"`{timestamp_col}`, {', '.join(pk_cols)}"
+        else:
+            order_by_clause = f"`{timestamp_col}`, `{id_col}`"
+
         query = f"""
         SELECT * FROM {mysql_table_name}
         WHERE {' AND '.join(where_conditions)}
-        ORDER BY `{timestamp_col}`, `{id_col}`
+        ORDER BY {order_by_clause}
         """
 
         if limit:
