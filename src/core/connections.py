@@ -279,7 +279,7 @@ class ConnectionManager:
                 'autocommit': False,
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression (Critical for MTU)
-                'use_pure': False  # Switch to C-Extension (More robust socket handling)
+                'use_pure': True   # Revert to Pure Python (More compatible)
             }
             
             # Use safe timeout 
