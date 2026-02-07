@@ -541,7 +541,7 @@ class ConnectionRegistry:
             'connection_timeout': self.default_timeout,
             'sql_mode': 'TRADITIONAL',
             'raise_on_warnings': True,
-            'compress': True,       # Enable compression (Critical for MTU)
+            'compress': False,      # Disable MySQL compression (Avoid pure-python deadlock)
             'use_pure': True,       # Use Pure Python driver (More compatible)
             'connection_timeout': 30 # Standard timeout
         }
