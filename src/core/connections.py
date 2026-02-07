@@ -183,7 +183,7 @@ class ConnectionManager:
                     tunnel.start()
                     # Add explicit KeepAlive to prevent silent drops
                     if hasattr(tunnel, 'ssh_transport') and tunnel.ssh_transport:
-                        tunnel.ssh_transport.set_keepalive(10)
+                        tunnel.ssh_transport.set_keepalive(30)  # Relaxed KeepAlive (30s)
                     break
                 except Exception as e:
                     if attempt == max_attempts - 1:
@@ -279,11 +279,11 @@ class ConnectionManager:
                 'autocommit': False,
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression (Critical for MTU)
-                'use_pure': True   # Revert to Pure Python (More compatible)
+                'use_pure': False  # Switch to C-Extension (More robust socket handling)
             }
             
             # Use safe timeout 
-            conn_config['connection_timeout'] = 20  # Fail fast (20s)
+            conn_config['connection_timeout'] = 30  # Standard timeout
             
             logger.info("Initiating database connection...", config={k: v for k, v in conn_config.items() if k != 'password'})
 
