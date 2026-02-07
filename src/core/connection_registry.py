@@ -541,8 +541,10 @@ class ConnectionRegistry:
             'connection_timeout': self.default_timeout,
             'sql_mode': 'TRADITIONAL',
             'raise_on_warnings': True,
-            'compress': False,      # Disable MySQL compression (Avoid pure-python deadlock)
-            'use_pure': True,       # Use Pure Python driver (More compatible)
+            'raise_on_warnings': True,
+            'compress': True,       # Enable compression (Critical for MTU/C-Ext stability)
+            'use_pure': False,      # Use C-Extension (Performance + Reliability)
+            'auth_plugin': 'mysql_native_password', # Prevent handshake hang
             'connection_timeout': 30 # Standard timeout
         }
         
