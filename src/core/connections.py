@@ -361,15 +361,14 @@ class ConnectionManager:
                 'password': conn_config_obj.password,
                 'database': conn_config_obj.database,
                 'autocommit': False,
-                'connection_timeout': 30,  # Fail fast (30s) instead of hanging 30m
-                'charset': 'utf8mb4',
-                'use_unicode': True,
-                'sql_mode': 'TRADITIONAL',
                 'raise_on_warnings': True,
-                # 'compress': True,  # Disable compression temporarily to debug hangs
-                'ssl_disabled': True,  # Disable SSL (Old argument for this driver version)
-                'use_pure': True  # Force Pure Python mode to avoid C-ext deadlocks
+                'compress': True,  # Enable compression (Helps with MTU)
+                'ssl_disabled': True,  # Disable SSL
+                'use_pure': True  # Force Pure Python mode
             }
+            
+            # Use smaller timeout to fail fast if it hangs
+            conn_config['connection_timeout'] = 10
             
             logger.info("Initiating database connection...", config={k: v for k, v in conn_config.items() if k != 'password'})
 
