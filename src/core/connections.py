@@ -173,6 +173,106 @@ class ConnectionManager:
                 ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
+                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port))
+            )
+            
+            # Start tunnel with retry logic
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    tunnel.start()
+                    break
+                except Exception as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    logger.warning(
+                        "SSH tunnel attempt failed, retrying",
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        error=str(e)
+                    )
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            
+            local_port = tunnel.local_bind_port
+            self._ssh_tunnel = tunnel
+            
+            logger.info(
+                "SSH tunnel established",
+                local_port=local_port,
+                remote_host=self.config.database.host,
+                remote_port=self.config.database.port
+            )
+            
+            # Test tunnel connectivity
+            if not self._test_tunnel_connectivity(local_port):
+                raise ConnectionError("SSH tunnel connectivity test failed")
+            
+            yield local_port
+            
+        except Exception as e:
+            logger.error("Failed to establish SSH tunnel", error=str(e))
+            raise_connection_error(
+                "SSH tunnel",
+                host=self.config.ssh.bastion_host,
+                underlying_error=e
+            )
+        finally:
+            if tunnel and tunnel.is_active:
+                tunnel.stop()
+                logger.info("SSH tunnel closed")
+                self._ssh_tunnel = None
+
+    @contextmanager
+    def database_connection(self, local_port: int, connection_name: Optional[str] = None) -> Generator[mysql.connector.MySQLConnection, None, None]:
+        """
+        Create database connection through SSH tunnel.
+        
+        Args:
+            local_port: Local port from SSH tunnel
+            connection_name: Optional connection name to use specific configuration
+            
+        Yields:
+            MySQL database connection
+            
+        Raises:
+            ConnectionError: If database connection fails
+        """
+        conn = None
+        try:
+            # Get connection configuration (from registry or fallback)
+            conn_config_obj = self.get_connection_config(connection_name)
+
+            # Determine host and port based on whether SSH tunnel is used
+            if local_port is None:
+                # Direct connection (no SSH tunnel)
+                host = conn_config_obj.host
+                port = conn_config_obj.port
+                logger.info(
+                    "Establishing direct database connection",
+                    host=host,
+                    port=port,
+                    connection_name=connection_name or "default",
+                    database=conn_config_obj.database
+                )
+            else:
+                # Connection through SSH tunnel
+                host = '127.0.0.1'
+                port = local_port
+                logger.info(
+                    "Establishing database connection through SSH tunnel",
+                    local_port=local_port,
+                    connection_name=connection_name or "default",
+                    database=conn_config_obj.database
+                )
+
+            # Connection configuration
+            conn_config = {
+                'host': host,
+                'port': port,
+                'user': conn_config_obj.username,
+                'password': conn_config_obj.password,
+                'database': conn_config_obj.database,
+                'autocommit': False,
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression (Critical for MTU)
                 'ssl_disabled': True,  # Disable SSL
