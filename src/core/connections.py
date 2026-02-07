@@ -181,6 +181,9 @@ class ConnectionManager:
             for attempt in range(max_attempts):
                 try:
                     tunnel.start()
+                    # Add explicit KeepAlive to prevent silent drops
+                    if hasattr(tunnel, 'ssh_transport') and tunnel.ssh_transport:
+                        tunnel.ssh_transport.set_keepalive(10)
                     break
                 except Exception as e:
                     if attempt == max_attempts - 1:
@@ -191,7 +194,7 @@ class ConnectionManager:
                         max_attempts=max_attempts,
                         error=str(e)
                     )
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2 ** attempt)
             
             local_port = tunnel.local_bind_port
             self._ssh_tunnel = tunnel
@@ -200,7 +203,8 @@ class ConnectionManager:
                 "SSH tunnel established",
                 local_port=local_port,
                 remote_host=self.config.database.host,
-                remote_port=self.config.database.port
+                remote_port=self.config.database.port,
+                keepalive=True
             )
             
             # Test tunnel connectivity
@@ -274,12 +278,12 @@ class ConnectionManager:
                 'database': conn_config_obj.database,
                 'autocommit': False,
                 'raise_on_warnings': True,
-                'compress': False,  # Disable compression (Test C-ext MTU handling)
-                'use_pure': False   # Keep C-Extension (Clean config)
+                'compress': True,  # Enable compression (Critical for MTU)
+                'use_pure': True   # Revert to Pure Python (More compatible)
             }
             
             # Use safe timeout 
-            conn_config['connection_timeout'] = 60
+            conn_config['connection_timeout'] = 20  # Fail fast (20s)
             
             logger.info("Initiating database connection...", config={k: v for k, v in conn_config.items() if k != 'password'})
 
