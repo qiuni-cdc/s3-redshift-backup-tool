@@ -279,6 +279,7 @@ class ConnectionManager:
                 'compress': True,  # Enable compression (Critical for MTU)
                 'use_pure': True,  # Revert to Pure Python (More compatible)
                 'ssl_disabled': True # Explicitly disable SSL to avoid mode negotiation errors
+            }
             
             # Use safe timeout 
             conn_config['connection_timeout'] = 30  # Standard timeout
