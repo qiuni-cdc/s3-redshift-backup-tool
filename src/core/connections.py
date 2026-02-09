@@ -219,48 +219,51 @@ class ConnectionManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            self._ssh_tunnel = process # Store process for later cleanup? No, stores SSHTunnelForwarder usually.
-            # We will manage lifecycle here manually.
+            # Store process for cleanup in finally block
+            self._ssh_tunnel = process 
             
-            try:
-                # Wait for port to be listening
-                max_retries = 30 # 3 seconds max wait
-                ready = False
-                for _ in range(max_retries):
-                    if process.poll() is not None:
-                        # Process died immediately
-                        stdout, stderr = process.communicate()
-                        raise ConnectionError(f"SSH process exited unexpectedly: {stderr.decode()}")
-                    
-                    try:
-                        with socket.create_connection(('127.0.0.1', local_port), timeout=0.1):
-                            ready = True
-                            break
-                    except (ConnectionRefusedError, socket.timeout):
-                        time.sleep(0.1)
+            # Wait for port to be listening
+            max_retries = 30 # 3 seconds max wait
+            ready = False
+            for _ in range(max_retries):
+                if process.poll() is not None:
+                    # Process died immediately
+                    stdout, stderr = process.communicate()
+                    raise ConnectionError(f"SSH process exited unexpectedly: {stderr.decode()}")
                 
-                if not ready:
-                    raise ConnectionError("Timeout waiting for SSH tunnel port to listen")
+                try:
+                    with socket.create_connection(('127.0.0.1', local_port), timeout=0.1):
+                        ready = True
+                        break
+                except (ConnectionRefusedError, socket.timeout):
+                    time.sleep(0.1)
+            
+            if not ready:
+                raise ConnectionError("Timeout waiting for SSH tunnel port to listen")
+            
+            logger.info(
+                "SSH tunnel established (native)",
+                local_port=local_port,
+                pid=process.pid
+            )
+            
+            yield local_port
+            
+        finally:
+            # Cleanup native process if it exists
+            if self._ssh_tunnel:
+                try:
+                    # Check if process is still running
+                    if self._ssh_tunnel.poll() is None:
+                        logger.info(f"Terminating SSH tunnel (PID: {self._ssh_tunnel.pid})")
+                        self._ssh_tunnel.terminate()
+                        try:
+                            self._ssh_tunnel.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            self._ssh_tunnel.kill()
+                except Exception as e:
+                    logger.warning(f"Error cleaning up SSH tunnel: {e}")
                 
-                logger.info(
-                    "SSH tunnel established (native)",
-                    local_port=local_port,
-                    pid=process.pid
-                )
-                
-                # Test connectivity? Handled by socket check above.
-                
-                yield local_port
-                
-            finally:
-                # Cleanup
-                if process.poll() is None:
-                    logger.info(f"Terminating SSH tunnel (PID: {process.pid})")
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
                 self._ssh_tunnel = None
 
 
