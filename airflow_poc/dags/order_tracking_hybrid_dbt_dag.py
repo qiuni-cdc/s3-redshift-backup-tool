@@ -386,6 +386,8 @@ else:
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
+    export DBT_REDSHIFT_HOST={REDSHIFT_HOST}
+    export DBT_REDSHIFT_PORT={REDSHIFT_PORT}
 '''
     DBT_CLEANUP_TUNNEL = ''
 
