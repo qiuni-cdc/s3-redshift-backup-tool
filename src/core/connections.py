@@ -14,6 +14,9 @@ from contextlib import contextmanager
 from typing import Generator, Optional, Dict, Any
 import time
 import socket
+import subprocess
+import signal
+import os
 from pathlib import Path
 
 from src.config.settings import AppConfig
@@ -27,6 +30,38 @@ from src.utils.logging import get_logger
 
 
 logger = get_logger(__name__)
+
+
+class NativeSSHTunnel:
+    """
+    Wrapper for native SSH subprocess to mimic SSHTunnelForwarder interface
+    and provide robust cleanup.
+    """
+    def __init__(self, process: subprocess.Popen, local_port: int, remote_target: str):
+        self.process = process
+        self.local_bind_port = local_port
+        self.remote_target = remote_target
+        self._is_active = True
+
+    @property
+    def is_active(self) -> bool:
+        """Check if the SSH process is still running."""
+        if self.process:
+            return self.process.poll() is None
+        return False
+
+    def stop(self):
+        """Terminate the SSH process robustly."""
+        if self.process and self.is_active:
+            logger.info(f"Terminating SSH tunnel (PID: {self.process.pid}) for {self.remote_target}")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                logger.warning(f"SSH tunnel (PID: {self.process.pid}) did not terminate, killing...")
+                self.process.kill()
+        self._is_active = False
+
 
 
 class ConnectionManager:
@@ -128,6 +163,91 @@ class ConnectionManager:
                 key_path=str(ssh_key_path),
                 current_permissions=oct(ssh_key_path.stat().st_mode & 0o777)
             )
+
+    def _get_free_port(self) -> int:
+        """Find a random free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            return s.getsockname()[1]
+
+    def _create_native_ssh_tunnel(self, ssh_host: str, ssh_user: str, ssh_key_path: str, 
+                                remote_host: str, remote_port: int, local_port: int = 0) -> NativeSSHTunnel:
+        """
+        Establish a native SSH tunnel using subprocess.
+        
+        Args:
+            ssh_host: Bastion host address
+            ssh_user: Bastion username
+            ssh_key_path: Path to private key
+            remote_host: Target database host (reachable from bastion)
+            remote_port: Target database port
+            local_port: Optional specific local port (default 0 for random)
+            
+        Returns:
+            NativeSSHTunnel object containing the process and port info
+        """
+        if local_port == 0:
+            local_port = self._get_free_port()
+            
+        remote_bind = f"{remote_host}:{remote_port}"
+        local_bind = f"{local_port}:{remote_bind}"
+        
+        cmd = [
+            'ssh',
+            '-i', ssh_key_path,
+            '-N',  # Do not execute remote command
+            '-L', local_bind,
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ExitOnForwardFailure=yes',
+            '-o', 'ServerAliveInterval=15',
+            '-o', 'ServerAliveCountMax=3',
+            f"{ssh_user}@{ssh_host}"
+        ]
+        
+        logger.info(
+            "Starting native SSH tunnel",
+            bastion=ssh_host,
+            remote_target=remote_bind,
+            local_port=local_port
+        )
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Wait for port to be listening
+        max_retries = 50 # 5 seconds max wait
+        ready = False
+        
+        try:
+            for _ in range(max_retries):
+                # Check if process died
+                if process.poll() is not None:
+                    _, stderr = process.communicate()
+                    raise ConnectionError(f"SSH process exited unexpectedly: {stderr.decode().strip()}")
+                
+                try:
+                    with socket.create_connection(('127.0.0.1', local_port), timeout=0.1):
+                        ready = True
+                        break
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    time.sleep(0.1)
+            
+            if not ready:
+                process.terminate()
+                raise ConnectionError("Timeout waiting for SSH tunnel port to listen")
+                
+            return NativeSSHTunnel(process, local_port, remote_bind)
+            
+        except Exception:
+            # Ensure cleanup if setup fails
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
+            raise
     
     @contextmanager
     def ssh_tunnel(self, connection_name: Optional[str] = None) -> Generator[int, None, None]:
@@ -148,7 +268,7 @@ class ConnectionManager:
             # Get connection configuration (from registry or fallback)
             conn_config_obj = self.get_connection_config(connection_name)
             ssh_config = conn_config_obj.ssh_tunnel
-
+            
             # Check if SSH is disabled
             if not ssh_config.get('enabled', True):
                 logger.info("SSH tunnel disabled, using direct connection",
@@ -163,107 +283,40 @@ class ConnectionManager:
                 yield None
                 return
 
-            logger.info("Establishing SSH tunnel",
-                       bastion_host=ssh_config.get('host', self.config.ssh.bastion_host),
-                       connection_name=connection_name or "default")
-            
-            # Create SSH tunnel using native SSH command (robust against threading/GIL issues)
-            # Find a random free port first
-            import socket
-            import subprocess
-            import signal
-            import os
-            
-            def get_free_port():
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('127.0.0.1', 0))
-                    return s.getsockname()[1]
-
-            local_port = get_free_port()
-            
-            # Construct SSH command
-            # ssh -i key_path -N -L local:remote:remote_port user@bastion
-            # -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null (for automation)
-            # -o ExitOnForwardFailure=yes
-            
-            ssh_key_path = ssh_config.get('private_key_path', self.config.ssh.bastion_key_path)
-            ssh_user = ssh_config.get('username', self.config.ssh.bastion_user)
+            # Determine actual SSH params (fallback logic)
             ssh_host = ssh_config.get('host', self.config.ssh.bastion_host)
+            ssh_user = ssh_config.get('username', self.config.ssh.bastion_user)
+            ssh_key_path = ssh_config.get('private_key_path', self.config.ssh.bastion_key_path)
             
-            remote_bind = f"{conn_config_obj.host}:{conn_config_obj.port}"
-            local_bind = f"{local_port}:{remote_bind}"
+            remote_host = conn_config_obj.host
+            remote_port = conn_config_obj.port
             
-            cmd = [
-                'ssh',
-                '-i', ssh_key_path,
-                '-N',  # Do not execute remote command
-                '-L', local_bind,
-                '-o', 'StrictHostKeyChecking=no',
-                '-o', 'UserKnownHostsFile=/dev/null',
-                '-o', 'ExitOnForwardFailure=yes',
-                '-o', 'ServerAliveInterval=15', # Keepalive
-                '-o', 'ServerAliveCountMax=3',
-                f"{ssh_user}@{ssh_host}"
-            ]
-            
-            logger.info(
-                "Starting native SSH tunnel",
-                cmd=" ".join(cmd), # Log command for debugging (redact sensitive info if needed?)
-                local_port=local_port,
-                remote_target=remote_bind
+            # Create native tunnel
+            tunnel = self._create_native_ssh_tunnel(
+                ssh_host=ssh_host,
+                ssh_user=ssh_user,
+                ssh_key_path=ssh_key_path,
+                remote_host=remote_host,
+                remote_port=remote_port
             )
             
-            # Start SSH process
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            # Store process for cleanup in finally block
-            self._ssh_tunnel = process 
+            self._ssh_tunnel = tunnel
+            logger.info("SSH tunnel established (MySQL source)", local_port=tunnel.local_bind_port)
             
-            # Wait for port to be listening
-            max_retries = 30 # 3 seconds max wait
-            ready = False
-            for _ in range(max_retries):
-                if process.poll() is not None:
-                    # Process died immediately
-                    stdout, stderr = process.communicate()
-                    raise ConnectionError(f"SSH process exited unexpectedly: {stderr.decode()}")
-                
-                try:
-                    with socket.create_connection(('127.0.0.1', local_port), timeout=0.1):
-                        ready = True
-                        break
-                except (ConnectionRefusedError, socket.timeout):
-                    time.sleep(0.1)
+            yield tunnel.local_bind_port
             
-            if not ready:
-                raise ConnectionError("Timeout waiting for SSH tunnel port to listen")
-            
-            logger.info(
-                "SSH tunnel established (native)",
-                local_port=local_port,
-                pid=process.pid
-            )
-            
-            yield local_port
+        except Exception as e:
+            if tunnel:
+                tunnel.stop()
+            error_msg = f"Failed to establish SSH tunnel: {e}"
+            # Only log if it wasn't already logged by the helper
+            if "SSH process exited" not in str(e):
+                logger.error(error_msg)
+            raise_connection_error("ssh_tunnel", error_msg)
             
         finally:
-            # Cleanup native process if it exists
             if self._ssh_tunnel:
-                try:
-                    # Check if process is still running
-                    if self._ssh_tunnel.poll() is None:
-                        logger.info(f"Terminating SSH tunnel (PID: {self._ssh_tunnel.pid})")
-                        self._ssh_tunnel.terminate()
-                        try:
-                            self._ssh_tunnel.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            self._ssh_tunnel.kill()
-                except Exception as e:
-                    logger.warning(f"Error cleaning up SSH tunnel: {e}")
-                
+                self._ssh_tunnel.stop()
                 self._ssh_tunnel = None
 
 
@@ -400,64 +453,44 @@ class ConnectionManager:
 
         tunnel = None
         try:
-            logger.info("Establishing Redshift SSH tunnel", bastion_host=self.config.redshift_ssh.host)
-
-            # Create SSH tunnel for Redshift
-            tunnel = SSHTunnelForwarder(
-                (self.config.redshift_ssh.host, 22),
-                ssh_username=self.config.redshift_ssh.username,
-                ssh_pkey=self.config.redshift_ssh.private_key_path,
-                remote_bind_address=(self.config.redshift.host, self.config.redshift.port),
-                local_bind_address=('127.0.0.1', self.config.redshift_ssh.local_port)
+            # Extract config
+            ssh_host = self.config.redshift_ssh.host
+            ssh_user = self.config.redshift_ssh.username
+            ssh_key_path = self.config.redshift_ssh.private_key_path
+            
+            remote_host = self.config.redshift.host
+            remote_port = self.config.redshift.port
+            
+            # NOTE: We ignore configured local_port and use random one for parallel safety
+            # If strict port binding is required in future, passing self.config.redshift_ssh.local_port is possible
+            
+            tunnel = self._create_native_ssh_tunnel(
+                ssh_host=ssh_host,
+                ssh_user=ssh_user,
+                ssh_key_path=ssh_key_path,
+                remote_host=remote_host,
+                remote_port=remote_port
             )
             
-            # Start tunnel with retry logic
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                try:
-                    tunnel.start()
-                    break
-                except Exception as e:
-                    if attempt == max_attempts - 1:
-                        raise
-                    logger.warning(
-                        "Redshift SSH tunnel attempt failed, retrying",
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
-                        error=str(e)
-                    )
-                    time.sleep(2 ** attempt)  # Exponential backoff
-            
-            local_port = tunnel.local_bind_port
             self._redshift_ssh_tunnel = tunnel
-            
-            logger.info(
-                "Redshift SSH tunnel established",
-                local_port=local_port,
-                remote_host=self.config.redshift.host,
-                remote_port=self.config.redshift.port
-            )
+            logger.info("Redshift SSH tunnel established", local_port=tunnel.local_bind_port)
             
             # Test connectivity
-            if not self._test_tunnel_connectivity(local_port):
+            if not self._test_tunnel_connectivity(tunnel.local_bind_port):
                 raise ConnectionError("Redshift SSH tunnel connectivity test failed")
             
-            yield local_port
+            yield tunnel.local_bind_port
             
         except Exception as e:
             if tunnel:
-                try:
-                    tunnel.stop()
-                except:
-                    pass
+                tunnel.stop()
             error_msg = f"Failed to establish Redshift SSH tunnel: {e}"
-            logger.error(error_msg, bastion_host=self.config.redshift_ssh.host)
+            logger.error(error_msg)
             raise_connection_error("redshift_ssh_tunnel", error_msg)
         
         finally:
-            if tunnel and tunnel.is_active:
-                tunnel.stop()
-                logger.info("Redshift SSH tunnel closed")
+            if self._redshift_ssh_tunnel:
+                self._redshift_ssh_tunnel.stop()
                 self._redshift_ssh_tunnel = None
     
     def _test_tunnel_connectivity(self, local_port: int) -> bool:
