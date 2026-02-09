@@ -383,6 +383,9 @@ else:
     # Server deployment: Direct connection (no tunnel needed)
     DBT_WITH_TUNNEL = f'''
     set -e
+    # Source .env from project root if it exists
+    [ -f {SYNC_TOOL_PATH}/.env ] && source {SYNC_TOOL_PATH}/.env
+
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
