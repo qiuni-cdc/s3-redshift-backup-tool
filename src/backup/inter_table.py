@@ -456,7 +456,16 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         
         finally:
             if cursor:
-                cursor.close()
+                try:
+                    # Consume any unread results to prevent "Unread result found" error
+                    while cursor.nextset():
+                        pass
+                except:
+                    pass
+                try:
+                    cursor.close()
+                except:
+                    pass
     
     def _process_batch_parallel(
         self, 
