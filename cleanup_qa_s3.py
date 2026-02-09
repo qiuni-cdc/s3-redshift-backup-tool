@@ -27,21 +27,20 @@ def cleanup_s3():
             aws_secret_access_key=secret_key,
         )
         
-        bucket_name = 'redshift-dw-qa-uniuni-com'
-        prefix = 'order_tracking_hybrid_dbt/incremental/'
         
         bucket = s3.Bucket(bucket_name)
 
-        # Cleanup incremental data
-        print(f"Cleaning up s3://{bucket_name}/{prefix} ...")
-        bucket.objects.filter(Prefix=prefix).delete()
-
-        # Cleanup watermarks
-        watermark_prefix = 'order_tracking_hybrid_dbt/watermarks/'
-        print(f"Cleaning up s3://{bucket_name}/{watermark_prefix} ...")
-        bucket.objects.filter(Prefix=watermark_prefix).delete()
+        # DEBUG: List all files under order_tracking_hybrid_dbt/
+        debug_prefix = 'order_tracking_hybrid_dbt/'
+        print(f"Listing ALL objects under: {debug_prefix}")
+        count = 0
+        for obj in bucket.objects.filter(Prefix=debug_prefix):
+             print(f"  Found: {obj.key}")
+             count += 1
+             obj.delete() # Re-enable delete for everything found
         
-        print("Cleanup complete.")
+        print(f"Total objects found/deleted: {count}")
+
 
         
     except Exception as e:
