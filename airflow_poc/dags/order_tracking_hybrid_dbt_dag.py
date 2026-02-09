@@ -384,12 +384,15 @@ else:
     DBT_WITH_TUNNEL = f'''
     set -e
     # Source .env from project root if it exists, exporting all vars
-    # CRITICAL: Strip Windows CRLF line endings to prevent "variable\r" errors
+    # CRITICAL: Strip Windows CRLF line endings to prevent "variable\\r" errors
     if [ -f {SYNC_TOOL_PATH}/.env ]; then
         echo "Loading .env from {SYNC_TOOL_PATH} (stripping CRLF)"
+        # Use simple temp file instead of process substitution to avoid syntax errors
+        tr -d '\\r' < {SYNC_TOOL_PATH}/.env > /tmp/env.sanitized
         set -a
-        source <(tr -d '\\r' < {SYNC_TOOL_PATH}/.env)
+        source /tmp/env.sanitized
         set +a
+        rm -f /tmp/env.sanitized
     fi
 
     cd {DBT_PROJECT_PATH}
