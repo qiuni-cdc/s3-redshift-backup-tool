@@ -335,9 +335,21 @@ DBT_LOCAL_PORT = '15439'  # Fixed local port for dbt SSH tunnel
 
 # Helper to load .env file into a dict (robust against CRLF and shell syntax issues)
 def load_env_vars(path):
+    # Try python-dotenv first for robust parsing
+    try:
+        from dotenv import dotenv_values
+        if os.path.exists(path):
+            print(f"Loading .env using python-dotenv from {path}")
+            config = dotenv_values(path)
+            # Filter out None values
+            return {k: v for k, v in config.items() if v is not None}
+    except ImportError:
+        print("python-dotenv not found, falling back to manual parsing")
+    
+    # Manual fallback
     env_vars = {}
     if os.path.exists(path):
-        print(f"Loading environment variables from {path}")
+        print(f"Loading environment variables manually from {path}")
         try:
             with open(path, 'r') as f:
                 for line in f:
@@ -354,6 +366,11 @@ def load_env_vars(path):
                         # Strip optional quotes and whitespace
                         k = k.strip()
                         v = v.strip()
+                        
+                        # basic inline comment handling: only if space-hash
+                        if ' #' in v:
+                            v = v.split(' #', 1)[0].strip()
+                            
                         if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
                             v = v[1:-1]
                         env_vars[k] = v
@@ -373,6 +390,12 @@ dbt_venv_bin = os.path.join(DBT_VENV_PATH, 'bin')
 if dbt_venv_bin not in dbt_env_vars.get('PATH', ''):
     print(f"Prepending {dbt_venv_bin} to PATH")
     dbt_env_vars['PATH'] = f"{dbt_venv_bin}:{dbt_env_vars.get('PATH', '')}"
+
+# DEBUG: Print loaded keys to confirm env vars are present (masking values)
+print("Debug: Loaded dbt_env_vars keys:")
+for k, v in dbt_env_vars.items():
+    if k.startswith('REDSHIFT') or k.startswith('DBT'):
+        print(f"  {k}: <len={len(str(v))}>")
 
 if DBT_USE_SSH_TUNNEL:
     # Local Docker testing: Use SSH tunnel
@@ -441,7 +464,8 @@ else:
     python3 -c "import socket, sys; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); result = s.connect_ex(('{REDSHIFT_HOST}', {REDSHIFT_PORT})); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
     
     echo "Checking dbt connection..."
-    dbt debug --profiles-dir . || echo "dbt debug failed (ignoring to attempt run)"
+    # Run dbt debug and ensure output is printed. Allow failure but capture output.
+    dbt debug --profiles-dir . || echo "dbt debug failed with exit code $?"
 '''
     DBT_CLEANUP_TUNNEL = ''
 
