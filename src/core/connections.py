@@ -173,8 +173,7 @@ class ConnectionManager:
                 ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
-                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port)),
-                set_keepalive=30.0  # Proper constructor-based KeepAlive
+                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port))
             )
             
             # Start tunnel with retry logic
@@ -278,8 +277,8 @@ class ConnectionManager:
                 'autocommit': False,
                 'raise_on_warnings': True,
                 'compress': True,  # Enable compression (Critical for MTU)
-                'use_pure': True   # Revert to Pure Python (More compatible)
-            }
+                'use_pure': True,  # Revert to Pure Python (More compatible)
+                'ssl_disabled': True # Explicitly disable SSL to avoid mode negotiation errors
             
             # Use safe timeout 
             conn_config['connection_timeout'] = 30  # Standard timeout

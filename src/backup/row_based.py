@@ -156,8 +156,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             # CRITICAL FIX: Reset S3 files list for accurate per-table tracking
             self._created_s3_files = []
 
-            # Create cursor with dictionary output
-            cursor = db_conn.cursor(dictionary=True, buffered=False)
+            # Create cursor with buffered=True to fix packet parsing issues with compression
+            cursor = db_conn.cursor(dictionary=True, buffered=True)
             
             # Validate table structure
             if not self.validate_table_exists(cursor, table_name):

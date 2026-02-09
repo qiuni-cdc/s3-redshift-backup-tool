@@ -294,7 +294,7 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         """
         cursor = None
         try:
-            # Create cursor with dictionary output
+            # Create cursor with buffered=True to fix packet parsing issues with compression
             cursor = db_conn.cursor(dictionary=True, buffered=True)
             
             # Validate table structure
@@ -394,8 +394,8 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             while True:
                 batch_start_time = time.time()
                 
-                # Fetch batch
-                batch_data = cursor.fetchmany(1000)
+                # Fetch batch (Extra small to avoid driver parsing bugs)
+                batch_data = cursor.fetchmany(500)
                 if not batch_data:
                     break
                 

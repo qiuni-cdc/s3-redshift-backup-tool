@@ -463,6 +463,15 @@ class BaseBackupStrategy(ABC):
                     timestamp_format = tbl_cfg.get('timestamp_format', timestamp_format)
                     id_col = tbl_cfg.get('cdc_id_column', tbl_cfg.get('primary_key', id_col))
                     break
+        
+        # P1 FIX: Handle string representation of list (e.g. from env vars or loose config)
+        if isinstance(id_col, str) and id_col.strip().startswith('[') and id_col.strip().endswith(']'):
+            try:
+                import ast
+                id_col = ast.literal_eval(id_col)
+                self.logger.logger.info(f"Parsed stringified composite key: {id_col}")
+            except Exception as e:
+                self.logger.logger.warning(f"Failed to parse composite key string: {id_col}, error: {e}")
 
         # Build WHERE conditions based on timestamp format
         if timestamp_format == 'unix':

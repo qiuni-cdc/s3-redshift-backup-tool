@@ -542,9 +542,9 @@ class ConnectionRegistry:
             'sql_mode': 'TRADITIONAL',
             'raise_on_warnings': True,
             'raise_on_warnings': True,
-            'compress': True,       # Enable compression (Critical for MTU/C-Ext stability)
-            'use_pure': False,      # Use C-Extension (Performance + Reliability)
-            'auth_plugin': 'mysql_native_password', # Prevent handshake hang
+            'compress': True,       # Enable compression (Critical for MTU)
+            'use_pure': True,       # Use Pure Python driver (More compatible)
+            'ssl_disabled': True,   # Explicitly disable SSL to avoid mode negotiation errors
             'connection_timeout': 30 # Standard timeout
         }
         
@@ -769,7 +769,6 @@ class ConnectionRegistry:
             'remote_bind_address': (config.host, config.port),
             'local_bind_address': ('127.0.0.1', 0),  # Auto-assign local port
             'logger': ssh_logger,
-            'set_keepalive': 30.0,  # Keep connection alive
             'compression': True,  # Enable SSH compression
             **auth_params
         }
