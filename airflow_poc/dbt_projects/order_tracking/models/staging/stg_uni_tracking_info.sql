@@ -4,7 +4,10 @@
         unique_key='order_id',
         incremental_strategy='merge',
         dist='order_id',
-        sort='update_time'
+        sort='update_time',
+        incremental_predicates=[
+            "DBT_INTERNAL_DEST.update_time > (select coalesce(max(update_time), 0) - 604800 from {{ this }})"
+        ]
     )
 }}
 
