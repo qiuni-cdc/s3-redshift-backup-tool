@@ -384,10 +384,11 @@ else:
     DBT_WITH_TUNNEL = f'''
     set -e
     # Source .env from project root if it exists, exporting all vars
+    # CRITICAL: Strip Windows CRLF line endings to prevent "variable\r" errors
     if [ -f {SYNC_TOOL_PATH}/.env ]; then
-        echo "Loading .env from {SYNC_TOOL_PATH}"
+        echo "Loading .env from {SYNC_TOOL_PATH} (stripping CRLF)"
         set -a
-        source {SYNC_TOOL_PATH}/.env
+        source <(tr -d '\\r' < {SYNC_TOOL_PATH}/.env)
         set +a
     fi
 
@@ -396,6 +397,9 @@ else:
     echo "Using direct Redshift connection (no SSH tunnel)"
     export DBT_REDSHIFT_HOST={REDSHIFT_HOST}
     export DBT_REDSHIFT_PORT={REDSHIFT_PORT}
+    
+    echo "Diagnosing network connectivity to {REDSHIFT_HOST}:{REDSHIFT_PORT}..."
+    python3 -c "import socket, sys; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); result = s.connect_ex(('{REDSHIFT_HOST}', {REDSHIFT_PORT})); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
     
     echo "Checking dbt connection..."
     dbt debug --profiles-dir . || echo "dbt debug failed (ignoring to attempt run)"
