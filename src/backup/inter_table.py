@@ -395,8 +395,12 @@ class InterTableBackupStrategy(BaseBackupStrategy):
             while True:
                 batch_start_time = time.time()
                 
-                # Fetch batch (Extra small to avoid driver parsing bugs)
-                batch_data = cursor.fetchmany(500)
+                # Use configured chunk size (default to 10000 if None)
+                # This ensures we respect the batch_size configuration for S3 uploads
+                fetch_size = chunk_size if chunk_size else 10000
+                
+                # Fetch batch
+                batch_data = cursor.fetchmany(fetch_size)
                 if not batch_data:
                     break
                 
