@@ -223,8 +223,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -p {PIPELINE_NAME} \
             -t {TABLES['ecs']['full_name']} \
             --json-output /tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
-            --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --limit 50000
+            --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES}
         ''',
         dag=dag
     )
@@ -244,8 +243,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -p {PIPELINE_NAME} \
             -t {TABLES['uti']['full_name']} \
             --json-output /tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
-            --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --limit 50000
+            --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES}
         ''',
         dag=dag
     )
@@ -265,8 +263,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -p {PIPELINE_NAME} \
             -t {TABLES['uts']['full_name']} \
             --json-output /tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
-            --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --limit 50000
+            --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES}
         ''',
         dag=dag
     )
