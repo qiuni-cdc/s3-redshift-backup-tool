@@ -6,7 +6,7 @@ pipeline:
   name: "order_tracking_hybrid_dbt"
   description: "15-min time-based extraction with dbt deduplication"
   source: "US_PROD_RO_SSH"
-  target: "redshift_default"
+  target: "redshift_default_direct"
   s3_config: "s3_qa" 
   version: "2.0.0"
   sync_frequency: "*/15 * * * *"

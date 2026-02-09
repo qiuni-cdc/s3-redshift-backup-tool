@@ -667,6 +667,7 @@ class GeminiRedshiftLoader:
         """Context manager for Redshift database connections"""
         try:
             # Use Redshift SSH tunnel if configured and not None
+            # Use Redshift SSH tunnel if configured and not None
             if (hasattr(self.config, 'redshift_ssh') and
                 self.config.redshift_ssh is not None and
                 self.config.redshift_ssh.host and
