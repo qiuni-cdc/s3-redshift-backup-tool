@@ -333,8 +333,45 @@ REDSHIFT_HOST = os.environ.get('REDSHIFT_HOST', 'redshift-dw.qa.uniuni.com')
 REDSHIFT_PORT = os.environ.get('REDSHIFT_PORT', '5439')
 DBT_LOCAL_PORT = '15439'  # Fixed local port for dbt SSH tunnel
 
+# Helper to load .env file into a dict (robust against CRLF and shell syntax issues)
+def load_env_vars(path):
+    env_vars = {}
+    if os.path.exists(path):
+        print(f"Loading environment variables from {path}")
+        try:
+            with open(path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#'):
+                        continue
+                    # Remove 'export ' if present
+                    if line.startswith('export '):
+                        line = line[7:].strip()
+                    # Split on first =
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        # Strip optional quotes and whitespace
+                        k = k.strip()
+                        v = v.strip()
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                            v = v[1:-1]
+                        env_vars[k] = v
+        except Exception as e:
+            print(f"Warning: Failed to load .env file: {e}")
+    else:
+        print(f"Warning: .env file not found at {path}")
+    return env_vars
+
+# Load project .env
+dbt_env_vars = load_env_vars(os.path.join(SYNC_TOOL_PATH, '.env'))
+
 if DBT_USE_SSH_TUNNEL:
     # Local Docker testing: Use SSH tunnel
+    # In tunnel mode, profiles.yml defaults to localhost:15439
+    # We don't need to override DBT_REDSHIFT_HOST/PORT here as they default correctly in profiles.yml
+    # But we DO need the credentials from .env
+    
     DBT_WITH_TUNNEL = f'''
     set -e
     cd {DBT_PROJECT_PATH}
@@ -381,25 +418,16 @@ if DBT_USE_SSH_TUNNEL:
 '''
 else:
     # Server deployment: Direct connection (no tunnel needed)
+    
+    # Inject Direct Connection settings into the env vars dict
+    dbt_env_vars['DBT_REDSHIFT_HOST'] = REDSHIFT_HOST
+    dbt_env_vars['DBT_REDSHIFT_PORT'] = REDSHIFT_PORT
+    
     DBT_WITH_TUNNEL = f'''
     set -e
-    # Source .env from project root if it exists, exporting all vars
-    # CRITICAL: Strip Windows CRLF line endings to prevent "variable\\r" errors
-    if [ -f {SYNC_TOOL_PATH}/.env ]; then
-        echo "Loading .env from {SYNC_TOOL_PATH} (stripping CRLF)"
-        # Use simple temp file instead of process substitution to avoid syntax errors
-        tr -d '\\r' < {SYNC_TOOL_PATH}/.env > /tmp/env.sanitized
-        set -a
-        source /tmp/env.sanitized
-        set +a
-        rm -f /tmp/env.sanitized
-    fi
-
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
-    export DBT_REDSHIFT_HOST={REDSHIFT_HOST}
-    export DBT_REDSHIFT_PORT={REDSHIFT_PORT}
     
     echo "Diagnosing network connectivity to {REDSHIFT_HOST}:{REDSHIFT_PORT}..."
     python3 -c "import socket, sys; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); result = s.connect_ex(('{REDSHIFT_HOST}', {REDSHIFT_PORT})); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
@@ -420,6 +448,7 @@ dbt_staging = BashOperator(
     dbt run --select staging --profiles-dir .
     echo "Staging complete"
 ''' + DBT_CLEANUP_TUNNEL,
+    env=dbt_env_vars,  # Pass loaded environment variables (including credentials)
     dag=dag
 )
 
@@ -434,6 +463,7 @@ dbt_staging = BashOperator(
 #     dbt run --select int_sequence_gaps --profiles-dir .
 #     echo "Gap detection complete"
 # ''' + DBT_CLEANUP_TUNNEL,
+#     env=dbt_env_vars,
 #     dag=dag
 # )
 
@@ -448,6 +478,7 @@ dbt_test = BashOperator(
     dbt test --store-failures --profiles-dir .
     echo "Tests complete"
 ''' + DBT_CLEANUP_TUNNEL,
+    env=dbt_env_vars,  # Pass loaded environment variables
     dag=dag
 )
 
