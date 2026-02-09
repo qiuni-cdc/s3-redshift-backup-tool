@@ -714,7 +714,7 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
     FROM uni_tracking_spath uts
-    WHERE uts.code = 202 AND traceSeq &lt; 5
+    WHERE uts.code = 202
 ) AS time_202
     ON uti.order_id = time_202.order_id
 LEFT JOIN (
