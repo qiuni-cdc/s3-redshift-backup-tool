@@ -28,26 +28,19 @@ def cleanup_s3():
             region_name=region
         )
         
-        bucket_name = 'redshift-dw-qa-uniuni-com'
-        prefix = 'order_tracking_local_test/incremental/'
         
         bucket = s3.Bucket(bucket_name)
 
-        print(f"Listing objects under: {prefix}")
-        count = 0
-        for obj in bucket.objects.filter(Prefix=prefix):
-            print(f"  Found: {obj.key}")
-            count += 1
-            #bj.delete() # Commented out for debugging
-        
-        print(f"Total objects found: {count}")
+        # Cleanup incremental data
+        print(f"Cleaning up s3://{bucket_name}/{prefix} ...")
+        bucket.objects.filter(Prefix=prefix).delete()
 
-        # watermarks cleanup
-        watermark_prefix = 'order_tracking_local_test/watermarks/'
-        print(f"Listing watermarks under: {watermark_prefix}")
-        for obj in bucket.objects.filter(Prefix=watermark_prefix):
-             print(f"  Watermark: {obj.key}")
-             #obj.delete()
+        # Cleanup watermarks
+        watermark_prefix = 'order_tracking_hybrid_dbt/watermarks/'
+        print(f"Cleaning up s3://{bucket_name}/{watermark_prefix} ...")
+        bucket.objects.filter(Prefix=watermark_prefix).delete()
+        
+        print("Cleanup complete.")
 
         
     except Exception as e:
