@@ -27,7 +27,7 @@ def cleanup_s3():
             aws_secret_access_key=secret_key,
         )
         
-        
+        bucket_name = 'redshift-dw-qa-uniuni-com'
         bucket = s3.Bucket(bucket_name)
 
         # DEBUG: List all files under order_tracking_hybrid_dbt/
