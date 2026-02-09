@@ -146,39 +146,33 @@ def calculate_sync_window(**context):
         key='return_value'
     )
     
-    mysql_now = None
-    drift_seconds = 0
+    # Use Airflow's logical execution date (end of the interval) as the anchor
+    # valid_to = execution_date + schedule_interval (approx data_interval_end)
+    # Ideally use data_interval_end from context if available (Airflow 2.2+)
     
+    # Fallback for compatibility or if specific context keys are missing
     try:
-        if drift_output:
-            data = json.loads(drift_output)
-            if data.get('status') == 'success':
-                mysql_now = int(data.get('mysql_now'))
-                drift_seconds = int(data.get('drift_seconds', 0))
-                
-                print(f"Time Comparison (from check_drift):")
-                print(f"  MySQL server:   {mysql_now} ({datetime.fromtimestamp(mysql_now)})")
-                print(f"  Drift:          {drift_seconds} seconds")
-                
-                # Check drift
-                if abs(drift_seconds) > TIME_DRIFT_THRESHOLD_SECONDS:
-                    print(f"  WARNING: Time drift exceeds threshold ({TIME_DRIFT_THRESHOLD_SECONDS}s)!")
-                
-                # Push individually for summary task
-                context['task_instance'].xcom_push(key='time_drift_seconds', value=drift_seconds)
-                context['task_instance'].xcom_push(key='mysql_server_time', value=mysql_now)
-            else:
-                print(f"Error from check_drift: {data.get('error')}")
+        # data_interval_end is the end of the schedule period (the "run time" in modern terms)
+        end_date = context.get('data_interval_end') 
+        if not end_date:
+            # Fallback to execution_date (start of interval) + 15 mins
+            end_date = context.get('execution_date') + timedelta(minutes=15)
+            
+        mysql_now = int(end_date.timestamp())
+        print(f"Using Logical Date (data_interval_end): {end_date} ({mysql_now})")
     except Exception as e:
-        print(f"Failed to parse check_drift output: {e}\nOutput was: {drift_output}")
-
-    if mysql_now is None:
+        print(f"Error getting logical date, defaulting to current time: {e}")
         mysql_now = int(datetime.now().timestamp())
-        print("Warning: Using Airflow time (drift check parsing failed)")
 
     buffer = BUFFER_MINUTES * 60
     lookback = INCREMENTAL_LOOKBACK_MINUTES * 60
 
+    # For a run scheduled at 10:15 (covering 10:00-10:15):
+    # data_interval_end = 10:15
+    # to_unix = 10:15 - buffer (5m) = 10:10
+    # from_unix = 10:10 - lookback (15m) = 9:55
+    # This ensures 15m effective window, shifted by buffer.
+    
     from_unix = mysql_now - lookback - buffer
     to_unix = mysql_now - buffer
 
