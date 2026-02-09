@@ -499,10 +499,10 @@ else:
     python3 -c "import socket, sys; host='{dbt_env_vars['DBT_REDSHIFT_HOST']}'; port={dbt_env_vars['DBT_REDSHIFT_PORT']}; print(f'Connecting to {{host}}:{{port}}...'); s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(10); result = s.connect_ex((host, int(port))); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
     
     echo "Checking dbt connection (with --debug)..."
-    # Run dbt debug and redirect to file to ensure capture, then cat the file
-    dbt debug --profiles-dir . --debug > dbt_debug.log 2>&1 || (echo "dbt debug failed with exit code $?"; cat dbt_debug.log; exit 1)
+    # Run dbt debug and redirect to file in /tmp to avoid permission issues
+    dbt debug --profiles-dir . --debug > /tmp/dbt_debug.log 2>&1 || (echo "dbt debug failed with exit code $?"; cat /tmp/dbt_debug.log; exit 1)
     echo "dbt debug success output:"
-    cat dbt_debug.log
+    cat /tmp/dbt_debug.log
 '''
     DBT_CLEANUP_TUNNEL = ''
 
