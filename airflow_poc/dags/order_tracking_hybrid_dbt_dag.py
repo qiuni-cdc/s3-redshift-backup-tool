@@ -451,21 +451,50 @@ else:
     # Server deployment: Direct connection (no tunnel needed)
     
     # Inject Direct Connection settings into the env vars dict
-    dbt_env_vars['DBT_REDSHIFT_HOST'] = REDSHIFT_HOST
-    dbt_env_vars['DBT_REDSHIFT_PORT'] = REDSHIFT_PORT
+    # Prefer values from loaded .env if available, otherwise fallback to global constants
+    dbt_env_vars['DBT_REDSHIFT_HOST'] = dbt_env_vars.get('REDSHIFT_HOST', REDSHIFT_HOST)
+    dbt_env_vars['DBT_REDSHIFT_PORT'] = dbt_env_vars.get('REDSHIFT_PORT', REDSHIFT_PORT)
+    
+    # CRITICAL: Map credentials to what profiles.yml expects
+    # profiles.yml uses: REDSHIFT_QA_USER, REDSHIFT_QA_PASSWORD
+    # Sources might be: REDSHIFT_USER, REDSHIFT_QA_USER, REDSHIFT_USERNAME
+    if 'REDSHIFT_QA_USER' not in dbt_env_vars:
+        # Try fallbacks
+        fallback_user = dbt_env_vars.get('REDSHIFT_USER') or dbt_env_vars.get('REDSHIFT_USERNAME') or os.environ.get('REDSHIFT_USER')
+        if fallback_user:
+            print(f"Mapping REDSHIFT_QA_USER from fallback: {fallback_user[:3]}***")
+            dbt_env_vars['REDSHIFT_QA_USER'] = fallback_user
+            
+    if 'REDSHIFT_QA_PASSWORD' not in dbt_env_vars:
+         # Try fallbacks
+        fallback_pass = dbt_env_vars.get('REDSHIFT_PASSWORD') or dbt_env_vars.get('REDSHIFT_PWD') or os.environ.get('REDSHIFT_PASSWORD')
+        if fallback_pass:
+            print("Mapping REDSHIFT_QA_PASSWORD from fallback")
+            dbt_env_vars['REDSHIFT_QA_PASSWORD'] = fallback_pass
     
     DBT_WITH_TUNNEL = f'''
     set -e
+    export PYTHONUNBUFFERED=1
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
+
+    echo "--- DEBUG INFO ---"
+    echo "PWD: $(pwd)"
+    echo "DBT Version:"
+    dbt --version || echo "Failed to get dbt version"
+    echo "Listing Profile:"
+    ls -la profiles.yml || echo "profiles.yml not found"
+    echo "Environment Variables (Masked):"
+    env | grep -E "REDSHIFT|DBT|HOST|PORT|USER" | sed 's/PASSWORD=*/PASSWORD=******/' | sort
+    echo "------------------"
     
-    echo "Diagnosing network connectivity to {REDSHIFT_HOST}:{REDSHIFT_PORT}..."
-    python3 -c "import socket, sys; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); result = s.connect_ex(('{REDSHIFT_HOST}', {REDSHIFT_PORT})); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
+    echo "Diagnosing network connectivity to {dbt_env_vars['DBT_REDSHIFT_HOST']}:{dbt_env_vars['DBT_REDSHIFT_PORT']}..."
+    python3 -c "import socket, sys; host='{dbt_env_vars['DBT_REDSHIFT_HOST']}'; port={dbt_env_vars['DBT_REDSHIFT_PORT']}; print(f'Connecting to {{host}}:{{port}}...'); s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(10); result = s.connect_ex((host, int(port))); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
     
-    echo "Checking dbt connection..."
-    # Run dbt debug and ensure output is printed. Allow failure but capture output.
-    dbt debug --profiles-dir . || echo "dbt debug failed with exit code $?"
+    echo "Checking dbt connection (with --debug)..."
+    # Run dbt debug with --debug to force output, capture stdout/stderr together
+    dbt debug --profiles-dir . --debug 2>&1 || echo "dbt debug failed with exit code $?"
 '''
     DBT_CLEANUP_TUNNEL = ''
 
