@@ -25,9 +25,10 @@ def cleanup_s3():
             's3',
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
-            region_name=region
         )
         
+        bucket_name = 'redshift-dw-qa-uniuni-com'
+        prefix = 'order_tracking_hybrid_dbt/incremental/'
         
         bucket = s3.Bucket(bucket_name)
 
