@@ -475,6 +475,7 @@ else:
     DBT_WITH_TUNNEL = f'''
     set -e
     export PYTHONUNBUFFERED=1
+    export DBT_LOG_PATH=/tmp  # Fix: prevent dbt from trying to write to read-only project dir
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
