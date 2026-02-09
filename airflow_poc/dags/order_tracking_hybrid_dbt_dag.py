@@ -383,14 +383,22 @@ else:
     # Server deployment: Direct connection (no tunnel needed)
     DBT_WITH_TUNNEL = f'''
     set -e
-    # Source .env from project root if it exists
-    [ -f {SYNC_TOOL_PATH}/.env ] && source {SYNC_TOOL_PATH}/.env
+    # Source .env from project root if it exists, exporting all vars
+    if [ -f {SYNC_TOOL_PATH}/.env ]; then
+        echo "Loading .env from {SYNC_TOOL_PATH}"
+        set -a
+        source {SYNC_TOOL_PATH}/.env
+        set +a
+    fi
 
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
     export DBT_REDSHIFT_HOST={REDSHIFT_HOST}
     export DBT_REDSHIFT_PORT={REDSHIFT_PORT}
+    
+    echo "Checking dbt connection..."
+    dbt debug --profiles-dir . || echo "dbt debug failed (ignoring to attempt run)"
 '''
     DBT_CLEANUP_TUNNEL = ''
 
