@@ -294,8 +294,9 @@ class InterTableBackupStrategy(BaseBackupStrategy):
         """
         cursor = None
         try:
-            # Create cursor with buffered=True to fix packet parsing issues with compression
-            cursor = db_conn.cursor(dictionary=True, buffered=True)
+            # Create cursor with buffered=False (Unbuffered) to stream results and avoid OOM
+            # Note: safe to use unbuffered now that compress=False (avoids driver bug)
+            cursor = db_conn.cursor(dictionary=True, buffered=False)
             
             # Validate table structure
             if not self.validate_table_exists(cursor, table_name):
