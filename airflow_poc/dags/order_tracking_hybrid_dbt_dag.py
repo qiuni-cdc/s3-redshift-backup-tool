@@ -476,6 +476,7 @@ else:
     set -e
     export PYTHONUNBUFFERED=1
     export DBT_LOG_PATH=/tmp  # Fix: prevent dbt from trying to write to read-only project dir
+    export DBT_TARGET_PATH=/tmp/target # Fix: prevent dbt from writing compiled artifacts to read-only project dir
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
