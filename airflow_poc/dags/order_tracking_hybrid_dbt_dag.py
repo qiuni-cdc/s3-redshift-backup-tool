@@ -368,6 +368,12 @@ def load_env_vars(path):
 dbt_env_vars = os.environ.copy()
 dbt_env_vars.update(load_env_vars(os.path.join(SYNC_TOOL_PATH, '.env')))
 
+# Explicitly add dbt venv to PATH to ensure dbt is found
+dbt_venv_bin = os.path.join(DBT_VENV_PATH, 'bin')
+if dbt_venv_bin not in dbt_env_vars.get('PATH', ''):
+    print(f"Prepending {dbt_venv_bin} to PATH")
+    dbt_env_vars['PATH'] = f"{dbt_venv_bin}:{dbt_env_vars.get('PATH', '')}"
+
 if DBT_USE_SSH_TUNNEL:
     # Local Docker testing: Use SSH tunnel
     # In tunnel mode, profiles.yml defaults to localhost:15439
