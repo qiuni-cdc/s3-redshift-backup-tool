@@ -31,11 +31,16 @@ def cleanup_s3():
         bucket_name = 'redshift-dw-qa-uniuni-com'
         prefix = 'order_tracking_local_test/incremental/'
         
-        print(f"Cleaning up s3://{bucket_name}/{prefix} ...")
-        
         bucket = s3.Bucket(bucket_name)
-        # Delete all objects with the prefix
+        
+        # Cleanup incremental data
+        print(f"Cleaning up s3://{bucket_name}/{prefix} ...")
         bucket.objects.filter(Prefix=prefix).delete()
+
+        # Cleanup watermarks
+        watermark_prefix = 'order_tracking_local_test/watermarks/'
+        print(f"Cleaning up s3://{bucket_name}/{watermark_prefix} ...")
+        bucket.objects.filter(Prefix=watermark_prefix).delete()
         
         print("Cleanup complete.")
         
