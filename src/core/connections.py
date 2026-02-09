@@ -167,13 +167,15 @@ class ConnectionManager:
                        bastion_host=ssh_config.get('host', self.config.ssh.bastion_host),
                        connection_name=connection_name or "default")
             
-            # Create SSH tunnel
+            # Create SSH tunnel with forced random port to support parallel execution
+            # Ignoring ssh_config['local_port'] to avoid "Address already in use" errors individually
+            # when running multiple tasks (extraction) concurrently.
             tunnel = SSHTunnelForwarder(
                 (ssh_config.get('host', self.config.ssh.bastion_host), 22),
                 ssh_username=ssh_config.get('username', self.config.ssh.bastion_user),
                 ssh_pkey=ssh_config.get('private_key_path', self.config.ssh.bastion_key_path),
                 remote_bind_address=(conn_config_obj.host, conn_config_obj.port),
-                local_bind_address=('127.0.0.1', ssh_config.get('local_port', self.config.ssh.local_port)),
+                local_bind_address=('127.0.0.1', 0),  # FORCE RANDOM PORT
                 set_keepalive=10.0  # Send keepalive every 10 seconds to prevent drop
             )
             
@@ -200,7 +202,7 @@ class ConnectionManager:
             self._ssh_tunnel = tunnel
             
             logger.info(
-                "SSH tunnel established",
+                "SSH tunnel established (parallel-safe)",
                 local_port=local_port,
                 remote_host=self.config.database.host,
                 remote_port=self.config.database.port,
