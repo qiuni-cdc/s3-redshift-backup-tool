@@ -6,7 +6,7 @@
         dist='order_id',
         sort='update_time',
         incremental_predicates=[
-            "DBT_INTERNAL_DEST.update_time > (select coalesce(max(update_time), 0) - 604800 from {{ this }})"
+            "DBT_INTERNAL_DEST.update_time > (select coalesce(max(update_time), 0) - 604800 from " ~ this ~ ")"
         ]
     )
 }}
