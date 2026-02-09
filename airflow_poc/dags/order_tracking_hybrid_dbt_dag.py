@@ -479,6 +479,12 @@ else:
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
 
+    echo "--- ENVIRONMENT CHECK ---"
+    echo "Ensuring compatible dbt versions..."
+    # Force dbt-core to match dbt-redshift 1.8.x to fix "Not compatible" error
+    # dbt-core 1.9.0-b2 is incompatible with dbt-redshift 1.8.0
+    pip install --disable-pip-version-check "dbt-core>=1.8.0,<1.9.0" "dbt-redshift>=1.8.0,<1.9.0" || echo "Warning: Failed to install dbt versions"
+    
     echo "--- DEBUG INFO ---"
     echo "PWD: $(pwd)"
     echo "DBT Version:"
@@ -493,8 +499,10 @@ else:
     python3 -c "import socket, sys; host='{dbt_env_vars['DBT_REDSHIFT_HOST']}'; port={dbt_env_vars['DBT_REDSHIFT_PORT']}; print(f'Connecting to {{host}}:{{port}}...'); s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(10); result = s.connect_ex((host, int(port))); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
     
     echo "Checking dbt connection (with --debug)..."
-    # Run dbt debug with --debug to force output, capture stdout/stderr together
-    dbt debug --profiles-dir . --debug 2>&1 || echo "dbt debug failed with exit code $?"
+    # Run dbt debug and redirect to file to ensure capture, then cat the file
+    dbt debug --profiles-dir . --debug > dbt_debug.log 2>&1 || (echo "dbt debug failed with exit code $?"; cat dbt_debug.log; exit 1)
+    echo "dbt debug success output:"
+    cat dbt_debug.log
 '''
     DBT_CLEANUP_TUNNEL = ''
 
