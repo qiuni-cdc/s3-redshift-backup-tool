@@ -364,7 +364,9 @@ def load_env_vars(path):
     return env_vars
 
 # Load project .env
-dbt_env_vars = load_env_vars(os.path.join(SYNC_TOOL_PATH, '.env'))
+# CRITICAL: Start with current environment to preserve PATH, HOME, etc.
+dbt_env_vars = os.environ.copy()
+dbt_env_vars.update(load_env_vars(os.path.join(SYNC_TOOL_PATH, '.env')))
 
 if DBT_USE_SSH_TUNNEL:
     # Local Docker testing: Use SSH tunnel
