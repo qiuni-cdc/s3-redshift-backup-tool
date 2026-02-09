@@ -117,59 +117,17 @@ dag = DAG(
 # TASK 1: CHECK TIME DRIFT BETWEEN AIRFLOW AND MYSQL
 # ============================================================================
 
-def check_time_drift(**context):
-    """
-    Compare Airflow server time vs MySQL server time.
-    Uses MySQL time for sync window to ensure accuracy.
-    Uses ConnectionManager to support SSH tunneling if configured.
-    """
-    from src.config.settings import AppConfig
-    from src.core.connections import ConnectionManager
-    
-    # Initialize connection manager (loads config from env vars)
-    config = AppConfig.load()
-    cm = ConnectionManager(config)
-
-    try:
-        # Use database_session() which automatically handles SSH if configured
-        with cm.database_session() as conn:
-            with conn.cursor() as cursor:
-                # Get MySQL server's current Unix timestamp
-                cursor.execute("SELECT UNIX_TIMESTAMP() as mysql_now")
-                result = cursor.fetchone()
-                mysql_now = int(result[0])
-
-                # Get Airflow server's current Unix timestamp
-                airflow_now = int(datetime.now().timestamp())
-
-                # Calculate drift
-                drift_seconds = airflow_now - mysql_now
-
-                print(f"Time Comparison:")
-                print(f"  Airflow server: {airflow_now} ({datetime.fromtimestamp(airflow_now)})")
-                print(f"  MySQL server:   {mysql_now} ({datetime.fromtimestamp(mysql_now)})")
-                print(f"  Drift:          {drift_seconds} seconds")
-
-                # Store for downstream tasks
-                context['task_instance'].xcom_push(key='time_drift_seconds', value=drift_seconds)
-                context['task_instance'].xcom_push(key='mysql_server_time', value=mysql_now)
-
-                # Alert if drift exceeds threshold
-                if abs(drift_seconds) > TIME_DRIFT_THRESHOLD_SECONDS:
-                    print(f"  WARNING: Time drift exceeds threshold ({TIME_DRIFT_THRESHOLD_SECONDS}s)!")
-
-                return {'mysql_now': mysql_now, 'drift': drift_seconds}
-                
-    except Exception as e:
-        print(f"ERROR: Failed to check time drift: {e}")
-        # Fail the task so we don't proceed with potentially bad time windows
-        raise e
-    finally:
-         cm.close_all_connections()
-
-check_drift = PythonOperator(
+# Replaced with BashOperator to run in project virtualenv (avoids Airflow environment conflicts)
+check_drift = BashOperator(
     task_id='check_time_drift',
-    python_callable=check_time_drift,
+    bash_command=f'''
+    set -e
+    cd {SYNC_TOOL_PATH}
+    [ -f venv/bin/activate ] && source venv/bin/activate
+    # Run standalone script which handles SSH tunnel robustly in venv
+    python src/cli/check_time_drift.py
+    ''',
+    do_xcom_push=True,  # Capture JSON output from stdout
     dag=dag
 )
 
@@ -179,17 +137,44 @@ check_drift = PythonOperator(
 
 def calculate_sync_window(**context):
     """
-    Calculate time window using MySQL server time.
+    Calculate time window using MySQL server time from check_drift task.
     15-min lookback + 5-min buffer = 20 min total coverage.
     """
-    mysql_now = context['task_instance'].xcom_pull(
+    # Parse JSON output from Icheck_time_drift BashOperator
+    drift_output = context['task_instance'].xcom_pull(
         task_ids='check_time_drift',
-        key='mysql_server_time'
+        key='return_value'
     )
+    
+    mysql_now = None
+    drift_seconds = 0
+    
+    try:
+        if drift_output:
+            data = json.loads(drift_output)
+            if data.get('status') == 'success':
+                mysql_now = int(data.get('mysql_now'))
+                drift_seconds = int(data.get('drift_seconds', 0))
+                
+                print(f"Time Comparison (from check_drift):")
+                print(f"  MySQL server:   {mysql_now} ({datetime.fromtimestamp(mysql_now)})")
+                print(f"  Drift:          {drift_seconds} seconds")
+                
+                # Check drift
+                if abs(drift_seconds) > TIME_DRIFT_THRESHOLD_SECONDS:
+                    print(f"  WARNING: Time drift exceeds threshold ({TIME_DRIFT_THRESHOLD_SECONDS}s)!")
+                
+                # Push individually for summary task
+                context['task_instance'].xcom_push(key='time_drift_seconds', value=drift_seconds)
+                context['task_instance'].xcom_push(key='mysql_server_time', value=mysql_now)
+            else:
+                print(f"Error from check_drift: {data.get('error')}")
+    except Exception as e:
+        print(f"Failed to parse check_drift output: {e}\nOutput was: {drift_output}")
 
     if mysql_now is None:
         mysql_now = int(datetime.now().timestamp())
-        print("Warning: Using Airflow time (drift check unavailable)")
+        print("Warning: Using Airflow time (drift check parsing failed)")
 
     buffer = BUFFER_MINUTES * 60
     lookback = INCREMENTAL_LOOKBACK_MINUTES * 60
