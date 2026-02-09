@@ -276,8 +276,8 @@ class ConnectionManager:
                 'database': conn_config_obj.database,
                 'autocommit': False,
                 'raise_on_warnings': True,
-                'compress': True,  # Enable compression (Critical for MTU)
-                'use_pure': False, # Switch to C-Extension (More robust socket handling)
+                'compress': False, # Disable compression to avoid parser bugs/hangs
+                'use_pure': True,  # Revert to Pure Python (More compatible)
                 'ssl_disabled': True # Explicitly disable SSL to avoid mode negotiation errors
             }
             
