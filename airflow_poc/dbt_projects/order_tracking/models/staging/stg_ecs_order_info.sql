@@ -11,8 +11,6 @@
     {%- endif -%}
 {%- endif -%}
 
-{%- do log("DEBUG: Calculated cutoff_time for " ~ this ~ " is: " ~ cutoff_time, info=True) -%}
-
 {{
     config(
         materialized='incremental',
