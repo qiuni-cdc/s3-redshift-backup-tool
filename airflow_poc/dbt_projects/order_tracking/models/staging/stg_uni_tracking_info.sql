@@ -1,13 +1,13 @@
-{# Fetch the max(update_time) from the destination table dynamically to avoid subquery in MERGE predicate #}
-{%- set max_update_time_query -%}
-    select coalesce(max(update_time), 0) from {{ this }}
+{# Fetch the cutoff time (max(update_time) - 7 days) dynamically to avoid subquery in MERGE predicate #}
+{%- set cutoff_time_query -%}
+    select to_char(coalesce(max(update_time), '1970-01-01'::timestamp) - interval '7 days', 'YYYY-MM-DD HH24:MI:SS') from {{ this }}
 {%- endset -%}
 
-{%- set max_update_time = 0 -%}
+{%- set cutoff_time = '1970-01-01 00:00:00' -%}
 {%- if execute and is_incremental() -%}
-    {%- set result = run_query(max_update_time_query) -%}
+    {%- set result = run_query(cutoff_time_query) -%}
     {%- if result and result.columns[0][0] -%}
-        {%- set max_update_time = result.columns[0][0] -%}
+        {%- set cutoff_time = result.columns[0][0] -%}
     {%- endif -%}
 {%- endif -%}
 
@@ -19,7 +19,7 @@
         dist='order_id',
         sort='update_time',
         incremental_predicates=[
-            "DBT_INTERNAL_DEST.update_time > " ~ max_update_time ~ " - 604800"
+            "DBT_INTERNAL_DEST.update_time > '" ~ cutoff_time ~ "'"
         ]
     )
 }}
