@@ -1,3 +1,16 @@
+{# Fetch the max(add_time) from the destination table dynamically to avoid subquery in MERGE predicate #}
+{%- set max_add_time_query -%}
+    select coalesce(max(add_time), 0) from {{ this }}
+{%- endset -%}
+
+{%- set max_add_time = 0 -%}
+{%- if execute and is_incremental() -%}
+    {%- set result = run_query(max_add_time_query) -%}
+    {%- if result and result.columns[0][0] -%}
+        {%- set max_add_time = result.columns[0][0] -%}
+    {%- endif -%}
+{%- endif -%}
+
 {{
     config(
         materialized='incremental',
@@ -6,7 +19,7 @@
         dist='order_id',
         sort='add_time',
         incremental_predicates=[
-            "DBT_INTERNAL_DEST.add_time > (select coalesce(max(add_time), 0) - 604800 from " ~ this ~ ")"
+            "DBT_INTERNAL_DEST.add_time > " ~ max_add_time ~ " - 604800"
         ]
     )
 }}
