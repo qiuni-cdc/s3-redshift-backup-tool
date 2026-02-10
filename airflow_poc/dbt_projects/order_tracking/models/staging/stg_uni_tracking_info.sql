@@ -15,7 +15,7 @@
     config(
         materialized='incremental',
         unique_key='order_id',
-        incremental_strategy='merge',
+        incremental_strategy='delete+insert',
         dist='order_id',
         sort='update_time',
         incremental_predicates=[
