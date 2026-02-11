@@ -596,7 +596,7 @@
     FROM_UNIXTIME(eoi.add_time) AS `190_time`,
     uw_inj.id AS `Injection_Warehouse`,
     uw2.id AS `gateway_Warehouse`,
-    uti.zip AS `dest_zip`,
+    case when char_length(uti.zip) > 16 then null else uti.zip end AS `dest_zip`,
     uizf.`Zone` AS `ZONE`,
 	COALESCE(JSON_UNQUOTE(JSON_EXTRACT(upo.data, '$.weight')), 0) AS `Manifest_Weight`,
 	COALESCE(uti.total_weight, 0) AS `Scaled_Weight`,
