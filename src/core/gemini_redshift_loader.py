@@ -228,34 +228,92 @@ class GeminiRedshiftLoader:
                         logger.error(f"  ❌ {failed['file_name']}{size_info}: {failed['error'][:100]}...")
                     if len(files) > 5:
                         logger.error(f"     ... and {len(files) - 5} more {error_type} errors")
-                
-                # Calculate failure statistics
-                total_failed_size = sum(f['file_size_mb'] for f in failed_files if f['file_size_mb'] != 'unknown')
-                total_successful_size = sum(info['size_mb'] for info in file_size_info if info['file'] in successful_file_list)
-                
-                logger.error(f"📊 FAILURE ANALYSIS for {table_name}:")
-                logger.error(f"  Failed files: {len(failed_files)}/{len(s3_files)} ({len(failed_files)/len(s3_files)*100:.1f}%)")
-                if total_failed_size > 0:
-                    logger.error(f"  Failed data size: {total_failed_size:.1f} MB")
-                if total_successful_size > 0:
-                    logger.error(f"  Successful data size: {total_successful_size:.1f} MB")
-                
-                # Also log failed files as a structured summary
-                failed_file_names = [f['file'] for f in failed_files]
-                logger.error(f"FAILED_FILES_SUMMARY for {table_name}: {failed_file_names}")
             
-            # Update success status with only successfully processed files
-            self._set_success_status(table_name, load_start_time, total_rows_loaded, successful_file_list)
+            # Get table schema/DDL
+            # Note: For v1.2.0, table_name might be scoped (e.g. "conn:schema.table")
+            # FlexibleSchemaManager needs to handle this or we strip it here
+            try:
+                # Get schema and DDL
+                # For basic schema retrieval, use the full name - manager handles scoping
+                flexible_schema, redshift_ddl = self.schema_manager.get_table_schema(table_name)
+                
+                if not redshift_ddl:
+                    raise Exception("Failed to generate DDL")
+                
+                # Fix DDL table name to match target Redshift table name
+                # (DDL comes with source table name, but we might want a different target name)
+                corrected_ddl = self._fix_ddl_table_name(redshift_ddl, redshift_table_name, table_name)
+                
+                # Ensure table exists
+                table_created = self._ensure_redshift_table(redshift_table_name, corrected_ddl, schema=target_schema)
+
+            except Exception as e:
+                logger.error(f"Schema/DDL generation failed: {e}")
+                # Log traceback for debugging
+                import traceback
+                logger.error(traceback.format_exc())
+                return False
+
+            # Step 3: Load data
+            total_rows = 0
+            loaded_files = []
+            failed = False
             
-            if failed_files:
-                logger.info(f"Gemini Redshift load completed for {table_name}: {total_rows_loaded} rows from {successful_files}/{len(s3_files)} files (⚠️  {len(failed_files)} files failed)")
-            else:
-                logger.info(f"Gemini Redshift load completed for {table_name}: {total_rows_loaded} rows from {successful_files}/{len(s3_files)} files (✅ all files successful)")
+            # Use a single connection for the batch of files
+            try:
+                with self._redshift_connection(schema=target_schema) as conn:
+                    # If this is a full sync with REPLACE mode, and we have files to load,
+                    # we should TRUNCATE the table before loading the first file.
+                    # This ensures we replace the entire dataset.
+                    if cdc_strategy and hasattr(cdc_strategy, 'get_sync_mode') and cdc_strategy.get_sync_mode() == 'replace':
+                        logger.info(f"Full sync REPLACE mode detected. Truncating {redshift_table_name} before loading.")
+                        with conn.cursor() as cursor:
+                            cursor.execute(f"TRUNCATE TABLE {target_schema}.{redshift_table_name}")
+                            logger.info(f"Table {redshift_table_name} truncated.")
+
+                    for s3_uri in s3_files:
+                        try:
+                            # Load file - pass explicit table name to ensure we load to correct target
+                            # Also pass full_table_name for schema lookup (needed for column list generation)
+                            rows = self._copy_parquet_file(
+                                conn, 
+                                redshift_table_name, 
+                                s3_uri, 
+                                full_table_name=table_name,
+                                schema=target_schema
+                            )
+                            total_rows += rows
+                            loaded_files.append(s3_uri)
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to load file {s3_uri}: {e}")
+                            failed = True
+                            self._set_error_status(table_name, str(e))
+                            break
+            except Exception as conn_err:
+                logger.error(f"Redshift connection error during load: {conn_err}")
+                failed = True
+                self._set_error_status(table_name, str(conn_err))
+            
+            if failed:
+                return False
+            
+            # Step 4: Update status
+            current_time = datetime.now()
+            self._set_success_status(table_name, current_time, total_rows, loaded_files)
+            
+            logger.info(
+                "Redshift load complete",
+                table=table_name,
+                redshift_table=redshift_table_name,
+                files=len(s3_files),
+                rows=total_rows
+            )
             
             return True
             
         except Exception as e:
-            logger.error(f"Gemini Redshift load failed for {table_name}: {e}")
+            logger.error(f"Redshift load failed for {table_name}: {e}")
             self._set_error_status(table_name, str(e))
             return False
     
@@ -286,48 +344,41 @@ class GeminiRedshiftLoader:
             raise Exception(error_msg) from e
     
     def _get_redshift_table_name(self, mysql_table_name: str, table_config=None) -> str:
-        """Convert MySQL table name to Redshift table name with v1.2.0 scoped support and target name mapping"""
+        """
+        Determine Redshift table name from MySQL table name or config.
+        Priority:
+        1. Configured target_name
+        2. MySQL table name (cleaned)
+        """
+        # 1. Use target_name from config if available (Priority 1)
+        if table_config and hasattr(table_config, 'target_name') and table_config.target_name:
+             target = table_config.target_name
+             logger.debug(f"🔍 Using configured target_name: {target}")
+             return target
         
-        # NEW FEATURE: Check if table_config specifies a target_name
-        if table_config:
-            logger.info(f"Checking table_config for target_name. Type: {type(table_config)}")
-            if hasattr(table_config, 'target_name'):
-                logger.info(f"table_config.target_name = {table_config.target_name}")
-                if table_config.target_name:
-                    target_name = table_config.target_name
-                    logger.info(f"✅ Table mapping: {mysql_table_name} → {target_name} (custom mapping)")
-                    return target_name
-            else:
-                logger.warning("table_config has no target_name attribute")
-        else:
-            logger.warning("table_config is None or empty")
-        
-        # EXISTING LOGIC: Extract actual table name without scope prefix for Redshift
-        # Redshift tables don't include the scope prefix, just the table name
-        
-        # Handle scoped table names (v1.2.0 multi-schema)
+        # 2. Use MySQL table name (Priority 2)
+        # Handle scoped names: "schema:table" -> "table" (we typically use schema in search path)
         if ':' in mysql_table_name:
-            # Extract table name after the scope prefix
-            # Example: 'US_DW_RO_SSH:settlement.settle_orders' → 'settlement.settle_orders'
-            _, actual_table = mysql_table_name.split(':', 1)
-            table_name = actual_table
-        else:
-            # Unscoped table (v1.0.0 compatibility)
-            table_name = mysql_table_name
-        
-        # For Redshift, we only need the table name part (after schema)
-        # Example: 'settlement.settle_orders' → 'settle_orders'
-        if '.' in table_name:
-            _, table_only = table_name.rsplit('.', 1)
-            final_name = table_only
-        else:
-            final_name = table_name
-        
-        logger.info(f"✅ Table mapping: {mysql_table_name} → {final_name} (default mapping)")
-        return final_name
+            _, clean_name = mysql_table_name.split(':', 1)
+            # Remove schema prefix if present locally
+            if '.' in clean_name:
+                _, clean_name = clean_name.rsplit('.', 1)
+            logger.debug(f"Using derived table name from {mysql_table_name} -> {clean_name}")
+            return clean_name
+            
+        if '.' in mysql_table_name:
+            _, clean_name = mysql_table_name.rsplit('.', 1)
+            logger.debug(f"Using derived table name from {mysql_table_name} -> {clean_name}")
+            return clean_name
+            
+        return mysql_table_name
     
     def _fix_ddl_table_name(self, ddl: str, target_table_name: str, source_table_name: str) -> str:
-        """Fix DDL to use the correct target table name for custom table name mappings"""
+        """
+        Fix table name in DDL to match target Redshift table name.
+        Uses regex to safely replace the table name in CREATE TABLE statement.
+        """
+        import re
         
         # Extract source table name parts for DDL matching
         if ':' in source_table_name:
@@ -336,34 +387,44 @@ class GeminiRedshiftLoader:
             clean_source = source_table_name
             
         if '.' in clean_source:
-            _, source_table_only = clean_source.rsplit('.', 1)
+             _, source_table_only = clean_source.rsplit('.', 1)
         else:
-            source_table_only = clean_source
-        
+             source_table_only = clean_source
+
+        logger.info(f"🔍 DEBUG: Fix DDL - source='{source_table_name}', clean='{clean_source}', table_only='{source_table_only}', target='{target_table_name}'")
+             
         # Pattern to match CREATE TABLE statements with optional schema prefix
         # Handles: "CREATE TABLE schema.table" or "CREATE TABLE IF NOT EXISTS schema.table" or "CREATE TABLE table"
         # Also handles backticks: `schema`.`table` or `table`
         pattern = r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:`?(\w+)`?\.)?`?(\w+)`?'
-
-        # Find the current table name in DDL
+        
         match = re.search(pattern, ddl, re.IGNORECASE)
         if match:
-            schema_in_ddl = match.group(1)  # May be None if no schema prefix
+            # Check what we found in the DDL
+            schema_in_ddl = match.group(1)
             current_table_in_ddl = match.group(2)
+            
+            logger.info(f"🔍 DEBUG: Found in DDL - schema='{schema_in_ddl}', table='{current_table_in_ddl}'")
 
             # Only replace if the current table name matches our source (avoid incorrect replacements)
+            # Check if DDL table name matches source table name (e.g. "uni_tracking_spath")
             if current_table_in_ddl == source_table_only or current_table_in_ddl == clean_source.replace('.', '_'):
-                # Replace with target table name, removing any schema prefix
+                # Replace the whole match with "CREATE TABLE [IF NOT EXISTS] target_name"
+                # We strip the schema from DDL because we rely on search_path or explicit schema in ensuring
+                
                 corrected_ddl = re.sub(
                     r'(CREATE TABLE(?:\s+IF NOT EXISTS)?\s+)(?:`?\w+`?\.)?`?(\w+)`?',
                     rf'\1{target_table_name}',
                     ddl,
                     flags=re.IGNORECASE
                 )
-                logger.debug(f"DDL table name corrected: {current_table_in_ddl} → {target_table_name}")
+                logger.info(f"🔍 DEBUG: DDL fixed. Replaced '{current_table_in_ddl}' with '{target_table_name}'")
                 return corrected_ddl
-        
-        # If no replacement needed or pattern not found, return original DDL
+            else:
+                logger.warning(f"⚠️ DEBUG: DDL table name '{current_table_in_ddl}' does not match source '{source_table_only}'. execution might fail.")
+        else:
+            logger.warning("⚠️ DEBUG: Could not find CREATE TABLE pattern in DDL")
+            
         return ddl
     
     def _ensure_redshift_table(self, table_name: str, ddl: str, schema: str = None) -> bool:
