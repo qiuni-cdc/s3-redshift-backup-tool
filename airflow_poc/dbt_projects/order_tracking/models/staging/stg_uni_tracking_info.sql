@@ -39,8 +39,9 @@ with filtered as (
         from {{ this }}
     )
     {% else %}
-    -- First run: only load last 15 minutes (900 seconds)
-    where update_time > (EXTRACT(EPOCH FROM GETDATE()) - 900)
+    -- First run: load everything from raw (process what was extracted)
+    -- This ensures that whatever data is in the raw table (from the extraction task) is staged,
+    -- even if the extraction happened earlier or covers a historical period.
     {% endif %}
 ),
 

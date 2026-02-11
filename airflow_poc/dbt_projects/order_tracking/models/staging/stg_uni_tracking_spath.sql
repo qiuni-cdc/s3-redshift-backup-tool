@@ -24,8 +24,7 @@ with filtered as (
         from {{ this }}
     )
     {% else %}
-    -- First run: only load last 15 minutes (900 seconds)
-    where pathTime > (EXTRACT(EPOCH FROM GETDATE()) - 900)
+    -- First run: load everything from raw
     {% endif %}
 ),
 
