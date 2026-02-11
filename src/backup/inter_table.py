@@ -337,14 +337,39 @@ class InterTableBackupStrategy(BaseBackupStrategy):
 
                     if timestamp_format == 'unix':
                         # For unix timestamps, calculate lookback as unix timestamp
-                        import time
-                        current_unix = int(time.time())
+                        try:
+                            # Parse provided timestamp string to unix
+                            from datetime import datetime as dt
+                            # Handle potential timezone info in string 
+                            clean_ts = current_timestamp.replace('T', ' ').split('+')[0]
+                            # Try with and without T separator formats
+                            try:
+                                current_dt = dt.strptime(clean_ts, '%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                current_dt = dt.strptime(current_timestamp, '%Y-%m-%dT%H:%M:%S')
+                                
+                            current_unix = int(current_dt.timestamp())
+                        except (ValueError, TypeError) as e:
+                            # Fallback if parsing fails (shouldn't happen with valid end_time)
+                            import time
+                            current_unix = int(time.time())
+                            self.logger.logger.warning(f"Failed to parse current_timestamp '{current_timestamp}' for unix calculation: {e}, falling back to system time")
+
                         new_watermark = current_unix - (initial_lookback_minutes * 60)
                     else:
                         # For datetime format
-                        current_dt = datetime.strptime(current_timestamp, '%Y-%m-%d %H:%M:%S')
-                        lookback_dt = current_dt - timedelta(minutes=initial_lookback_minutes)
-                        new_watermark = lookback_dt.strftime('%Y-%m-%d %H:%M:%S')
+                        try:
+                            clean_ts = current_timestamp.replace('T', ' ').split('+')[0]
+                            try:
+                                current_dt = datetime.strptime(clean_ts, '%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                current_dt = datetime.strptime(current_timestamp, '%Y-%m-%dT%H:%M:%S')
+                        except (ValueError, TypeError) as e:
+                            self.logger.logger.warning(f"Failed to parse datetime '{current_timestamp}': {e}, using now()")
+                            current_dt = datetime.now()
+                            
+                        looking_back_dt = current_dt - timedelta(minutes=initial_lookback_minutes)
+                        new_watermark = looking_back_dt.strftime('%Y-%m-%d %H:%M:%S')
 
                     self.logger.logger.info(
                         f"First run detected: Using {initial_lookback_minutes}m lookback",
