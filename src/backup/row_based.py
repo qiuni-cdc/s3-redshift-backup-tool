@@ -283,7 +283,18 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             # WATERMARK CEILING: Capture max ID at sync start to prevent infinite loops
             # This protects against continuous data injection during sync
-            watermark_ceiling = self._get_current_max_id(cursor, table_name, id_column)
+            # FIXED: Only apply ceiling when sorting primarily by ID. For timestamp strategies,
+            # ID is secondary sort key and not monotonic with timestamp, so ceiling check is invalid.
+            if timestamp_column:
+                watermark_ceiling = None
+                self.logger.logger.info(
+                    "Timestamp strategy detected - disabling watermark ceiling check",
+                    table_name=table_name,
+                    timestamp_column=timestamp_column,
+                    reason="IDs not monotonic with timestamp"
+                )
+            else:
+                watermark_ceiling = self._get_current_max_id(cursor, table_name, id_column)
             
             self.logger.logger.info(
                 "Starting row-based chunking",
