@@ -351,7 +351,6 @@ class InterTableBackupStrategy(BaseBackupStrategy):
                             current_unix = int(current_dt.timestamp())
                         except (ValueError, TypeError) as e:
                             # Fallback if parsing fails (shouldn't happen with valid end_time)
-                            import time
                             current_unix = int(time.time())
                             self.logger.logger.warning(f"Failed to parse current_timestamp '{current_timestamp}' for unix calculation: {e}, falling back to system time")
 
