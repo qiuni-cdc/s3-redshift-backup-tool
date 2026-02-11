@@ -1,6 +1,6 @@
-{# Fetch the cutoff time (max(add_time) - 14 days in seconds) dynamically #}
+{# Fetch the cutoff time (max(add_time) - 30 days in seconds) dynamically #}
 {%- set cutoff_time_query -%}
-    select coalesce(max(add_time), 0) - 1209600 from {{ this }}
+    select coalesce(max(add_time), 0) - 2592000 from {{ this }}
 {%- endset -%}
 
 {%- set cutoff_time = 0 -%}
@@ -19,7 +19,7 @@
         dist='order_id',
         sort='add_time',
         incremental_predicates=[
-            "add_time > " ~ cutoff_time
+            "DBT_INTERNAL_DEST.add_time > " ~ cutoff_time
         ]
     )
 }}

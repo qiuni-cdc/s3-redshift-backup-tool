@@ -1,6 +1,6 @@
-{# Fetch the cutoff time (max(pathTime) - 14 days in seconds) dynamically #}
+{# Fetch the cutoff time (max(pathTime) - 30 days in seconds) dynamically #}
 {%- set cutoff_time_query -%}
-    select coalesce(max(pathTime), 0) - 1209600 from {{ this }}
+    select coalesce(max(pathTime), 0) - 2592000 from {{ this }}
 {%- endset -%}
 
 {%- set cutoff_time = 0 -%}
@@ -19,7 +19,7 @@
         dist='order_id',
         sort='pathTime',
         incremental_predicates=[
-            "pathTime > " ~ cutoff_time
+            this ~ ".pathTime > " ~ cutoff_time
         ]
     )
 }}
