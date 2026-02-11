@@ -234,12 +234,14 @@ def add_multi_schema_commands(cli):
                         _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
                         success_count += 1
                     else:
+                        result = _execute_table_sync(
                             pipeline_config, table_config,
-                            backup_only, redshift_only, limit, parallel, max_workers, max_chunks,
+                            backup_only, redshift_only,
+                            limit, parallel, max_workers, max_chunks,
                             initial_lookback_minutes=initial_lookback_minutes,
                             end_time=end_time
                         )
-                        if success:
+                        if result.get("success", False):
                             success_count += 1
 
                 # Summary
