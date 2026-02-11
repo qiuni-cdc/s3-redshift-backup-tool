@@ -328,7 +328,7 @@ class FlexibleSchemaManager:
             extra = col.get('EXTRA', '').lower()
 
             # DEBUG: Log MySQL column info for troubleshooting
-            logger.info(f"DEBUG MySQL column: {col_name} -> DATA_TYPE='{data_type}', COLUMN_TYPE='{column_type}', max_length={max_length}, precision={precision}, scale={scale}")
+            logger.debug(f"DEBUG MySQL column: {col_name} -> DATA_TYPE='{data_type}', COLUMN_TYPE='{column_type}', max_length={max_length}, precision={precision}, scale={scale}")
 
             # Track original column name
             original_columns.append(col_name)
@@ -343,7 +343,7 @@ class FlexibleSchemaManager:
             )
 
             # DEBUG: Log the mapped Redshift type
-            logger.info(f"DEBUG Redshift mapping: {col_name} -> {rs_type}")
+            logger.debug(f"DEBUG Redshift mapping: {col_name} -> {rs_type}")
 
             # Add nullable constraint
             nullable_clause = "" if is_nullable else " NOT NULL"
