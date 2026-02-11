@@ -452,47 +452,47 @@ class GeminiRedshiftLoader:
                 logger.warning(f"Failed to check table partition: {e}")
                 has_table_partition = False
 
-            # Simple strategy selection based on partition discovery
-
             # Strategy selection based on partition discovery
             if has_table_partition:
                 # Use table-specific partition
                 logger.info(f"Using table partition strategy for efficient file discovery")
                 prefix = table_partition_prefix
-                max_keys = 1000  # Reasonable limit for table-specific files
+                max_keys = 20000  # High limit for table-specific files
+                pagination_strategy = 'table_partition'
             else:
                 # Priority search for today's files first
-                from datetime import datetime
-                today = datetime.now()
+                from datetime import datetime, timedelta
+                today = datetime.max  # Placeholder, will be overwritten
+                # We need to be careful with 'today' import overshadowing
+                import datetime as dt_module
+                today = dt_module.datetime.now()
+                
                 today_prefix = f"{base_prefix}year={today.year}/month={today.month:02d}/day={today.day:02d}/"
                 logger.info(f"Prioritizing today's files with prefix: {today_prefix}")
-                logger.info(f"🔍 DEBUG: No table partition found, falling back to date-based search")
+                logger.info(f"🔍 DEBUG: No table partition found, falling back to date-based search. WARNING: This scans shared prefixes!")
                 prefix = today_prefix
-                max_keys = 1000  # Start with today's files only
+                max_keys = 50000  # CRITICAL FIX: Increased from 1000 to scan significantly more files in shared folder
+                pagination_strategy = 'datetime'
 
-            logger.info(f"🔍 DEBUG: Final search prefix={prefix}, max_keys={max_keys}")
-            logger.debug(f"Using S3 prefix: {prefix} (max_keys: {max_keys})")
-
+            logger.info(f"🔍 DEBUG: Final search prefix={prefix}, max_keys={max_keys}, strategy={pagination_strategy}")
+            
             # Execute S3 listing with chosen strategy
             try:
                 all_objects = []
                 continuation_token = None
                 total_scanned = 0
-
-                # FIXED: Implement proper pagination to find ALL files, not just first 1000
+                
+                # FIXED: Implement proper pagination to find ALL files matching criteria
                 while True:
                     list_params = {
                         'Bucket': self.config.s3.bucket_name,
-                        'Prefix': prefix
+                        'Prefix': prefix,
+                        'MaxKeys': 1000  # API batch size, not total limit
                     }
 
                     # Add pagination token if we have one
                     if continuation_token:
                         list_params['ContinuationToken'] = continuation_token
-
-                    # For general prefix, limit each page size
-                    if not has_table_partition:
-                        list_params['MaxKeys'] = 1000  # Page size, not total limit
 
                     response = s3_client.list_objects_v2(**list_params)
 
@@ -500,20 +500,25 @@ class GeminiRedshiftLoader:
                     page_objects = response.get('Contents', [])
                     all_objects.extend(page_objects)
                     total_scanned += len(page_objects)
+                    
+                    if not continuation_token:
+                        logger.info(f"🔍 Found {len(page_objects)} files in first page.")
 
-                    # Check if we have more pages
-                    if response.get('IsTruncated', False) and total_scanned < max_keys:
-                        continuation_token = response.get('NextContinuationToken')
-                        logger.debug(f"S3 listing paginating... scanned {total_scanned} objects so far")
-                    else:
+                    # Stop if we hit our safeguard limit
+                    if total_scanned >= max_keys:
+                        logger.warning(f"Hit max_keys limit ({max_keys}) while scanning S3. Some files might be missed.")
                         break
 
-                # Trim to max_keys if needed
-                if not has_table_partition and len(all_objects) > max_keys:
-                    # Sort by LastModified descending to prioritize newer files
-                    all_objects.sort(key=lambda x: x.get('LastModified', ''), reverse=True)
-                    all_objects = all_objects[:max_keys]
-                    logger.info(f"S3 scan found {total_scanned} objects, limited to newest {max_keys}")
+                    # Check if we have more pages
+                    if response.get('IsTruncated', False):
+                        continuation_token = response.get('NextContinuationToken')
+                        # Log periodically
+                        if total_scanned % 5000 < 1000:
+                            logger.info(f"S3 listing paginating... scanned {total_scanned} objects so far")
+                    else:
+                        break
+                
+                logger.info(f"S3 scan complete. Scanned {total_scanned} objects total (before filtering).")
 
             except Exception as e:
                 logger.error(f"S3 listing failed: {e}")
@@ -826,6 +831,8 @@ class GeminiRedshiftLoader:
         - 'US_DW_RO_SSH:settlement.settle_orders' → 'us_dw_ro_ssh_settlement_settle_orders'
         - 'us_dw_pipeline:settlement.settle_orders' → 'us_dw_pipeline_settlement_settle_orders'
         
+        Matches logic in S3Manager to ensure path consistency.
+        
         Args:
             table_name: Table name (may include scope prefix)
             
@@ -837,10 +844,10 @@ class GeminiRedshiftLoader:
             scope, actual_table = table_name.split(':', 1)
             # Clean scope: lowercase, replace special chars with underscores
             clean_scope = scope.lower().replace('-', '_').replace('.', '_')
-            # Clean table: lowercase and replace dots with underscores
-            clean_table = actual_table.lower().replace('.', '_').replace('-', '_')
+            # Clean table: replace dots with underscores (preserve case for consistency with S3Manager)
+            clean_table = actual_table.replace('.', '_').replace('-', '_')
             # Combine: scope_table_name
             return f"{clean_scope}_{clean_table}"
         else:
             # Unscoped table (v1.0.0 compatibility)
-            return table_name.lower().replace('.', '_').replace('-', '_')
+            return table_name.replace('.', '_').replace('-', '_')
