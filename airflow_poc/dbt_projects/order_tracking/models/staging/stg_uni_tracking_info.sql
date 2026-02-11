@@ -1,6 +1,6 @@
-{# Fetch the cutoff time (max(update_time) - 7 days in seconds) dynamically #}
+{# Fetch the cutoff time (max(update_time) - 14 days in seconds) dynamically #}
 {%- set cutoff_time_query -%}
-    select coalesce(max(update_time), 0) - 604800 from {{ this }}
+    select coalesce(max(update_time), 0) - 1209600 from {{ this }}
 {%- endset -%}
 
 {%- set cutoff_time = 0 -%}

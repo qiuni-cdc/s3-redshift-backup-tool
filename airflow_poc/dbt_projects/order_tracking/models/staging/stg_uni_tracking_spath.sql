@@ -1,10 +1,26 @@
+{# Fetch the cutoff time (max(pathTime) - 14 days in seconds) dynamically #}
+{%- set cutoff_time_query -%}
+    select coalesce(max(pathTime), 0) - 1209600 from {{ this }}
+{%- endset -%}
+
+{%- set cutoff_time = 0 -%}
+{%- if execute and is_incremental() -%}
+    {%- set result = run_query(cutoff_time_query) -%}
+    {%- if result and result.columns[0][0] -%}
+        {%- set cutoff_time = result.columns[0][0] -%}
+    {%- endif -%}
+{%- endif -%}
+
 {{
     config(
         materialized='incremental',
         unique_key=['order_id', 'traceSeq'],
-        incremental_strategy='merge',
+        incremental_strategy='delete+insert',
         dist='order_id',
-        sort='pathTime'
+        sort='pathTime',
+        incremental_predicates=[
+            "pathTime > " ~ cutoff_time
+        ]
     )
 }}
 
@@ -12,7 +28,7 @@
     Staging model for uni_tracking_spath (event history)
     - Composite key: order_id + traceSeq
     - Optimized deduplication: strictly one row per key
-    - Performance: dist/sort keys added
+    - Performance: dist/sort keys added, delete+insert strategy
 */
 
 with filtered as (
