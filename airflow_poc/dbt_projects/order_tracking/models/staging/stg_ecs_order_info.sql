@@ -19,7 +19,7 @@
         dist='order_id',
         sort='add_time',
         incremental_predicates=[
-            "DBT_INTERNAL_DEST.add_time > " ~ cutoff_time
+            this ~ ".add_time > " ~ cutoff_time
         ]
     )
 }}
