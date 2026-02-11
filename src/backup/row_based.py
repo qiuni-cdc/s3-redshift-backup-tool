@@ -29,7 +29,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
         self.logger.set_context(strategy="row_based", chunking_type="timestamp_id")
         self.cdc_integration = None
     
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None, initial_lookback_minutes: Optional[int] = None, end_time: Optional[str] = None) -> bool:
         """
         Execute row-based backup for all specified tables.
         
@@ -48,7 +48,12 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             return False
         
         start_time = time.time()
-        current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if end_time:
+            current_timestamp = end_time
+            self.logger.logger.info(f"Using provided end time: {current_timestamp}")
+        else:
+            current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.logger.logger.info(f"Using system time as end time: {current_timestamp}")
         successful_tables = []
         failed_tables = []
         

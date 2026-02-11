@@ -409,7 +409,7 @@ class BaseBackupStrategy(ABC):
             raise
     
     @abstractmethod
-    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None, initial_lookback_minutes: Optional[int] = None) -> bool:
+    def execute(self, tables: List[str], chunk_size: Optional[int] = None, max_total_rows: Optional[int] = None, limit: Optional[int] = None, source_connection: Optional[str] = None, initial_lookback_minutes: Optional[int] = None, end_time: Optional[str] = None) -> bool:
         """
         Execute backup strategy for given tables.
         
@@ -420,6 +420,7 @@ class BaseBackupStrategy(ABC):
             limit: Deprecated - use chunk_size instead (for backward compatibility)
             source_connection: Optional connection name to use instead of default
             initial_lookback_minutes: Optional minutes to look back for first run (default: None)
+            end_time: Optional ISO 8601 timestamp to use as the end bound (default: None, uses now())
         
         Returns:
             True if backup successful, False otherwise

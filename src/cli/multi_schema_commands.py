@@ -106,9 +106,11 @@ def add_multi_schema_commands(cli):
     @click.option('--json-output', type=click.Path(), help='Output execution metadata as JSON file for Airflow monitoring')
     @click.option('--s3-completion-bucket', type=str, help='S3 bucket for Airflow completion markers')
     @click.option('--initial-lookback-minutes', type=int, help='For first run only: Start backup from N minutes ago instead of full history')
+    @click.option('--end-time', help='ISO 8601 timestamp to use as the end time (e.g., 2023-10-27T10:00:00). Defaults to current time.')
     def sync_pipeline(pipeline: str, table: List[str], backup_only: bool, redshift_only: bool,
                      limit: Optional[int], max_workers: Optional[int], max_chunks: Optional[int], dry_run: bool, parallel: bool,
-                     json_output: Optional[str] = None, s3_completion_bucket: Optional[str] = None, initial_lookback_minutes: Optional[int] = None):
+                     json_output: Optional[str] = None, s3_completion_bucket: Optional[str] = None, initial_lookback_minutes: Optional[int] = None,
+                     end_time: Optional[str] = None):
         """Sync tables using pipeline configuration (v1.1.0 enhanced syntax)"""
 
         multi_schema_ctx.ensure_initialized()
@@ -142,6 +144,10 @@ def add_multi_schema_commands(cli):
             # Check for explicit initial lookback request
             if initial_lookback_minutes:
                 click.echo(f"🕒 First-run lookback enabled: {initial_lookback_minutes} minutes")
+
+            # Check for explicit end time request
+            if end_time:
+                click.echo(f"🕒 Explicit end time provided: {end_time}")
 
             # Check if Airflow integration is requested
             if json_output or s3_completion_bucket:
@@ -180,10 +186,10 @@ def add_multi_schema_commands(cli):
                             }
                             success_count += 1
                         else:
-                            result = _execute_table_sync(
                                 pipeline_config, table_config,
                                 backup_only, redshift_only, limit, parallel, max_workers, max_chunks,
-                                initial_lookback_minutes=initial_lookback_minutes
+                                initial_lookback_minutes=initial_lookback_minutes,
+                                end_time=end_time
                             )
 
                             # FIXED: Use actual metrics from _execute_table_sync instead of hardcoded values
@@ -226,10 +232,10 @@ def add_multi_schema_commands(cli):
                         _preview_table_sync(pipeline_config, table_config, backup_only, redshift_only)
                         success_count += 1
                     else:
-                        success = _execute_table_sync(
                             pipeline_config, table_config,
                             backup_only, redshift_only, limit, parallel, max_workers, max_chunks,
-                            initial_lookback_minutes=initial_lookback_minutes
+                            initial_lookback_minutes=initial_lookback_minutes,
+                            end_time=end_time
                         )
                         if success:
                             success_count += 1
@@ -844,7 +850,7 @@ def _preview_table_sync(pipeline_config, table_config, backup_only: bool, redshi
 
 def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshift_only: bool,
                        limit: Optional[int], parallel: bool, max_workers: Optional[int] = None, max_chunks: Optional[int] = None,
-                       initial_lookback_minutes: Optional[int] = None) -> Dict[str, Any]:
+                       initial_lookback_minutes: Optional[int] = None, end_time: Optional[str] = None) -> Dict[str, Any]:
     """Execute actual table sync with multi-schema configuration"""
 
     click.echo(f"🚀 Syncing: {table_config.full_name}")
@@ -965,7 +971,8 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     chunk_size=chunk_size,
                     max_total_rows=max_total_rows,
                     source_connection=source_connection,
-                    initial_lookback_minutes=initial_lookback_minutes
+                    initial_lookback_minutes=initial_lookback_minutes,
+                    end_time=end_time
                 )
                 # Get connection registry for later cleanup
                 connection_registry = getattr(backup_strategy, 'connection_registry', None)
