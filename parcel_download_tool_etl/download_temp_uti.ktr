@@ -652,7 +652,7 @@
     time_230.path_time AS `time_230`,
     time_233.path_time AS `time_233`,
     od.channel_code AS channel_code,
-    eoi.start_zipcode,
+    case when char_length(eoi.start_zipcode) > 16 then null else eoi.start_zipcode end AS `start_zipcode`,
     umb.scan_time AS box_scan_time,
 	case when uti.total_value >= 10000000000 then null else uti.total_value end AS total_value,
     uti.storage_info,
