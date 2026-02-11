@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import psycopg2
 from contextlib import contextmanager
+import re
 
 from src.config.settings import AppConfig
 from src.core.flexible_schema_manager import FlexibleSchemaManager
@@ -106,21 +107,32 @@ class GeminiRedshiftLoader:
             logger.debug(f"Discovering schema for {table_name}")
             pyarrow_schema, redshift_ddl = self.schema_manager.get_table_schema(table_name)
 
+            # Determine target schema (default to config, override with table_config)
+            target_schema = self.config.redshift.schema
+            if table_config and hasattr(table_config, 'target_schema') and table_config.target_schema:
+                target_schema = table_config.target_schema
+                logger.info(f"Using custom target schema: {target_schema}")
+
             # Step 2: Create or update Redshift table
             redshift_table_name = self._get_redshift_table_name(table_name, table_config)
             corrected_ddl = self._fix_ddl_table_name(redshift_ddl, redshift_table_name, table_name)
-            table_created = self._ensure_redshift_table(redshift_table_name, corrected_ddl)
+            
+            # Update DDL with correct schema if needed (basic string replacement)
+            # This is a simple heuristic - for robust DDL parsing we'd need more logic
+            # But _ensure_redshift_table handles the actual creation in the correct schema context
+            
+            table_created = self._ensure_redshift_table(redshift_table_name, corrected_ddl, schema=target_schema)
             
             if not table_created:
-                logger.error(f"Failed to create/verify Redshift table: {redshift_table_name}")
+                logger.error(f"Failed to create/verify Redshift table: {target_schema}.{redshift_table_name}")
                 self._set_error_status(table_name, "Table creation failed")
                 return False
             
             # Step 2.5: Check if we need to truncate table before loading (full_sync replace mode)
             if cdc_strategy and hasattr(cdc_strategy, 'requires_truncate_before_load'):
                 if cdc_strategy.requires_truncate_before_load():
-                    self._truncate_table_before_load(redshift_table_name)
-                    logger.info(f"Truncated table {redshift_table_name} for full_sync replace mode")
+                    self._truncate_table_before_load(redshift_table_name, schema=target_schema)
+                    logger.info(f"Truncated table {target_schema}.{redshift_table_name} for full_sync replace mode")
             
             # Step 3: Get S3 parquet files for this table
             s3_files = self._get_s3_parquet_files(table_name, cdc_strategy)
@@ -145,7 +157,7 @@ class GeminiRedshiftLoader:
             logger.info(f"🔄 Starting to process {len(s3_files)} files for {table_name}")
             file_size_info = []  # Track file sizes for failure analysis
             
-            with self._redshift_connection() as conn:
+            with self._redshift_connection(schema=target_schema) as conn:
                 for i, s3_file in enumerate(s3_files, 1):
                     file_name = s3_file.split('/')[-1]
                     logger.info(f"📄 Processing file {i}/{len(s3_files)}: {file_name}")
@@ -156,7 +168,7 @@ class GeminiRedshiftLoader:
                         file_size_info.append({'file': s3_file, 'size_mb': file_size})
                         
                         start_time = datetime.now()
-                        rows_loaded = self._copy_parquet_file(conn, redshift_table_name, s3_file, table_name)
+                        rows_loaded = self._copy_parquet_file(conn, redshift_table_name, s3_file, table_name, schema=target_schema)
                         duration = (datetime.now() - start_time).total_seconds()
                         
                         total_rows_loaded += rows_loaded
@@ -247,18 +259,20 @@ class GeminiRedshiftLoader:
             self._set_error_status(table_name, str(e))
             return False
     
-    def _truncate_table_before_load(self, redshift_table: str) -> None:
+    def _truncate_table_before_load(self, redshift_table: str, schema: str = None) -> None:
         """
         Truncate table before loading for full_sync replace mode.
         
         Args:
             redshift_table: Redshift table name to truncate
+            schema: Optional schema name override
         """
+        target_schema = schema or self.config.redshift.schema
         try:
-            with self._redshift_connection() as connection:
+            with self._redshift_connection(schema=target_schema) as connection:
                 with connection.cursor() as cursor:
                     # Construct full table name with schema
-                    full_table_name = f"{self.config.redshift.schema}.{redshift_table}"
+                    full_table_name = f"{target_schema}.{redshift_table}"
                     
                     logger.info(f"Truncating table {full_table_name} for full_sync replace mode")
                     cursor.execute(f"TRUNCATE TABLE {full_table_name}")
@@ -275,10 +289,18 @@ class GeminiRedshiftLoader:
         """Convert MySQL table name to Redshift table name with v1.2.0 scoped support and target name mapping"""
         
         # NEW FEATURE: Check if table_config specifies a target_name
-        if table_config and hasattr(table_config, 'target_name') and table_config.target_name:
-            target_name = table_config.target_name
-            logger.info(f"✅ Table mapping: {mysql_table_name} → {target_name} (custom mapping)")
-            return target_name
+        if table_config:
+            logger.info(f"Checking table_config for target_name. Type: {type(table_config)}")
+            if hasattr(table_config, 'target_name'):
+                logger.info(f"table_config.target_name = {table_config.target_name}")
+                if table_config.target_name:
+                    target_name = table_config.target_name
+                    logger.info(f"✅ Table mapping: {mysql_table_name} → {target_name} (custom mapping)")
+                    return target_name
+            else:
+                logger.warning("table_config has no target_name attribute")
+        else:
+            logger.warning("table_config is None or empty")
         
         # EXISTING LOGIC: Extract actual table name without scope prefix for Redshift
         # Redshift tables don't include the scope prefix, just the table name
@@ -306,7 +328,6 @@ class GeminiRedshiftLoader:
     
     def _fix_ddl_table_name(self, ddl: str, target_table_name: str, source_table_name: str) -> str:
         """Fix DDL to use the correct target table name for custom table name mappings"""
-        import re
         
         # Extract source table name parts for DDL matching
         if ':' in source_table_name:
@@ -321,7 +342,8 @@ class GeminiRedshiftLoader:
         
         # Pattern to match CREATE TABLE statements with optional schema prefix
         # Handles: "CREATE TABLE schema.table" or "CREATE TABLE IF NOT EXISTS schema.table" or "CREATE TABLE table"
-        pattern = r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:(\w+)\.)?(\w+)'
+        # Also handles backticks: `schema`.`table` or `table`
+        pattern = r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:`?(\w+)`?\.)?`?(\w+)`?'
 
         # Find the current table name in DDL
         match = re.search(pattern, ddl, re.IGNORECASE)
@@ -333,7 +355,7 @@ class GeminiRedshiftLoader:
             if current_table_in_ddl == source_table_only or current_table_in_ddl == clean_source.replace('.', '_'):
                 # Replace with target table name, removing any schema prefix
                 corrected_ddl = re.sub(
-                    r'(CREATE TABLE(?:\s+IF NOT EXISTS)?\s+)(?:\w+\.)?(\w+)',
+                    r'(CREATE TABLE(?:\s+IF NOT EXISTS)?\s+)(?:`?\w+`?\.)?`?(\w+)`?',
                     rf'\1{target_table_name}',
                     ddl,
                     flags=re.IGNORECASE
@@ -344,10 +366,11 @@ class GeminiRedshiftLoader:
         # If no replacement needed or pattern not found, return original DDL
         return ddl
     
-    def _ensure_redshift_table(self, table_name: str, ddl: str) -> bool:
+    def _ensure_redshift_table(self, table_name: str, ddl: str, schema: str = None) -> bool:
         """Create or verify Redshift table exists with correct schema"""
+        valid_schema = schema or self.config.redshift.schema
         try:
-            with self._redshift_connection() as conn:
+            with self._redshift_connection(schema=valid_schema) as conn:
                 cursor = conn.cursor()
                 
                 # Check if table exists
@@ -355,7 +378,7 @@ class GeminiRedshiftLoader:
                     SELECT COUNT(*) 
                     FROM information_schema.tables 
                     WHERE table_schema = %s AND table_name = %s
-                """, (self.config.redshift.schema, table_name))
+                """, (valid_schema, table_name))
                 
                 table_exists = cursor.fetchone()[0] > 0
                 
@@ -433,7 +456,7 @@ class GeminiRedshiftLoader:
 
             # Strategy selection based on partition discovery
             if has_table_partition:
-                # Use table-specific prefix for maximum efficiency
+                # Use table-specific partition
                 logger.info(f"Using table partition strategy for efficient file discovery")
                 prefix = table_partition_prefix
                 max_keys = 1000  # Reasonable limit for table-specific files
@@ -566,7 +589,7 @@ class GeminiRedshiftLoader:
             logger.debug(f"Failed to get file size for {s3_uri}: {e}")
             return 0.0
 
-    def _copy_parquet_file(self, conn, table_name: str, s3_uri: str, full_table_name: str = None) -> int:
+    def _copy_parquet_file(self, conn, table_name: str, s3_uri: str, full_table_name: str = None, schema: str = None) -> int:
         """Execute COPY command for a single parquet file"""
         cursor = None
         try:
@@ -603,8 +626,24 @@ class GeminiRedshiftLoader:
                     column_list = ""
 
             # Build COPY command for direct parquet loading
+            # Logic: Use provided schema -> try to get from connection -> use config default
+            
+            target_schema = schema or self.config.redshift.schema
+            
+            # If schema not explicitly passed, try to get from connection options
+            # (though we prefer explicit passing via Argument)
+            if not schema:
+                try:
+                    # Parse search_path from connection dsn/options if available
+                    if hasattr(conn, 'get_dsn_parameters'):
+                        options = conn.get_dsn_parameters().get('options', '')
+                        if 'search_path=' in options:
+                            target_schema = options.split('search_path=')[1].split()[0]
+                except:
+                    pass
+
             copy_command = f"""
-                COPY {self.config.redshift.schema}.{table_name}{column_list}
+                COPY {target_schema}.{table_name}{column_list}
                 FROM '{s3_uri}'
                 ACCESS_KEY_ID '{self.config.s3.access_key}'
                 SECRET_ACCESS_KEY '{self.config.s3.secret_key.get_secret_value()}'
@@ -663,10 +702,10 @@ class GeminiRedshiftLoader:
             raise
     
     @contextmanager
-    def _redshift_connection(self):
+    def _redshift_connection(self, schema: str = None):
         """Context manager for Redshift database connections"""
+        target_schema = schema or self.config.redshift.schema
         try:
-            # Use Redshift SSH tunnel if configured and not None
             # Use Redshift SSH tunnel if configured and not None
             if (hasattr(self.config, 'redshift_ssh') and
                 self.config.redshift_ssh is not None and
@@ -679,7 +718,7 @@ class GeminiRedshiftLoader:
                         database=self.config.redshift.database,
                         user=self.config.redshift.user,
                         password=self.config.redshift.password.get_secret_value(),
-                        options=f'-c search_path={self.config.redshift.schema}',
+                        options=f'-c search_path={target_schema}',
                         keepalives=1,
                         keepalives_idle=60,
                         keepalives_interval=10,
@@ -697,196 +736,7 @@ class GeminiRedshiftLoader:
                     database=self.config.redshift.database,
                     user=self.config.redshift.user,
                     password=self.config.redshift.password.get_secret_value(),
-                    options=f'-c search_path={self.config.redshift.schema}'
-                )
-                logger.debug("Connected to Redshift directly")
-                conn.autocommit = True
-                yield conn
-                conn.close()
-
-        except Exception as e:
-            logger.error(f"Failed to connect to Redshift: {e}")
-            raise DatabaseError(f"Redshift connection failed: {e}")
-    
-    def _set_success_status(self, table_name: str, load_time: datetime, rows_loaded: int, processed_files: List[str] = None):
-        """Set successful load status in watermark with session tracking (FIXES ACCUMULATION BUG)"""
-        try:
-            # Update with v2.0 API
-            self.watermark_manager.simple_manager.update_redshift_state(
-                table_name=table_name,
-                loaded_files=processed_files or [],
-                status='success'
-            )
-            
-            # After successful state update, also update the row count externally
-            if rows_loaded > 0:
-                self.watermark_manager.simple_manager.update_redshift_count_from_external(
-                    table_name=table_name,
-                    actual_count=rows_loaded
-                )
-        except Exception as e:
-            logger.warning(f"Failed to update success watermark for {table_name}: {e}")
-            
-        except Exception as e:
-            logger.error(f"Failed to get S3 parquet files for {table_name}: {e}")
-            import traceback
-            logger.error(f"Full error traceback: {traceback.format_exc()}")
-            return []
-    
-    def _get_s3_file_size(self, s3_uri: str) -> float:
-        """Get S3 file size in MB for diagnostics"""
-        try:
-            import boto3
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.config.s3.access_key,
-                aws_secret_access_key=self.config.s3.secret_key.get_secret_value(),
-                region_name=self.config.s3.region
-            )
-            
-            # Extract bucket and key from S3 URI
-            bucket = self.config.s3.bucket_name
-            key = s3_uri.replace(f"s3://{bucket}/", "")
-            
-            response = s3_client.head_object(Bucket=bucket, Key=key)
-            size_bytes = response['ContentLength']
-            return size_bytes / (1024 * 1024)  # Convert to MB
-            
-        except Exception as e:
-            logger.debug(f"Failed to get file size for {s3_uri}: {e}")
-            return 0.0
-
-    def _copy_parquet_file(self, conn, table_name: str, s3_uri: str, full_table_name: str = None) -> int:
-        """Execute COPY command for a single parquet file"""
-        cursor = None
-        try:
-            cursor = conn.cursor()
-
-            # Get source columns from schema manager to build explicit column list
-            # This allows Redshift table to have extra columns (like inserted_at with DEFAULT)
-            column_list = ""
-            if full_table_name and hasattr(self, 'schema_manager'):
-                try:
-                    # Get the schema from MySQL source (what's actually in the Parquet file)
-                    pyarrow_schema, _ = self.schema_manager.get_table_schema(full_table_name)
-                    if pyarrow_schema:
-                        # Build column list from source schema
-                        source_columns = [field.name for field in pyarrow_schema]
-
-                        # Try to find column mappings - check both scoped and unscoped table names
-                        # E.g., "us_dw_unidw_direct:unidw.dw_parcel_detail_tool_temp" vs "unidw.dw_parcel_detail_tool_temp"
-                        unscoped_table_name = full_table_name.split(':', 1)[1] if ':' in full_table_name else full_table_name
-
-                        # Use existing ColumnMapper method - tries scoped first, then unscoped
-                        mapped_list = self.column_mapper.get_copy_column_list(full_table_name, source_columns)
-                        if not mapped_list:
-                            mapped_list = self.column_mapper.get_copy_column_list(unscoped_table_name, source_columns)
-
-                        if mapped_list:
-                            column_list = f" {mapped_list}"
-                            logger.info(f"Using explicit column list with mappings: {len(source_columns)} columns")
-                        else:
-                            column_list = f" ({', '.join(source_columns)})"
-                            logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
-                except Exception as e:
-                    logger.warning(f"Failed to build column list from schema: {e}, using default matching")
-                    column_list = ""
-
-            # Build COPY command for direct parquet loading
-            copy_command = f"""
-                COPY {self.config.redshift.schema}.{table_name}{column_list}
-                FROM '{s3_uri}'
-                ACCESS_KEY_ID '{self.config.s3.access_key}'
-                SECRET_ACCESS_KEY '{self.config.s3.secret_key.get_secret_value()}'
-                FORMAT AS PARQUET;
-            """
-
-            logger.info(f"Executing COPY command for {s3_uri}")
-
-            # Set timeout to prevent indefinite hanging (10 minutes = 600000 milliseconds)
-            cursor.execute("SET statement_timeout = 600000")
-
-            try:
-                # Execute COPY command
-                cursor.execute(copy_command)
-
-                # CRITICAL FIX: Get actual number of rows loaded and verify it's not zero
-                cursor.execute("SELECT pg_last_copy_count()")
-                rows_loaded = cursor.fetchone()[0]
-
-                # Commit the transaction
-                conn.commit()
-
-                # Log actual result
-                if rows_loaded == 0:
-                    logger.warning(f"⚠️  COPY command executed but loaded 0 rows from {s3_uri}")
-                else:
-                    logger.info(f"✅ COPY command loaded {rows_loaded} rows from {s3_uri}")
-
-                return rows_loaded
-
-            finally:
-                # Always reset timeout to unlimited
-                try:
-                    cursor.execute("SET statement_timeout = 0")
-                except:
-                    pass  # Ignore errors during timeout reset
-
-                if cursor:
-                    cursor.close()
-
-        except Exception as e:
-            # Rollback the failed transaction to clean up the connection state
-            try:
-                conn.rollback()
-                logger.debug(f"Rolled back failed transaction for {s3_uri}")
-            except:
-                pass  # Ignore rollback errors
-
-            if cursor:
-                try:
-                    cursor.close()
-                except:
-                    pass  # Ignore cursor close errors
-                    
-            logger.error(f"COPY command failed for {s3_uri}: {e}")
-            raise
-    
-    @contextmanager
-    def _redshift_connection(self):
-        """Context manager for Redshift database connections"""
-        try:
-            # Use Redshift SSH tunnel if configured and not None
-            if (hasattr(self.config, 'redshift_ssh') and
-                self.config.redshift_ssh is not None and
-                self.config.redshift_ssh.host and
-                self.config.redshift_ssh.host not in ['None', '', 'null']):
-                with self.connection_manager.redshift_ssh_tunnel() as local_port:
-                    conn = psycopg2.connect(
-                        host='localhost',
-                        port=local_port,
-                        database=self.config.redshift.database,
-                        user=self.config.redshift.user,
-                        password=self.config.redshift.password.get_secret_value(),
-                        options=f'-c search_path={self.config.redshift.schema}',
-                        keepalives=1,
-                        keepalives_idle=60,
-                        keepalives_interval=10,
-                        keepalives_count=3
-                    )
-                    logger.debug("Connected to Redshift via SSH tunnel")
-                    conn.autocommit = True
-                    yield conn
-                    conn.close()
-            else:
-                # Direct connection
-                conn = psycopg2.connect(
-                    host=self.config.redshift.host,
-                    port=self.config.redshift.port,
-                    database=self.config.redshift.database,
-                    user=self.config.redshift.user,
-                    password=self.config.redshift.password.get_secret_value(),
-                    options=f'-c search_path={self.config.redshift.schema}'
+                    options=f'-c search_path={target_schema}'
                 )
                 logger.debug("Connected to Redshift directly")
                 conn.autocommit = True
