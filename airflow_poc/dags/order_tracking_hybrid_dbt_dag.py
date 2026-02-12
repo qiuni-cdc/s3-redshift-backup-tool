@@ -67,7 +67,7 @@ PIPELINE_NAME = os.environ.get('SYNC_PIPELINE_NAME', 'order_tracking_hybrid_dbt_
 
 # Time window settings
 BUFFER_MINUTES = 5                    # Safety buffer to avoid incomplete transactions
-INCREMENTAL_LOOKBACK_MINUTES = 15     # 15-min window handles peak volumes safely
+INCREMENTAL_LOOKBACK_MINUTES = 20     # 15-min window + 5-min buffer = 20 min total
 TIME_DRIFT_THRESHOLD_SECONDS = 60     # Alert if Airflow vs MySQL drift exceeds this
 
 TABLES = {
@@ -147,19 +147,19 @@ def calculate_sync_window(**context):
     )
     
     # Use Airflow's logical execution date (end of the interval) as the anchor
-    # valid_to = execution_date + schedule_interval (approx data_interval_end)
-    # Ideally use data_interval_end from context if available (Airflow 2.2+)
+    # valid_to = execution_date + schedule_interval (approx data_interval_start)
+    # Ideally use data_interval_start from context if available (Airflow 2.2+)
     
     # Fallback for compatibility or if specific context keys are missing
     try:
-        # data_interval_end is the end of the schedule period (the "run time" in modern terms)
-        end_date = context.get('data_interval_end') 
+        # data_interval_start is the end of the schedule period (the "run time" in modern terms)
+        end_date = context.get('data_interval_start') 
         if not end_date:
             # Fallback to execution_date (start of interval) + 15 mins
             end_date = context.get('execution_date') + timedelta(minutes=15)
             
         mysql_now = int(end_date.timestamp())
-        print(f"Using Logical Date (data_interval_end): {end_date} ({mysql_now})")
+        print(f"Using Logical Date (data_interval_start): {end_date} ({mysql_now})")
     except Exception as e:
         print(f"Error getting logical date, defaulting to current time: {e}")
         mysql_now = int(datetime.now().timestamp())
@@ -168,7 +168,7 @@ def calculate_sync_window(**context):
     lookback = INCREMENTAL_LOOKBACK_MINUTES * 60
 
     # For a run scheduled at 10:15 (covering 10:00-10:15):
-    # data_interval_end = 10:15
+    # data_interval_start = 10:15
     # to_unix = 10:15 - buffer (5m) = 10:10
     # from_unix = 10:10 - lookback (15m) = 9:55
     # This ensures 15m effective window, shifted by buffer.
@@ -218,7 +218,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -t {TABLES['ecs']['full_name']} \
             --json-output /tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ data_interval_end.strftime('%Y-%m-%d %H:%M:%S') }}}}"
+            --end-time "{{{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}}}"
         ''',
         dag=dag
     )
@@ -239,7 +239,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -t {TABLES['uti']['full_name']} \
             --json-output /tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ data_interval_end.strftime('%Y-%m-%d %H:%M:%S') }}}}"
+            --end-time "{{{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}}}"
         ''',
         dag=dag
     )
@@ -260,7 +260,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -t {TABLES['uts']['full_name']} \
             --json-output /tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ data_interval_end.strftime('%Y-%m-%d %H:%M:%S') }}}}"
+            --end-time "{{{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}}}"
         ''',
         dag=dag
     )
