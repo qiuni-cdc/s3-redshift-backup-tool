@@ -35,10 +35,7 @@ with filtered as (
     select *
     from settlement_public.ecs_order_info_raw
     {% if is_incremental() %}
-    where add_time > (
-        select coalesce(max(add_time), 0) - 300  -- 5 min buffer for late arrivals
-        from {{ this }}
-    )
+    where add_time > {{ cutoff_time }} -- Uses the 30-day lookback calculated above
     {% else %}
     -- First run: load everything from raw
     {% endif %}

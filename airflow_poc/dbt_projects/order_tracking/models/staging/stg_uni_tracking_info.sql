@@ -34,10 +34,7 @@ with filtered as (
     select *
     from settlement_public.uni_tracking_info_raw
     {% if is_incremental() %}
-    where update_time > (
-        select coalesce(max(update_time), 0) - 300  -- 5 min buffer
-        from {{ this }}
-    )
+    where update_time > {{ cutoff_time }} -- Uses the 30-day lookback calculated above
     {% else %}
     -- First run: load everything from raw (process what was extracted)
     -- This ensures that whatever data is in the raw table (from the extraction task) is staged,

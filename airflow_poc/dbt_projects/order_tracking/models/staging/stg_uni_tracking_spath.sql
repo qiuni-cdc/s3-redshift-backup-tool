@@ -35,10 +35,7 @@ with filtered as (
     select *
     from settlement_public.uni_tracking_spath_raw
     {% if is_incremental() %}
-    where pathTime > (
-        select coalesce(max(pathTime), 0) - 300  -- 5 min buffer
-        from {{ this }}
-    )
+    where pathTime > {{ cutoff_time }} -- Uses the 30-day lookback calculated above
     {% else %}
     -- First run: load everything from raw
     {% endif %}
