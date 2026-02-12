@@ -244,8 +244,8 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
             
             # Build base WHERE clause
             if is_unix_timestamp:
-                # Convert datetime string to UNIX timestamp for comparison
-                base_where = f"{timestamp_col} > UNIX_TIMESTAMP({safe_timestamp})"
+                # Direct Unix timestamp comparison (value is already a Unix epoch integer)
+                base_where = f"{timestamp_col} > {safe_timestamp}"
             else:
                 # Standard datetime comparison
                 base_where = f"{timestamp_col} > {safe_timestamp}"
