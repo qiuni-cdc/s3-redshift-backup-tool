@@ -1075,6 +1075,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 mysql_table_name, watermark, chunk_size, table_config, table_schema
             )
             
+            # Enhanced logging: Show FULL query (not truncated)
             self.logger.logger.info(
                 "Executing CDC-generated chunk query",
                 table_name=table_name,
@@ -1082,11 +1083,28 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 last_id=last_id,
                 safe_last_id=safe_last_id,
                 chunk_size=chunk_size,
-                query_preview=query.replace('\n', ' ').strip()[:300] + "..."
+                full_query=query  # Complete query for debugging
             )
+            
+            # Console logging for immediate visibility
+            print(f"\n{'='*80}")
+            print(f"[EXTRACTION DEBUG] Table: {table_name}")
+            print(f"[EXTRACTION DEBUG] Watermark: timestamp={last_timestamp}, id={last_id}")
+            print(f"[EXTRACTION DEBUG] Full SQL Query:")
+            print(query)
+            print(f"{'='*80}\n")
             
             cursor.execute(query)
             chunk_data = cursor.fetchall()
+            
+            # Log query results
+            print(f"[EXTRACTION DEBUG] Query returned {len(chunk_data)} rows")
+            self.logger.logger.info(
+                "Query execution completed",
+                table_name=table_name,
+                rows_returned=len(chunk_data),
+                requested_limit=chunk_size
+            )
             
             # Convert to list of dictionaries if needed
             if chunk_data and not isinstance(chunk_data[0], dict):
@@ -1096,6 +1114,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             
             if not chunk_data:
                 # No more data
+                print(f"[EXTRACTION DEBUG] No more data to extract for {table_name}")
                 return [], safe_last_timestamp, safe_last_id
             
             # Debug: Log query result with first/last row details

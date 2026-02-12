@@ -284,12 +284,21 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
         LIMIT {limit}
         """.strip()
         
+        # Enhanced logging: Output complete query for debugging
         logger.info(f"TimestampOnly CDC query built", extra={
             "table": table_name,
             "timestamp_column": timestamp_col,
             "last_timestamp": last_timestamp,
-            "limit": limit
+            "limit": limit,
+            "is_unix_timestamp": is_unix_timestamp,
+            "where_clause": where_clause,
+            "complete_query": query  # Full query for debugging
         })
+        
+        # Also log to console for immediate visibility
+        print(f"[CDC DEBUG] Executing query for {table_name}:")
+        print(f"[CDC DEBUG] Query: {query}")
+        print(f"[CDC DEBUG] Watermark: last_timestamp={last_timestamp}, is_unix={is_unix_timestamp}")
         
         return query
     
