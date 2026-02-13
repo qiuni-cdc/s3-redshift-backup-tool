@@ -218,7 +218,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -t {TABLES['ecs']['full_name']} \
             --json-output /tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}}}"
+            --end-time "{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
         ''',
         dag=dag
     )
@@ -239,7 +239,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -t {TABLES['uti']['full_name']} \
             --json-output /tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}}}"
+            --end-time "{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
         ''',
         dag=dag
     )
@@ -260,7 +260,7 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
             -t {TABLES['uts']['full_name']} \
             --json-output /tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}}}"
+            --end-time "{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
         ''',
         dag=dag
     )
@@ -647,3 +647,4 @@ summary = PythonOperator(
 # ============================================================================
 
 check_drift >> calc_window >> extraction_group >> validate >> dbt_staging >> dbt_test >> summary
+

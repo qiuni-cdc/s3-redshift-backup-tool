@@ -62,7 +62,7 @@ INCREMENTAL_LOOKBACK_MINUTES = 15  # Only 15 minutes, not 20
 
 ---
 
-## ✅ The Fix
+## ✅ The Complete Fix
 
 ### Changes Made
 
@@ -75,14 +75,21 @@ INCREMENTAL_LOOKBACK_MINUTES = 15  # Missing buffer!
 INCREMENTAL_LOOKBACK_MINUTES = 20  # 15-min window + 5-min buffer = 20 min total
 ```
 
-#### 2. **Fixed End Time to Use Past Data** (Lines 221, 242, 263)
+#### 2. **Use Pre-Calculated Sync Window** (Lines 221, 242, 263)
 ```python
-# BEFORE:
---end-time "{{ data_interval_end.strftime('%Y-%m-%d %H:%M:%S') }}"  # Future!
+# BEFORE (Direct calculation - NO BUFFER):
+--end-time "{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}"
 
-# AFTER:
---end-time "{{ data_interval_start.strftime('%Y-%m-%d %H:%M:%S') }}"  # Past!
+# AFTER (Uses calculate_sync_window task output - WITH BUFFER):
+--end-time "{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}"
 ```
+
+**How It Works:**
+1. `calculate_sync_window` task runs first (lines 138-197)
+2. It calculates: `to_unix = data_interval_start - BUFFER_MINUTES - INCREMENTAL_LOOKBACK_MINUTES`
+3. Then: `from_unix = to_unix + INCREMENTAL_LOOKBACK_MINUTES`
+4. Result: 20-minute extraction window, ending 5 minutes BEFORE scheduled time
+5. All 3 extraction tasks use this pre-calculated window via XCom
 
 ---
 
