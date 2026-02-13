@@ -526,7 +526,7 @@ class GeminiRedshiftLoader:
                 today = datetime.max  # Placeholder, will be overwritten
                 # We need to be careful with 'today' import overshadowing
                 import datetime as dt_module
-                extraction_time = watermark.mysql_last_synced_time if watermark.mysql_last_synced_time else dt_module.datetime.now(); yesterday = extraction_time - timedelta(days=1); today = yesterday
+                extraction_time = getattr(watermark, 'mysql_last_synced_time', None) or dt_module.datetime.now(); yesterday = extraction_time - timedelta(days=1); today = yesterday
                 
                 today_prefix = f"{base_prefix}year={today.year}/month={today.month:02d}/day={today.day:02d}/"
                 logger.info(f"Prioritizing extraction date files with prefix: {today_prefix}")
@@ -912,4 +912,5 @@ class GeminiRedshiftLoader:
         else:
             # Unscoped table (v1.0.0 compatibility)
             return table_name.replace('.', '_').replace('-', '_')
+
 
