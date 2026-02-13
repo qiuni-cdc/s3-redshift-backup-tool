@@ -587,14 +587,16 @@
     ANY_VALUE(dpdtt.carrier_id) AS carrier_id
 FROM unidw.dw_parcel_detail_tool_temp_uti_2 dpdtt
 LEFT JOIN (
-    SELECT order_id, failed_reason
-    FROM (
-        SELECT order_id, failed_reason,
-               ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY time_211 ASC) as rn
+    SELECT t.order_id, t.failed_reason
+    FROM unidw.dw_parcel_detail_tool_temp_uti_2 t
+    INNER JOIN (
+        SELECT order_id, MIN(time_211) AS min_time_211
         FROM unidw.dw_parcel_detail_tool_temp_uti_2
         WHERE failed_reason IS NOT NULL
-    ) ranked
-    WHERE rn = 1
+        GROUP BY order_id
+    ) first_fr ON t.order_id = first_fr.order_id
+              AND t.time_211 = first_fr.min_time_211
+    WHERE t.failed_reason IS NOT NULL
 ) fr ON dpdtt.order_id = fr.order_id
 GROUP BY dpdtt.order_id;
 </sql>

@@ -621,7 +621,7 @@
     END AS `APV`, 
     uw1.id AS `Dest_Warehouse`,
     FROM_UNIXTIME(utas.pathAt) AS `Broker_Handover_Time`,
-    time_199.path_time AS `Ascan_Time`,
+    FROM_UNIXTIME(time_199.pathTime) AS `Ascan_Time`,
     CASE 
         WHEN uti.state = 199 THEN NULL
         ELSE FROM_UNIXTIME(uti.update_time)
@@ -629,7 +629,7 @@
     uti.state AS `Last_Event`,
     uti.internal_account_number AS `internal_account_number`,
     time_195.path_time AS `time_195`,
-    second_199.path_time AS `time_199_2nd`,
+    FROM_UNIXTIME(second_199.pathTime) AS `time_199_2nd`,
     time_255.path_time AS `time_255`,
     time_200.path_time AS `time_200`,
     time_202.path_time AS `time_202`,
@@ -673,53 +673,63 @@ JOIN  kuaisong.ecs_order_info eoi
   ON uti.order_id = eoi.order_id
 LEFT JOIN  uni_prealert_order upo 
   ON upo.tno = eoi.extra_order_sn
-LEFT JOIN (
-    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, uts.operate_warehouse AS Gateway_whs 
-    FROM uni_tracking_spath uts
-    WHERE uts.code = 199 AND uts.traceSeq IN (1, 2)
-) AS time_199
+LEFT JOIN kuaisong.uni_tracking_spath time_199
     ON uti.order_id = time_199.order_id
+   AND time_199.code = 199
+   AND time_199.pathTime = (
+       SELECT MIN(pathTime)
+       FROM kuaisong.uni_tracking_spath
+       WHERE order_id = uti.order_id AND code = 199
+   )
 LEFT JOIN uni_warehouses uw1
     ON uti.warehouse = uw1.id
 LEFT JOIN uni_warehouses uw2
-    ON time_199.Gateway_whs = uw2.id  
+    ON time_199.operate_warehouse = uw2.id
 LEFT JOIN uni_warehouses uw_inj
     ON eoi.pickup_warehouse = uw_inj.id
-LEFT JOIN (
-    SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, uts.operate_warehouse AS Dest_whs
-    FROM uni_tracking_spath uts
-    WHERE uts.code = 199 AND uts.traceSeq > 2
-) AS second_199
+LEFT JOIN kuaisong.uni_tracking_spath second_199
     ON uti.order_id = second_199.order_id
+   AND second_199.code = 199
+   AND second_199.pathTime = (
+       SELECT MIN(pathTime)
+       FROM kuaisong.uni_tracking_spath
+       WHERE order_id = uti.order_id
+         AND code = 199
+         AND pathTime > (
+             SELECT MIN(pathTime)
+             FROM kuaisong.uni_tracking_spath
+             WHERE order_id = uti.order_id AND code = 199
+         )
+   )
 LEFT JOIN uni_warehouses uw_199_2nd
-    ON second_199.Dest_whs = uw_199_2nd.id 
+    ON second_199.operate_warehouse = uw_199_2nd.id 
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 195
 ) AS time_195
     ON uti.order_id = time_195.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 255
 ) AS time_255
     ON uti.order_id = time_255.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time 
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 200
 ) AS time_200
     ON uti.order_id = time_200.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 202
 ) AS time_202
     ON uti.order_id = time_202.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 203 or uts.code = 228
 ) AS time_203
     ON uti.order_id = time_203.order_id
@@ -739,49 +749,49 @@ LEFT JOIN kuaisong.uni_customer uc
 	on eoi.customer_id = uc.id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 204
 ) AS time_204
 ON uti.order_id = time_204.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 208
 ) AS time_208
   ON uti.order_id = time_208.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id, failed_reason_type
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 211
 ) AS time_211
 ON uti.order_id = time_211.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 213
 ) AS time_213
 ON uti.order_id = time_213.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 231
 ) AS time_231
 ON uti.order_id = time_231.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 232
 ) AS time_232
 ON uti.order_id = time_232.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 230
 ) AS time_230
   ON uti.order_id = time_230.order_id
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time, staff_id
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 233
 ) AS time_233
   ON uti.order_id = time_233.order_id
@@ -798,7 +808,7 @@ LEFT JOIN (
 	ON time_211.failed_reason_type = ucd.code
 LEFT JOIN (
     SELECT uts.order_id, uts.code, FROM_UNIXTIME(uts.pathTime) AS path_time
-    FROM uni_tracking_spath uts
+    FROM kuaisong.uni_tracking_spath uts
     WHERE uts.code = 1870
 ) AS time_1870
     ON uti.order_id = time_1870.order_id
