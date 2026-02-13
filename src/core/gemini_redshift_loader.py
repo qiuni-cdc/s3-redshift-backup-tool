@@ -526,10 +526,10 @@ class GeminiRedshiftLoader:
                 today = datetime.max  # Placeholder, will be overwritten
                 # We need to be careful with 'today' import overshadowing
                 import datetime as dt_module
-                today = dt_module.datetime.now()
+                extraction_time = watermark.mysql_last_synced_time if watermark.mysql_last_synced_time else dt_module.datetime.now(); yesterday = extraction_time - timedelta(days=1); today = yesterday
                 
                 today_prefix = f"{base_prefix}year={today.year}/month={today.month:02d}/day={today.day:02d}/"
-                logger.info(f"Prioritizing today's files with prefix: {today_prefix}")
+                logger.info(f"Prioritizing extraction date files with prefix: {today_prefix}")
                 logger.info(f"🔍 DEBUG: No table partition found, falling back to date-based search. WARNING: This scans shared prefixes!")
                 prefix = today_prefix
                 max_keys = 50000  # CRITICAL FIX: Increased from 1000 to scan significantly more files in shared folder
@@ -912,3 +912,4 @@ class GeminiRedshiftLoader:
         else:
             # Unscoped table (v1.0.0 compatibility)
             return table_name.replace('.', '_').replace('-', '_')
+
