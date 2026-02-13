@@ -501,20 +501,20 @@ class BaseBackupStrategy(ABC):
                     current_value = str(int(parsed.timestamp()))
 
                 where_conditions = [
-                    f"`{timestamp_col}` > {watermark_value}",
+                    f"`{timestamp_col}` >= {watermark_value}",  # INCLUSIVE: capture boundary records
                     f"`{timestamp_col}` <= {current_value}"
                 ]
             except (ValueError, AttributeError) as e:
                 # Fallback to UNIX_TIMESTAMP function only for datetime strings
                 self.logger.logger.warning(f"Unix timestamp conversion failed: {e}, using UNIX_TIMESTAMP fallback")
                 where_conditions = [
-                    f"`{timestamp_col}` > UNIX_TIMESTAMP('{last_watermark}')",
+                    f"`{timestamp_col}` >= UNIX_TIMESTAMP('{last_watermark}')",  # INCLUSIVE: capture boundary records
                     f"`{timestamp_col}` <= UNIX_TIMESTAMP('{current_timestamp}')"
                 ]
         else:
             # Standard datetime comparison
             where_conditions = [
-                f"`{timestamp_col}` > '{last_watermark}'",
+                f"`{timestamp_col}` >= '{last_watermark}'",  # INCLUSIVE: capture boundary records
                 f"`{timestamp_col}` <= '{current_timestamp}'"
             ]
 
