@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import sys
 import os
+from datetime import datetime
 from dataclasses import asdict
 
 from src.core.connection_registry import ConnectionRegistry
@@ -1031,9 +1032,30 @@ def _execute_table_sync(pipeline_config, table_config, backup_only: bool, redshi
                     if not connection_test:
                         raise Exception("Redshift connection test failed")
                     
+                    # Parse end_time if provided to ensure correct partition targeting for backfills
+                    execution_timestamp = None
+                    if end_time:
+                        try:
+                            # Handle ISO 8601 format (e.g., 2023-10-27T10:00:00) or space-separated (2023-10-27 10:00:00)
+                            # Replace 'T' with space for robust parsing if needed, but fromisoformat handles T
+                            clean_end_time = end_time.replace('Z', '+00:00')
+                            execution_timestamp = datetime.fromisoformat(clean_end_time)
+                        except ValueError:
+                            try:
+                                # Fallback for space separator if isoformat fails
+                                execution_timestamp = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+                            except Exception as e:
+                                logger.warning(f"Failed to parse end_time '{end_time}' for Redshift loader: {e}")
+
                     # Load table data to Redshift using the scoped name for S3 file discovery
                     # Pass CDC strategy for full_sync replace mode TRUNCATE support and table_config for target name mapping
-                    redshift_success = redshift_loader.load_table_data(scoped_table_name, cdc_strategy, table_config)
+                    # CRITICAL FIX: Pass execution_timestamp to ensure we look in the correct partition for backfills
+                    redshift_success = redshift_loader.load_table_data(
+                        scoped_table_name, 
+                        cdc_strategy, 
+                        table_config,
+                        execution_timestamp=execution_timestamp
+                    )
                     
                 except Exception as redshift_error:
                     logger.error(f"Redshift loading failed for {scoped_table_name}: {redshift_error}")

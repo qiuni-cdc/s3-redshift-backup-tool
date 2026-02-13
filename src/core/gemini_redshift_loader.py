@@ -78,7 +78,7 @@ class GeminiRedshiftLoader:
             self.logger.error(f"Redshift connection test failed: {e}")
             return False
         
-    def load_table_data(self, table_name: str, cdc_strategy=None, table_config=None) -> bool:
+    def load_table_data(self, table_name: str, cdc_strategy=None, table_config=None, execution_timestamp: Optional[datetime] = None) -> bool:
         """
         Load S3 parquet data to Redshift using Gemini direct COPY approach.
         
@@ -86,6 +86,7 @@ class GeminiRedshiftLoader:
             table_name: Name of the table to load
             cdc_strategy: CDC strategy instance (optional, for full_sync replace mode)
             table_config: Table configuration with target_name mapping (optional)
+            execution_timestamp: Optional timestamp of the extraction execution (for accurate partition targeting)
             
         Returns:
             True if loading successful, False otherwise
@@ -135,7 +136,7 @@ class GeminiRedshiftLoader:
                     logger.info(f"Truncated table {target_schema}.{redshift_table_name} for full_sync replace mode")
             
             # Step 3: Get S3 parquet files for this table
-            s3_files = self._get_s3_parquet_files(table_name, cdc_strategy)
+            s3_files = self._get_s3_parquet_files(table_name, cdc_strategy, execution_timestamp)
             
             if not s3_files:
                 logger.warning(f"No S3 parquet files found for {table_name}")
@@ -459,7 +460,7 @@ class GeminiRedshiftLoader:
             logger.error(f"Failed to ensure Redshift table {table_name}: {e}")
             return False
     
-    def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None) -> List[str]:
+    def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None, execution_timestamp: Optional[datetime] = None) -> List[str]:
         """SIMPLIFIED: Get all S3 files, exclude processed files, load remaining"""
         try:
             logger.info(f"🔍 DEBUG: Starting _get_s3_parquet_files for table_name={table_name}")
@@ -526,10 +527,29 @@ class GeminiRedshiftLoader:
                 today = datetime.max  # Placeholder, will be overwritten
                 # We need to be careful with 'today' import overshadowing
                 import datetime as dt_module
-                extraction_time = getattr(watermark, 'mysql_last_synced_time', None) or dt_module.datetime.now(); yesterday = extraction_time - timedelta(days=1); today = yesterday
                 
-                today_prefix = f"{base_prefix}year={today.year}/month={today.month:02d}/day={today.day:02d}/"
-                logger.info(f"Prioritizing extraction date files with prefix: {today_prefix}")
+                # Use extraction time from watermark if available (handles backfills & midnight crossing)
+                # Fallback to current time for legacy objects or missing attributes
+                # Priority: 
+                # 1. Explicit execution_timestamp (passed from CLI for backfills)
+                # 2. Watermark mysql_last_synced_time (normal incremental flow)
+                # 3. Current time (fallback)
+                
+                if execution_timestamp:
+                    target_date = execution_timestamp
+                    logger.info(f"Using provided execution timestamp for partition targeting: {target_date}")
+                else:
+                    extraction_ts = getattr(watermark, 'mysql_last_synced_time', None)
+                    
+                    if isinstance(extraction_ts, (int, float)):
+                        target_date = dt_module.datetime.fromtimestamp(extraction_ts)
+                    elif isinstance(extraction_ts, dt_module.datetime):
+                        target_date = extraction_ts
+                    else:
+                        target_date = dt_module.datetime.now()
+
+                today_prefix = f"{base_prefix}year={target_date.year}/month={target_date.month:02d}/day={target_date.day:02d}/"
+                logger.info(f"Prioritizing extraction date files with prefix: {today_prefix} (Target Date: {target_date})")
                 logger.info(f"🔍 DEBUG: No table partition found, falling back to date-based search. WARNING: This scans shared prefixes!")
                 prefix = today_prefix
                 max_keys = 50000  # CRITICAL FIX: Increased from 1000 to scan significantly more files in shared folder
@@ -912,5 +932,6 @@ class GeminiRedshiftLoader:
         else:
             # Unscoped table (v1.0.0 compatibility)
             return table_name.replace('.', '_').replace('-', '_')
+
 
 
