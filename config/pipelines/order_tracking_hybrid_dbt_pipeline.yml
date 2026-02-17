@@ -36,6 +36,7 @@ tables:
   kuaisong.ecs_order_info:
     cdc_strategy: "timestamp_only"
     cdc_timestamp_column: "add_time"
+    cdc_id_column: "order_id"  # CRITICAL: Required for stable sort order to prevent duplicates
     timestamp_format: "unix"
     primary_key: "order_id"
     description: "Order creation (~500K/day normal, ~2M/day peak)"
@@ -48,6 +49,7 @@ tables:
   kuaisong.uni_tracking_info:
     cdc_strategy: "timestamp_only"
     cdc_timestamp_column: "update_time"
+    cdc_id_column: "order_id"  # CRITICAL: Required for stable sort order to prevent duplicates
     timestamp_format: "unix"
     primary_key: "order_id"
     description: "Latest tracking state (~500K/day normal, ~2M/day peak)"
@@ -60,6 +62,7 @@ tables:
   kuaisong.uni_tracking_spath:
     cdc_strategy: "timestamp_only"
     cdc_timestamp_column: "pathTime"
+    cdc_id_column: "id"  # CRITICAL: Required for stable sort order to prevent duplicates (use 'id' not composite key)
     timestamp_format: "unix"
     primary_key: ["order_id", "traceSeq"]
     sequence_column: "traceSeq"
