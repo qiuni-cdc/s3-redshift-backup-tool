@@ -57,14 +57,14 @@ class RawDataBackfiller:
             'auto_defaults': True  # Enable dynamic defaults
         },
         'uni_tracking_info': {
-        'uni_tracking_info': {
             'mysql_table': 'uniods.dw_uni_tracking_info',
             'redshift_table': 'settlement_public.uni_tracking_info_raw',
             'timestamp_column': 'update_time',
             'id_column': 'order_id',
             'mysql_connection': 'US_DW_UNIODS_SSH',
             'batch_size': 50000,
-            'excluded_columns': ['id']
+            'excluded_columns': ['id'],
+            'auto_defaults': True
         },
         'uni_tracking_spath': {
             'mysql_table': 'uniods.dw_uni_tracking_spath',
@@ -72,7 +72,8 @@ class RawDataBackfiller:
             'timestamp_column': 'pathTime',
             'id_column': 'id',
             'mysql_connection': 'US_DW_UNIODS_SSH',
-            'batch_size': 100000
+            'batch_size': 100000,
+            'auto_defaults': True
         }
     }
     
