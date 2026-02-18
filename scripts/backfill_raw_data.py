@@ -23,6 +23,8 @@ import sys
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any
+# Standard MySQL type codes (approximate) - we use raw codes to avoid dependency on specific connector version
+# 253=VAR_STRING, 254=STRING, 15=VARCHAR, 252=BLOB, 246=NEWDECIMAL, 3=LONG, 8=LONGLONG, 1=TINY, 2=SHORT, 9=INT24, 7=TIMESTAMP, 12=DATETIME, 10=DATE
 import time
 from pathlib import Path
 
@@ -51,19 +53,10 @@ class RawDataBackfiller:
             'mysql_connection': 'US_DW_UNIODS_SSH',
             'batch_size': 50000,
             'excluded_columns': ['id'],
-            'column_defaults': {
-                'tel': '', 'best_time': '', 'exp_ship_date': None,
-                'email': '', 'instruction': '', 'sign_name': '',
-                'unit': '', 'buzzer': '', 'city': '', 'state': '', 
-                'sender_name': '', 'sender_phone': '',
-                'return_name': '', 'return_phone': '', 'return_address': '',
-                'postscript': '', 'zip': '', 'country': '', 'province': '',
-                'shipping_name': '', 'shipping_phone': '', 'shipping_address': '',
-                'shipping_city': '', 'shipping_state': '', 'shipping_zip': '', 'shipping_country': '',
-                'consignee': '', 'consignee_phone': '', 'consignee_address': '',
-                'created_by': '', 'updated_by': '', 'status': '', 'track_status': ''
-            }
+            'column_defaults': {}, # Will use dynamic defaults
+            'auto_defaults': True  # Enable dynamic defaults
         },
+        'uni_tracking_info': {
         'uni_tracking_info': {
             'mysql_table': 'uniods.dw_uni_tracking_info',
             'redshift_table': 'settlement_public.uni_tracking_info_raw',
@@ -150,8 +143,14 @@ class RawDataBackfiller:
         
         # Get column names and indices to keep
         raw_column_names = [desc[0] for desc in mysql_cursor.description]
+        
+        # Capture types for dynamic defaults
+        # desc[1] is type_code
+        column_types = {desc[0]: desc[1] for desc in mysql_cursor.description}
+        
         excluded_cols = table_config.get('excluded_columns', [])
         column_defaults = table_config.get('column_defaults', {})
+        auto_defaults = table_config.get('auto_defaults', False)
         
         # Calculate indices to keep
         keep_indices = [i for i, col in enumerate(raw_column_names) if col not in excluded_cols]
@@ -196,9 +195,25 @@ class RawDataBackfiller:
                         col_name = raw_column_names[i]
                         val = row[i]
                         
-                        # Apply default if value is None and a default exists
-                        if val is None and col_name in column_defaults:
-                            val = column_defaults[col_name]
+                        # Apply default if value is None
+                        if val is None:
+                            # 1. Manual override
+                            if col_name in column_defaults:
+                                val = column_defaults[col_name]
+                            # 2. Auto defaults based on type
+                            elif auto_defaults:
+                                type_code = column_types.get(col_name)
+                                # String types (VARCHAR, VAR_STRING, STRING, BLOB, TEXT)
+                                if type_code in (253, 254, 15, 252, 249, 250, 251):
+                                    val = ''
+                                # Numeric types (TINY, SHORT, LONG, INT24, LONGLONG)
+                                elif type_code in (1, 2, 3, 8, 9):
+                                    val = 0
+                                # Floating point (FLOAT, DOUBLE, NEWDECIMAL)
+                                elif type_code in (4, 5, 246):
+                                    val = 0.0
+                                # For Date/Time, keeping None is usually safer unless strictly NOT NULL
+                                # but usually dates allow NULL. Strings are the main pain point.
                             
                         filtered_row.append(val)
                     
