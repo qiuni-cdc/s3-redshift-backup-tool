@@ -272,7 +272,7 @@ class RawDataBackfiller:
         logger.info(f"   Uploading {len(gz_buffer.getvalue())/1024:.1f} KB to {full_s3_path}...")
         self.s3_client.upload_fileobj(gz_buffer, self.bucket_name, s3_key)
         
-        # 3. Redshift COPY
+        # 3. Redshift COPY (with Idempotency)
         iam_role = os.environ.get('REDSHIFT_IAM_ROLE')
         creds = ""
         if iam_role:
@@ -298,11 +298,21 @@ class RawDataBackfiller:
             REGION '{os.environ.get('S3_REGION', 'us-west-2')}'
         """
         
-        logger.info("   Executing Redshift COPY...")
+        logger.info("   Executing Redshift Transaction (DELETE + COPY)...")
         redshift_cursor = redshift_conn.cursor()
         try:
+            # Idempotency: DELETE existing data for this day range first
+            delete_sql = f"""
+                DELETE FROM {table_config['redshift_table']} 
+                WHERE {table_config['timestamp_column']} >= {start_unix}
+                  AND {table_config['timestamp_column']} <= {end_unix}
+            """
+            redshift_cursor.execute(delete_sql)
+            
+            # COPY new data
             redshift_cursor.execute(copy_sql)
             redshift_conn.commit()
+            
             duration = time.time() - start_time
             rate = total_rows / duration if duration > 0 else 0
             logger.info(f"✅ {date_str}: Loaded {total_rows:,} rows via S3 in {duration:.1f}s ({rate:,.0f} rows/sec)")
@@ -504,20 +514,24 @@ class RawDataBackfiller:
         
         mysql_connection_name = table_config['mysql_connection']
         
-        # Use ConnectionManager.database_session for MySQL (handles SSH tunnel)
-        with self.connection_manager.database_session(mysql_connection_name) as mysql_conn:
-            logger.info(f"✅ MySQL connected via {mysql_connection_name}")
+        # Iteration logic with ROBUST CONNECTION HANDLING per day
+        # This ensures lost connections don't kill the whole process
+        results = []
+        current_dt = start_dt
+        
+        while current_dt <= end_dt:
+            date_str = current_dt.strftime('%Y-%m-%d')
             
-            # Use ConnectionRegistry for Redshift - direct connection (no SSH), same as DAG
-            with self.connection_manager.connection_registry.get_redshift_connection('redshift_default_direct') as redshift_conn:
-                logger.info("✅ Redshift connected")
-                
-                # Process each day
-                results = []
-                current_dt = start_dt
-                
-                while current_dt <= end_dt:
-                    try:
+            try:
+                # Open fresh connections for EACH day to handle timeouts/drops gracefully
+                with self.connection_manager.database_session(mysql_connection_name) as mysql_conn:
+                    if not mysql_conn.is_connected():
+                         # Force reconnect if needed (though database_session should handle it)
+                         mysql_conn.reconnect(attempts=3, delay=2)
+                         
+                    # Use ConnectionRegistry for Redshift
+                    with self.connection_manager.connection_registry.get_redshift_connection('redshift_default_direct') as redshift_conn:
+                        
                         result = self.load_day_data(
                             mysql_conn,
                             redshift_conn,
@@ -528,22 +542,19 @@ class RawDataBackfiller:
                             use_s3=use_s3
                         )
                         results.append(result)
-                        
-                    except Exception as e:
-                        date_str = current_dt.strftime('%Y-%m-%d')
-                        logger.error(f"❌ {date_str}: Failed - {e}")
-                        results.append({
-                            'date': date_str,
-                            'status': 'error',
-                            'rows': 0,
-                            'duration': 0,
-                            'error': str(e)
-                        })
-                        
-                        # Continue to next day on error (don't block the whole backfill)
-                        logger.warning(f"Skipping {date_str} due to error, continuing...")
-                    
-                    current_dt += timedelta(days=1)
+            
+            except Exception as e:
+                logger.error(f"❌ {date_str}: Failed - {e}")
+                results.append({
+                    'date': date_str,
+                    'status': 'error',
+                    'rows': 0,
+                    'duration': 0,
+                    'error': str(e)
+                })
+                logger.warning(f"Skipping {date_str} due to error, continuing...")
+            
+            current_dt += timedelta(days=1)
         
         # Print summary
         logger.info("=" * 80)
