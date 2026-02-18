@@ -229,8 +229,8 @@ class RawDataBackfiller:
         with self.connection_manager.database_session(mysql_connection_name) as mysql_conn:
             logger.info(f"✅ MySQL connected via {mysql_connection_name}")
             
-            # Use ConnectionRegistry for Redshift (handles SSH tunnel, no S3 dependency)
-            with self.connection_manager.connection_registry.get_redshift_connection('redshift_default') as redshift_conn:
+            # Use ConnectionRegistry for Redshift - direct connection (no SSH), same as DAG
+            with self.connection_manager.connection_registry.get_redshift_connection('redshift_default_direct') as redshift_conn:
                 logger.info("✅ Redshift connected")
                 
                 # Process each day
