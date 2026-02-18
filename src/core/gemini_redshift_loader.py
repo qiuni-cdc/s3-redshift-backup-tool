@@ -429,36 +429,79 @@ class GeminiRedshiftLoader:
         return ddl
     
     def _ensure_redshift_table(self, table_name: str, ddl: str, schema: str = None) -> bool:
-        """Create or verify Redshift table exists with correct schema"""
+        """Create Redshift table if not exists, or add missing columns if table exists (schema evolution)."""
         valid_schema = schema or self.config.redshift.schema
         try:
             with self._redshift_connection(schema=valid_schema) as conn:
                 cursor = conn.cursor()
-                
+
                 # Check if table exists
-                cursor.execute(f"""
-                    SELECT COUNT(*) 
-                    FROM information_schema.tables 
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
                     WHERE table_schema = %s AND table_name = %s
                 """, (valid_schema, table_name))
-                
+
                 table_exists = cursor.fetchone()[0] > 0
-                
+
                 if not table_exists:
                     logger.info(f"Creating Redshift table: {table_name}")
                     logger.info(f"DDL to execute:\n{ddl}")
                     cursor.execute(ddl)
-                    conn.commit()
                     logger.info(f"Successfully created table: {table_name}")
                 else:
-                    logger.info(f"Redshift table already exists: {table_name} - will NOT recreate")
-                
+                    logger.info(f"Redshift table already exists: {table_name} - checking for missing columns")
+                    self._add_missing_columns(cursor, table_name, ddl, valid_schema)
+
                 cursor.close()
                 return True
-                
+
         except Exception as e:
             logger.error(f"Failed to ensure Redshift table {table_name}: {e}")
             return False
+
+    def _parse_ddl_columns(self, ddl: str) -> dict:
+        """Parse column name → type definition from a CREATE TABLE DDL string."""
+        columns = {}
+        # Match everything between the first '(' and the closing ')' before DISTSTYLE/SORTKEY/';'
+        match = re.search(r'CREATE TABLE[^(]*\((.*?)\)\s*(?:DISTSTYLE|SORTKEY|;|$)', ddl, re.DOTALL | re.IGNORECASE)
+        if not match:
+            return columns
+        for line in match.group(1).split('\n'):
+            line = line.strip().rstrip(',')
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                col_name = parts[0].strip('`"')
+                col_type = parts[1].strip()
+                columns[col_name] = col_type
+        return columns
+
+    def _add_missing_columns(self, cursor, table_name: str, ddl: str, schema: str) -> None:
+        """Add columns present in DDL but absent from the existing Redshift table."""
+        cursor.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+        """, (schema, table_name))
+        existing = {row[0].lower() for row in cursor.fetchall()}
+
+        ddl_columns = self._parse_ddl_columns(ddl)
+        added = []
+        for col_name, col_def in ddl_columns.items():
+            if col_name.lower() not in existing:
+                # Strip NOT NULL — existing rows will be NULL for the new column
+                nullable_def = col_def.replace(' NOT NULL', '')
+                alter_sql = f"ALTER TABLE {schema}.{table_name} ADD COLUMN {col_name} {nullable_def}"
+                logger.info(f"Schema evolution: adding missing column {col_name} {nullable_def} to {table_name}")
+                cursor.execute(alter_sql)
+                added.append(col_name)
+
+        if added:
+            logger.info(f"Added {len(added)} missing column(s) to {schema}.{table_name}: {added}")
+        else:
+            logger.info(f"No missing columns for {schema}.{table_name}")
     
     def _get_s3_parquet_files(self, table_name: str, cdc_strategy=None, execution_timestamp: Optional[datetime] = None) -> List[str]:
         """SIMPLIFIED: Get all S3 files, exclude processed files, load remaining"""
