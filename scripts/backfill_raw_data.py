@@ -156,31 +156,27 @@ class RawDataBackfiller:
         loaded_rows = 0
         
         try:
+            # Prepare template for ONE row: (%s, %s, ...)
+            row_template = '(' + ', '.join(['%s'] * len(column_names)) + ')'
+            
             for i in range(0, total_rows, insert_batch_size):
                 batch = rows[i:i + insert_batch_size]
                 
-                # Format values for SQL safety
-                values_list = []
-                for row in batch:
-                    formatted_row = []
-                    for val in row:
-                        if val is None:
-                            formatted_row.append('NULL')
-                        elif isinstance(val, (int, float)):
-                            formatted_row.append(str(val))
-                        else:
-                            # Escape single quotes
-                            val_str = str(val).replace("'", "''")
-                            formatted_row.append(f"'{val_str}'")
-                    values_list.append(f"({', '.join(formatted_row)})")
+                # Use mogrify to safely format values (handles quotes, nulls, dates, etc.)
+                # mogrify returns bytes, so we decode to string
+                values_parts = [
+                    redshift_cursor.mogrify(row_template, row).decode('utf-8')
+                    for row in batch
+                ]
                 
-                values_str = ', '.join(values_list)
+                values_str = ','.join(values_parts)
                 insert_sql = f"INSERT INTO {table_config['redshift_table']} ({columns_str}) VALUES {values_str}"
                 
                 redshift_cursor.execute(insert_sql)
                 loaded_rows += len(batch)
                 
-                if (i + insert_batch_size) % 10000 == 0 or (i + insert_batch_size >= total_rows):
+                # Periodic commit/progress report
+                if (i + insert_batch_size) % 50000 == 0 or (i + insert_batch_size >= total_rows):
                      logger.info(f"   Progress: {loaded_rows:,} / {total_rows:,} rows")
             
             redshift_conn.commit()
