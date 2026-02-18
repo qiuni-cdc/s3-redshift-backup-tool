@@ -33,9 +33,7 @@ sys.path.insert(0, str(project_root))
 
 from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
-from src.core.redshift_loader import RedshiftLoader
 from src.utils.logging import get_logger
-import psycopg2
 
 logger = get_logger(__name__)
 
@@ -75,7 +73,6 @@ class RawDataBackfiller:
         """Initialize backfiller with configuration (reads from environment variables)"""
         self.config = AppConfig()
         self.connection_manager = ConnectionManager(self.config)
-        self.redshift_loader = RedshiftLoader(self.config)
         
     def get_day_range_unix(self, date_dt: datetime) -> tuple:
         """
@@ -232,8 +229,8 @@ class RawDataBackfiller:
         with self.connection_manager.database_session(mysql_connection_name) as mysql_conn:
             logger.info(f"✅ MySQL connected via {mysql_connection_name}")
             
-            # Use RedshiftLoader.redshift_connection for Redshift (handles SSH tunnel)
-            with self.redshift_loader.redshift_connection() as redshift_conn:
+            # Use ConnectionRegistry for Redshift (handles SSH tunnel, no S3 dependency)
+            with self.connection_manager.connection_registry.get_redshift_connection('redshift_default') as redshift_conn:
                 logger.info("✅ Redshift connected")
                 
                 # Process each day
