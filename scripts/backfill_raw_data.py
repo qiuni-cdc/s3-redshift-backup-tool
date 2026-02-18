@@ -153,6 +153,7 @@ class RawDataBackfiller:
         redshift_cursor = redshift_conn.cursor()
         
         logger.info(f"   Loading to Redshift via multi-row INSERTs (batch size: {insert_batch_size})...")
+        loaded_rows = 0
         
         try:
             for i in range(0, total_rows, insert_batch_size):
