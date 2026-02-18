@@ -39,6 +39,12 @@ x-airflow-common: &airflow-common
     - DBT_USE_SSH_TUNNEL=false
     # Note: REDSHIFT_SSH_KEY_PATH is still defined for backward compatibility
     - REDSHIFT_SSH_KEY_PATH=/keys/jasleentung.pem
+    
+    # S3 Configuration for Backfill
+    - S3_BUCKET_NAME=redshift-dw-qa-uniuni-com
+    - S3_REGION=us-west-2
+    - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID_QA}
+    - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY_QA}
 
   volumes:
     - ./dags:/opt/airflow/dags
