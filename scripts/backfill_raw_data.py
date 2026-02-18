@@ -23,6 +23,8 @@ import sys
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any
+import csv
+from io import StringIO
 import time
 from pathlib import Path
 
@@ -145,32 +147,34 @@ class RawDataBackfiller:
         
         logger.info(f"   Extracted {total_rows:,} rows from MySQL")
         
-        # Load to Redshift in batches
-        redshift_cursor = redshift_conn.cursor()
-        batch_size = table_config['batch_size']
-        loaded_rows = 0
+        # Prepare in-memory CSV for fast bulk load
+        csv_buffer = StringIO()
+        writer = csv.writer(csv_buffer, delimiter=',')
+        writer.writerows(rows)
+        csv_buffer.seek(0)
         
-        # Build INSERT statement
-        placeholders = ', '.join(['%s'] * len(column_names))
-        insert_query = f"""
-            INSERT INTO {table_config['redshift_table']} 
-            ({', '.join(column_names)})
-            VALUES ({placeholders})
+        logger.info(f"   Buffer size: {len(csv_buffer.getvalue()) / 1024 / 1024:.2f} MB")
+        
+        redshift_cursor = redshift_conn.cursor()
+        
+        # Use COPY FROM STDIN for maximum speed (10-50x faster than INSERT)
+        copy_sql = f"""
+            COPY {table_config['redshift_table']} ({', '.join(column_names)})
+            FROM STDIN
+            WITH (FORMAT CSV, DELIMITER ',')
         """
         
-        logger.info(f"   Loading to Redshift in batches of {batch_size:,}...")
-        
-        for i in range(0, total_rows, batch_size):
-            batch = rows[i:i + batch_size]
-            redshift_cursor.executemany(insert_query, batch)
-            loaded_rows += len(batch)
-            
-            if i + batch_size < total_rows:
-                logger.info(f"   Progress: {loaded_rows:,} / {total_rows:,} rows")
-        
-        # Commit this day's data
-        redshift_conn.commit()
-        redshift_cursor.close()
+        try:
+            logger.info("   Executing COPY...")
+            redshift_cursor.copy_expert(copy_sql, csv_buffer)
+            redshift_conn.commit()
+        except Exception as e:
+            logger.error(f"   COPY failed: {e}")
+            redshift_conn.rollback()
+            raise
+        finally:
+            redshift_cursor.close()
+            csv_buffer.close()
         
         duration = time.time() - start_time
         rate = total_rows / duration if duration > 0 else 0
