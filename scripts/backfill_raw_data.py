@@ -89,28 +89,51 @@ class RawDataBackfiller:
         self.config = AppConfig()
         self.connection_manager = ConnectionManager(self.config)
         
-        # S3 Client (Lazy init)
+        
+        # S3 Client and Credentials
         self.s3_client = None
         self.bucket_name = os.environ.get('S3_BUCKET_NAME')
+        self.aws_ak = None
+        self.aws_sk = None
         
     def _init_s3(self):
-        if not self.s3_client:
-            self.s3_client = boto3.client(
-                's3',
-                region_name=os.environ.get('S3_REGION', 'us-west-2')
-            )
-            if not self.bucket_name:
-                raise ValueError("S3_BUCKET_NAME env var is required for S3 mode")
+        if self.s3_client:
+            return
+
+        # 1. Try Airflow Connection (matches DAG behavior)
+        try:
+            from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+            hook = S3Hook(aws_conn_id='aws_default')
+            credentials = hook.get_credentials()
+            if credentials:
+                self.s3_client = hook.get_conn()
+                self.aws_ak = credentials.access_key
+                self.aws_sk = credentials.secret_key
+                logger.info("Initialized S3 client using Airflow Connection 'aws_default'")
+                return
+        except Exception as e:
+            logger.debug(f"Could not use Airflow S3Hook: {e}")
+
+        # 2. Fallback to Env Vars / Boto3
+        self.s3_client = boto3.client(
+            's3',
+            region_name=os.environ.get('S3_REGION', 'us-west-2')
+        )
+        # Debug credentials from Env
+        ak = os.environ.get('AWS_ACCESS_KEY_ID')
+        sk = os.environ.get('AWS_SECRET_ACCESS_KEY')
+        
+        if ak and sk:
+            self.aws_ak = ak
+            self.aws_sk = sk
+            logger.info(f"Using AWS Access Key from Env: {ak[:4]}****")
+        else:
+            logger.warning("AWS credentials not found in Env or Airflow Connection!")
+
+        if not self.bucket_name:
+            raise ValueError("S3_BUCKET_NAME env var is required for S3 mode")
             
-            # Debug credentials
-            ak = os.environ.get('AWS_ACCESS_KEY_ID')
-            sk = os.environ.get('AWS_SECRET_ACCESS_KEY')
-            if not ak or not sk:
-                logger.error("AWS credentials missing in environment variables!")
-            else:
-                logger.info(f"Using AWS Access Key: {ak[:4]}****")
-                
-            logger.info(f"Initialized S3 client for bucket: {self.bucket_name}")
+        logger.info(f"Initialized S3 client for bucket: {self.bucket_name}")
         
     def get_day_range_unix(self, date_dt: datetime) -> tuple:
         """
@@ -229,10 +252,11 @@ class RawDataBackfiller:
         if iam_role:
             creds = f"IAM_ROLE '{iam_role}'"
         else:
-            ak = os.environ.get('AWS_ACCESS_KEY_ID')
-            sk = os.environ.get('AWS_SECRET_ACCESS_KEY')
-            if not ak or not sk: raise ValueError("Missing AWS credentials for COPY")
-            creds = f"CREDENTIALS 'aws_access_key_id={ak};aws_secret_access_key={sk}'"
+            # Use collected credentials
+            if not self.aws_ak or not self.aws_sk: 
+                raise ValueError("Missing AWS credentials for COPY (checked Airflow Conn and Env Vars)")
+            
+            creds = f"CREDENTIALS 'aws_access_key_id={self.aws_ak};aws_secret_access_key={self.aws_sk}'"
             
         copy_sql = f"""
             COPY {table_config['redshift_table']} ({', '.join(column_names)})
