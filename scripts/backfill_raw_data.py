@@ -23,8 +23,6 @@ import sys
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any
-import csv
-from io import StringIO
 import time
 from pathlib import Path
 
@@ -147,34 +145,51 @@ class RawDataBackfiller:
         
         logger.info(f"   Extracted {total_rows:,} rows from MySQL")
         
-        # Prepare in-memory CSV for fast bulk load
-        csv_buffer = StringIO()
-        writer = csv.writer(csv_buffer, delimiter=',')
-        writer.writerows(rows)
-        csv_buffer.seek(0)
-        
-        logger.info(f"   Buffer size: {len(csv_buffer.getvalue()) / 1024 / 1024:.2f} MB")
+        # Use multi-row INSERT for speed (faster than executemany, no S3 needed)
+        # Redshift has query size limits, so we use batches of 1000 rows
+        insert_batch_size = 1000  # Rows per single INSERT statement
+        columns_str = ', '.join(column_names)
         
         redshift_cursor = redshift_conn.cursor()
         
-        # Use COPY FROM STDIN for maximum speed (10-50x faster than INSERT)
-        copy_sql = f"""
-            COPY {table_config['redshift_table']} ({', '.join(column_names)})
-            FROM STDIN
-            WITH (FORMAT CSV, DELIMITER ',')
-        """
+        logger.info(f"   Loading to Redshift via multi-row INSERTs (batch size: {insert_batch_size})...")
         
         try:
-            logger.info("   Executing COPY...")
-            redshift_cursor.copy_expert(copy_sql, csv_buffer)
+            for i in range(0, total_rows, insert_batch_size):
+                batch = rows[i:i + insert_batch_size]
+                
+                # Format values for SQL safety
+                values_list = []
+                for row in batch:
+                    formatted_row = []
+                    for val in row:
+                        if val is None:
+                            formatted_row.append('NULL')
+                        elif isinstance(val, (int, float)):
+                            formatted_row.append(str(val))
+                        else:
+                            # Escape single quotes
+                            val_str = str(val).replace("'", "''")
+                            formatted_row.append(f"'{val_str}'")
+                    values_list.append(f"({', '.join(formatted_row)})")
+                
+                values_str = ', '.join(values_list)
+                insert_sql = f"INSERT INTO {table_config['redshift_table']} ({columns_str}) VALUES {values_str}"
+                
+                redshift_cursor.execute(insert_sql)
+                loaded_rows += len(batch)
+                
+                if (i + insert_batch_size) % 10000 == 0 or (i + insert_batch_size >= total_rows):
+                     logger.info(f"   Progress: {loaded_rows:,} / {total_rows:,} rows")
+            
             redshift_conn.commit()
+            
         except Exception as e:
-            logger.error(f"   COPY failed: {e}")
+            logger.error(f"   INSERT failed: {e}")
             redshift_conn.rollback()
             raise
         finally:
             redshift_cursor.close()
-            csv_buffer.close()
         
         duration = time.time() - start_time
         rate = total_rows / duration if duration > 0 else 0
