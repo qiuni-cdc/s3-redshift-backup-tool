@@ -293,6 +293,9 @@ class RawDataBackfiller:
             IGNOREHEADER 0
             ACCEPTINVCHARS
             TRUNCATECOLUMNS
+            COMPUPDATE OFF
+            STATUPDATE OFF
+            REGION '{os.environ.get('S3_REGION', 'us-west-2')}'
         """
         
         logger.info("   Executing Redshift COPY...")
@@ -300,7 +303,9 @@ class RawDataBackfiller:
         try:
             redshift_cursor.execute(copy_sql)
             redshift_conn.commit()
-            logger.info(f"✅ Loaded {total_rows:,} rows via S3")
+            duration = time.time() - start_time
+            rate = total_rows / duration if duration > 0 else 0
+            logger.info(f"✅ {date_str}: Loaded {total_rows:,} rows via S3 in {duration:.1f}s ({rate:,.0f} rows/sec)")
         except Exception as e:
             logger.error(f"COPY failed: {e}")
             redshift_conn.rollback()
