@@ -98,6 +98,7 @@ class RawDataBackfiller:
             self.s3_client = boto3.client(
                 's3',
                 region_name=os.environ.get('S3_REGION', 'us-west-2')
+            )
             if not self.bucket_name:
                 raise ValueError("S3_BUCKET_NAME env var is required for S3 mode")
             logger.info(f"Initialized S3 client for bucket: {self.bucket_name}")
