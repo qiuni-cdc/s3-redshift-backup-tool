@@ -101,7 +101,15 @@ class RawDataBackfiller:
             )
             if not self.bucket_name:
                 raise ValueError("S3_BUCKET_NAME env var is required for S3 mode")
-            logger.info(f"Initialized S3 client for bucket: {self.bucket_name}")
+            
+            # Debug credentials
+            ak = os.environ.get('AWS_ACCESS_KEY_ID')
+            sk = os.environ.get('AWS_SECRET_ACCESS_KEY')
+            if not ak or not sk:
+                logger.error("AWS credentials missing in environment variables!")
+            else:
+                logger.info(f"Using AWS Access Key: {ak[:4]}****")
+                
             logger.info(f"Initialized S3 client for bucket: {self.bucket_name}")
         
     def get_day_range_unix(self, date_dt: datetime) -> tuple:
