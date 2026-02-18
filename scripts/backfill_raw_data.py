@@ -171,8 +171,8 @@ class RawDataBackfiller:
         logger.info(f"   Extracted {total_rows:,} rows from MySQL")
         
         # Use multi-row INSERT for speed (faster than executemany, no S3 needed)
-        # Redshift has query size limits, so we use batches of 500 rows
-        insert_batch_size = 500  # Rows per single INSERT statement
+        # Redshift has query size limits, so we use batches of 2000 rows
+        insert_batch_size = 2000  # Rows per single INSERT statement
         columns_str = ', '.join(column_names)
         
         redshift_cursor = redshift_conn.cursor()
