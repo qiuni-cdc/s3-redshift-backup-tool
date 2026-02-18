@@ -49,7 +49,8 @@ class RawDataBackfiller:
             'timestamp_column': 'add_time',
             'id_column': 'order_id',
             'mysql_connection': 'US_DW_UNIODS_SSH',
-            'batch_size': 50000
+            'batch_size': 50000,
+            'excluded_columns': ['id']
         },
         'uni_tracking_info': {
             'mysql_table': 'uniods.dw_uni_tracking_info',
@@ -57,7 +58,8 @@ class RawDataBackfiller:
             'timestamp_column': 'update_time',
             'id_column': 'order_id',
             'mysql_connection': 'US_DW_UNIODS_SSH',
-            'batch_size': 50000
+            'batch_size': 50000,
+            'excluded_columns': ['id']
         },
         'uni_tracking_spath': {
             'mysql_table': 'uniods.dw_uni_tracking_spath',
@@ -134,8 +136,15 @@ class RawDataBackfiller:
         logger.info(f"   Extracting from MySQL...")
         mysql_cursor.execute(extract_query)
         
-        # Get column names
-        column_names = [desc[0] for desc in mysql_cursor.description]
+        # Get column names and indices to keep
+        raw_column_names = [desc[0] for desc in mysql_cursor.description]
+        excluded_cols = table_config.get('excluded_columns', [])
+        
+        # Calculate indices to keep
+        keep_indices = [i for i, col in enumerate(raw_column_names) if col not in excluded_cols]
+        column_names = [raw_column_names[i] for i in keep_indices]
+        
+        logger.info(f"   Columns: {len(column_names)} (excluded: {excluded_cols})")
         
         # Fetch all rows for this day
         rows = mysql_cursor.fetchall()
@@ -165,14 +174,17 @@ class RawDataBackfiller:
             for i in range(0, total_rows, insert_batch_size):
                 batch = rows[i:i + insert_batch_size]
                 
-                # Use mogrify to safely format values (handles quotes, nulls, dates, etc.)
-                # mogrify returns bytes, so we decode to string
-                values_parts = [
-                    redshift_cursor.mogrify(row_template, row).decode('utf-8')
-                    for row in batch
-                ]
+                # Format values for SQL safety
+                values_list = []
+                for row in batch:
+                    # Filter row values based on keep_indices
+                    filtered_row = [row[i] for i in keep_indices]
+                    
+                    # Use mogrify to safely format values (handles quotes, nulls, dates, etc.)
+                    formatted_val = redshift_cursor.mogrify(row_template, filtered_row).decode('utf-8')
+                    values_list.append(formatted_val)
                 
-                values_str = ','.join(values_parts)
+                values_str = ','.join(values_list)
                 insert_sql = f"INSERT INTO {table_config['redshift_table']} ({columns_str}) VALUES {values_str}"
                 
                 redshift_cursor.execute(insert_sql)
