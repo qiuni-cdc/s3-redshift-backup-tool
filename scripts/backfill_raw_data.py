@@ -27,6 +27,10 @@ from typing import Dict, Any
 # 253=VAR_STRING, 254=STRING, 15=VARCHAR, 252=BLOB, 246=NEWDECIMAL, 3=LONG, 8=LONGLONG, 1=TINY, 2=SHORT, 9=INT24, 7=TIMESTAMP, 12=DATETIME, 10=DATE
 import time
 from pathlib import Path
+import boto3
+import gzip
+import csv
+from io import BytesIO, StringIO
 
 # Add project root to path (works in both Docker and host)
 script_dir = Path(__file__).resolve().parent
@@ -77,10 +81,25 @@ class RawDataBackfiller:
         }
     }
     
+    
     def __init__(self):
         """Initialize backfiller with configuration (reads from environment variables)"""
         self.config = AppConfig()
         self.connection_manager = ConnectionManager(self.config)
+        
+        # S3 Client (Lazy init)
+        self.s3_client = None
+        self.bucket_name = os.environ.get('S3_BUCKET_NAME')
+        
+    def _init_s3(self):
+        if not self.s3_client:
+            self.s3_client = boto3.client(
+                's3',
+                region_name=os.environ.get('S3_REGION', 'us-west-2')
+            )
+            if not self.bucket_name:
+                raise ValueError("S3_BUCKET_NAME env var is required for S3 mode")
+            logger.info(f"Initialized S3 client for bucket: {self.bucket_name}")
         
     def get_day_range_unix(self, date_dt: datetime) -> tuple:
         """
@@ -111,11 +130,110 @@ class RawDataBackfiller:
         
         return count > 0
     
+        if total_rows == 0:
+            logger.info(f"   No data found for {date_str}")
+            return {'date': date_str, 'status': 'no_data', 'rows': 0, 'duration': time.time() - start_time}
+        
+        logger.info(f"   Extracted {total_rows:,} rows from MySQL")
+        
+        # S3 UPLOAD STRATEGY
+        self._init_s3()
+        
+        # 1. Create GZIP CSV in memory
+        csv_buffer = StringIO()
+        writer = csv.writer(csv_buffer, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        
+        # Write rows (applying defaults)
+        for row in rows:
+            clean_row = []
+            for i in keep_indices:
+                col_name = raw_column_names[i]
+                val = row[i]
+                if val is None:
+                    if col_name in column_defaults:
+                        val = column_defaults[col_name]
+                    elif auto_defaults:
+                        type_code = column_types.get(col_name)
+                        if type_code in (253, 254, 15, 252, 249, 250, 251): val = ''
+                        elif type_code in (1, 2, 3, 8, 9): val = 0
+                        elif type_code in (4, 5, 246): val = 0.0
+                clean_row.append(val)
+            writer.writerow(clean_row)
+            
+        # Compress
+        gz_buffer = BytesIO()
+        with gzip.GzipFile(fileobj=gz_buffer, mode='wb') as gz:
+            gz.write(csv_buffer.getvalue().encode('utf-8'))
+        gz_buffer.seek(0)
+        
+        # 2. Upload to S3
+        s3_key = f"backfill/temp_{table_config['redshift_table']}_{date_str}_{int(time.time())}.csv.gz"
+        full_s3_path = f"s3://{self.bucket_name}/{s3_key}"
+        
+        logger.info(f"   Uploading {len(gz_buffer.getvalue())/1024:.1f} KB to {full_s3_path}...")
+        self.s3_client.upload_fileobj(gz_buffer, self.bucket_name, s3_key)
+        
+        # 3. Redshift COPY
+        iam_role = os.environ.get('REDSHIFT_IAM_ROLE') # Optional if using keys
+        creds = ""
+        if iam_role:
+            creds = f"IAM_ROLE '{iam_role}'"
+        else:
+            # Use temp credentials or current env vars
+            ak = os.environ.get('AWS_ACCESS_KEY_ID')
+            sk = os.environ.get('AWS_SECRET_ACCESS_KEY')
+            if not ak or not sk:
+                raise ValueError("Missing AWS credentials for Redshift COPY")
+            creds = f"CREDENTIALS 'aws_access_key_id={ak};aws_secret_access_key={sk}'"
+            
+        copy_sql = f"""
+            COPY {table_config['redshift_table']} ({', '.join(column_names)})
+            FROM '{full_s3_path}'
+            {creds}
+            GZIP
+            CSV DELIMITER ','
+            IGNOREHEADER 0
+            acceptinvchars
+            truncanctecolumns
+        """
+        
+        logger.info("   Executing Redshift COPY...")
+        redshift_cursor = redshift_conn.cursor()
+        try:
+            redshift_cursor.execute(copy_sql)
+            redshift_conn.commit()
+            logger.info(f"✅ Loaded {total_rows:,} rows via S3")
+        except Exception as e:
+            logger.error(f"COPY failed: {e}")
+            redshift_conn.rollback()
+            raise
+        finally:
+            # Cleanup S3
+            try:
+                self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
+            except:
+                pass
+            redshift_cursor.close()
+            
+        duration = time.time() - start_time
+        return {'date': date_str, 'status': 'success', 'rows': total_rows, 'duration': duration}
+
     def load_day_data(self, mysql_conn, redshift_conn, table_config: Dict, date_dt: datetime,
                       skip_if_exists: bool = True, limit: int = None) -> Dict[str, Any]:
         """Load one day of data from MySQL to Redshift"""
         
-        start_time = time.time()
+        # If S3 mode is enabled via flag (passed in table_config or args?), check for it
+        # Actually simplest to modify this method to branch
+        pass # Placeholder, real logic is below in original file but I inserted `load_day_data_s3` above it? 
+        # No, I will put branch logic inside `load_day_data` using `args` passed or config
+        
+    def load_day_data(self, mysql_conn, redshift_conn, table_config: Dict, date_dt: datetime,
+                      skip_if_exists: bool = True, limit: int = None, use_s3: bool = False) -> Dict[str, Any]:
+                      
+        if use_s3:
+            return self.load_day_data_s3(mysql_conn, redshift_conn, table_config, date_dt, skip_if_exists, limit)
+            
+        # ... existing logic ...
         start_unix, end_unix = self.get_day_range_unix(date_dt)
         date_str = date_dt.strftime('%Y-%m-%d')
         
@@ -249,7 +367,7 @@ class RawDataBackfiller:
         return {'date': date_str, 'status': 'success', 'rows': total_rows, 'duration': duration}
     
     def backfill(self, table_name: str, start_unix: int, end_unix: int,
-                 skip_if_exists: bool = True, dry_run: bool = False, limit: int = None):
+                 skip_if_exists: bool = True, dry_run: bool = False, limit: int = None, use_s3: bool = False):
         """
         Backfill data for a Unix timestamp range
         
@@ -314,7 +432,8 @@ class RawDataBackfiller:
                             table_config,
                             current_dt,
                             skip_if_exists,
-                            limit
+                            limit,
+                            use_s3=args.use_s3
                         )
                         results.append(result)
                         
@@ -409,6 +528,7 @@ Examples:
     
     parser.add_argument('--config', help='Path to config file')
     parser.add_argument('--limit', type=int, help='Limit rows per day (for testing)')
+    parser.add_argument('--use-s3', action='store_true', help='Use S3 COPY loading (faster)')
     
     args = parser.parse_args()
     
@@ -437,10 +557,12 @@ Examples:
                 table_name=table,
                 start_unix=start_unix,
                 end_unix=end_unix,
-                skip_if_exists=not args.force,
-                dry_run=args.dry_run,
-                limit=args.limit
+                'force': args.force, # pass full args object or specific flags?
+                # backfill signature needs updating
             )
+            # wait, backfill method signature must match call.
+            # adjusting backfill method signature in next chunk
+            pass
         except Exception as e:
             logger.error(f"Failed to backfill {table}: {e}")
             import traceback
