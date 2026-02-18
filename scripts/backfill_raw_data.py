@@ -57,7 +57,11 @@ class RawDataBackfiller:
                 'unit': '', 'buzzer': '', 'city': '', 'state': '', 
                 'sender_name': '', 'sender_phone': '',
                 'return_name': '', 'return_phone': '', 'return_address': '',
-                'postscript': '', 'zip': '', 'country': '', 'province': ''
+                'postscript': '', 'zip': '', 'country': '', 'province': '',
+                'shipping_name': '', 'shipping_phone': '', 'shipping_address': '',
+                'shipping_city': '', 'shipping_state': '', 'shipping_zip': '', 'shipping_country': '',
+                'consignee': '', 'consignee_phone': '', 'consignee_address': '',
+                'created_by': '', 'updated_by': '', 'status': '', 'track_status': ''
             }
         },
         'uni_tracking_info': {
