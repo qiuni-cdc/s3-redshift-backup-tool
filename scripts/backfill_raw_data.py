@@ -51,7 +51,13 @@ class RawDataBackfiller:
             'mysql_connection': 'US_DW_UNIODS_SSH',
             'batch_size': 50000,
             'excluded_columns': ['id'],
-            'column_defaults': {'tel': ''}
+            'column_defaults': {
+                'tel': '', 'best_time': '', 'exp_ship_date': None,
+                'email': '', 'instruction': '', 'sign_name': '',
+                'unit': '', 'buzzer': '', 'city': '', 'state': '', 
+                'sender_name': '', 'sender_phone': '',
+                'return_name': '', 'return_phone': '', 'return_address': ''
+            }
         },
         'uni_tracking_info': {
             'mysql_table': 'uniods.dw_uni_tracking_info',
