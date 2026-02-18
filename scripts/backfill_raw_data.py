@@ -44,27 +44,27 @@ class RawDataBackfiller:
     # Table configuration mapping
     TABLE_CONFIG = {
         'ecs_order_info': {
-            'mysql_table': 'kuaisong.ecs_order_info',
+            'mysql_table': 'uniods.dw_ecs_order_info',
             'redshift_table': 'settlement_public.ecs_order_info_raw',
             'timestamp_column': 'add_time',
             'id_column': 'order_id',
-            'mysql_connection': 'US_PROD_RO_SSH',
+            'mysql_connection': 'US_DW_UNIODS_SSH',
             'batch_size': 50000
         },
         'uni_tracking_info': {
-            'mysql_table': 'kuaisong.uni_tracking_info',
+            'mysql_table': 'uniods.dw_uni_tracking_info',
             'redshift_table': 'settlement_public.uni_tracking_info_raw',
             'timestamp_column': 'update_time',
             'id_column': 'order_id',
-            'mysql_connection': 'US_PROD_RO_SSH',
+            'mysql_connection': 'US_DW_UNIODS_SSH',
             'batch_size': 50000
         },
         'uni_tracking_spath': {
-            'mysql_table': 'kuaisong.uni_tracking_spath',
+            'mysql_table': 'uniods.dw_uni_tracking_spath',
             'redshift_table': 'settlement_public.uni_tracking_spath_raw',
             'timestamp_column': 'pathTime',
             'id_column': 'id',
-            'mysql_connection': 'US_PROD_RO_SSH',
+            'mysql_connection': 'US_DW_UNIODS_SSH',
             'batch_size': 100000
         }
     }
@@ -104,7 +104,7 @@ class RawDataBackfiller:
         return count > 0
     
     def load_day_data(self, mysql_conn, redshift_conn, table_config: Dict, date_dt: datetime,
-                      skip_if_exists: bool = True) -> Dict[str, Any]:
+                      skip_if_exists: bool = True, limit: int = None) -> Dict[str, Any]:
         """Load one day of data from MySQL to Redshift"""
         
         start_time = time.time()
@@ -127,6 +127,9 @@ class RawDataBackfiller:
               AND {table_config['timestamp_column']} <= {end_unix}
             ORDER BY {table_config['timestamp_column']}, {table_config['id_column']}
         """
+        
+        if limit:
+            extract_query += f" LIMIT {limit}"
         
         logger.info(f"   Extracting from MySQL...")
         mysql_cursor.execute(extract_query)
@@ -196,7 +199,7 @@ class RawDataBackfiller:
         return {'date': date_str, 'status': 'success', 'rows': total_rows, 'duration': duration}
     
     def backfill(self, table_name: str, start_unix: int, end_unix: int,
-                 skip_if_exists: bool = True, dry_run: bool = False):
+                 skip_if_exists: bool = True, dry_run: bool = False, limit: int = None):
         """
         Backfill data for a Unix timestamp range
         
@@ -260,7 +263,8 @@ class RawDataBackfiller:
                             redshift_conn,
                             table_config,
                             current_dt,
-                            skip_if_exists
+                            skip_if_exists,
+                            limit
                         )
                         results.append(result)
                         
@@ -353,6 +357,9 @@ Examples:
     parser.add_argument('--dry-run', action='store_true',
                        help='Dry run - show what would be loaded without loading')
     
+    parser.add_argument('--config', help='Path to config file')
+    parser.add_argument('--limit', type=int, help='Limit rows per day (for testing)')
+    
     args = parser.parse_args()
     
     # Determine start and end Unix timestamps
@@ -381,7 +388,8 @@ Examples:
                 start_unix=start_unix,
                 end_unix=end_unix,
                 skip_if_exists=not args.force,
-                dry_run=args.dry_run
+                dry_run=args.dry_run,
+                limit=args.limit
             )
         except Exception as e:
             logger.error(f"Failed to backfill {table}: {e}")
