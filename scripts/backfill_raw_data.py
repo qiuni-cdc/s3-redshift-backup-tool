@@ -204,129 +204,145 @@ class RawDataBackfiller:
             
         logger.info(f"📅 {date_str}: Starting S3 load (Unix: {start_unix} - {end_unix})")
         
-        # Extract from MySQL
-        mysql_cursor = mysql_conn.cursor()
-        extract_query = f"""
-            SELECT * FROM {table_config['mysql_table']}
-            WHERE {table_config['timestamp_column']} >= {start_unix}
-              AND {table_config['timestamp_column']} <= {end_unix}
-            ORDER BY {table_config['timestamp_column']}, {table_config['id_column']}
-        """
-        if limit: extract_query += f" LIMIT {limit}"
-        
-        logger.info(f"   Extracting from MySQL...")
-        mysql_cursor.execute(extract_query)
-        
-        # Get column names and indices to keep
-        raw_column_names = [desc[0] for desc in mysql_cursor.description]
-        column_types = {desc[0]: desc[1] for desc in mysql_cursor.description}
-        excluded_cols = table_config.get('excluded_columns', [])
-        column_defaults = table_config.get('column_defaults', {})
-        auto_defaults = table_config.get('auto_defaults', False)
-        
-        keep_indices = [i for i, col in enumerate(raw_column_names) if col not in excluded_cols]
-        column_names = [raw_column_names[i] for i in keep_indices]
-        
-        rows = mysql_cursor.fetchall()
-        total_rows = len(rows)
-        mysql_cursor.close()
-        
-        if total_rows == 0:
-            logger.info(f"   No data found for {date_str}")
-            return {'date': date_str, 'status': 'no_data', 'rows': 0, 'duration': time.time() - start_time}
-            
-        logger.info(f"   Extracted {total_rows:,} rows from MySQL")
-        
-        # S3 UPLOAD
-        self._init_s3()
-        
-        # 1. Create CSV in memory
-        csv_buffer = StringIO()
-        writer = csv.writer(csv_buffer, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        
-        for row in rows:
-            clean_row = []
-            for i in keep_indices:
-                col_name = raw_column_names[i]
-                val = row[i]
-                if val is None:
-                    if col_name in column_defaults: val = column_defaults[col_name]
-                    elif auto_defaults:
-                        type_code = column_types.get(col_name)
-                        if type_code in (253, 254, 15, 252, 249, 250, 251): val = ''
-                        elif type_code in (1, 2, 3, 8, 9): val = 0
-                        elif type_code in (4, 5, 246): val = 0.0
-                clean_row.append(val)
-            writer.writerow(clean_row)
-            
-        # Compress
-        gz_buffer = BytesIO()
-        with gzip.GzipFile(fileobj=gz_buffer, mode='wb') as gz:
-            gz.write(csv_buffer.getvalue().encode('utf-8'))
-        gz_buffer.seek(0)
-        
-        # 2. Upload
-        s3_key = f"backfill/temp_{table_config['redshift_table']}_{date_str}_{int(time.time())}.csv.gz"
-        full_s3_path = f"s3://{self.bucket_name}/{s3_key}"
-        
-        logger.info(f"   Uploading {len(gz_buffer.getvalue())/1024:.1f} KB to {full_s3_path}...")
-        self.s3_client.upload_fileobj(gz_buffer, self.bucket_name, s3_key)
-        
-        # 3. Redshift COPY (with Idempotency)
-        iam_role = os.environ.get('REDSHIFT_IAM_ROLE')
-        creds = ""
-        if iam_role:
-            creds = f"IAM_ROLE '{iam_role}'"
-        else:
-            # Use collected credentials
-            if not self.aws_ak or not self.aws_sk: 
-                raise ValueError("Missing AWS credentials for COPY (checked Airflow Conn and Env Vars)")
-            
-            creds = f"CREDENTIALS 'aws_access_key_id={self.aws_ak};aws_secret_access_key={self.aws_sk}'"
-            
-        copy_sql = f"""
-            COPY {table_config['redshift_table']} ({', '.join(column_names)})
-            FROM '{full_s3_path}'
-            {creds}
-            GZIP
-            CSV DELIMITER ','
-            IGNOREHEADER 0
-            ACCEPTINVCHARS
-            TRUNCATECOLUMNS
-            COMPUPDATE OFF
-            STATUPDATE OFF
-            REGION '{os.environ.get('S3_REGION', 'us-west-2')}'
-        """
-        
-        logger.info("   Executing Redshift Transaction (DELETE + COPY)...")
+        # Prepare for Redshift Load
         redshift_cursor = redshift_conn.cursor()
+        
+        # 1. DELETE existing data for this day (Idempotency) - ONCE per day
+        # Critical for safe re-runs and partial loads
         try:
-            # Idempotency: DELETE existing data for this day range first
             delete_sql = f"""
                 DELETE FROM {table_config['redshift_table']} 
                 WHERE {table_config['timestamp_column']} >= {start_unix}
                   AND {table_config['timestamp_column']} <= {end_unix}
             """
+            logger.info(f"   Cleaning up existing data for {date_str}...")
             redshift_cursor.execute(delete_sql)
-            
-            # COPY new data
-            redshift_cursor.execute(copy_sql)
             redshift_conn.commit()
-            
-            duration = time.time() - start_time
-            rate = total_rows / duration if duration > 0 else 0
-            logger.info(f"✅ {date_str}: Loaded {total_rows:,} rows via S3 in {duration:.1f}s ({rate:,.0f} rows/sec)")
         except Exception as e:
-            logger.error(f"COPY failed: {e}")
+            logger.error(f"Cleanup failed: {e}")
             redshift_conn.rollback()
             raise
-        finally:
-            try: self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
-            except: pass
-            redshift_cursor.close()
+
+        # 2. Process in CHUNKS (e.g. 4 hours) to avoid timeout/memory issues
+        CHUNK_HOURS = 4
+        chunk_seconds = CHUNK_HOURS * 3600
+        current_chunk_start = start_unix
+        
+        total_day_rows = 0
+        chunks_processed = 0
+        
+        while current_chunk_start <= end_unix:
+            chunk_end = min(current_chunk_start + chunk_seconds - 1, end_unix)
+            chunk_start_dt = datetime.fromtimestamp(current_chunk_start)
+            chunk_end_dt = datetime.fromtimestamp(chunk_end)
             
+            logger.info(f"   Processing Chunk: {chunk_start_dt.strftime('%H:%M')} - {chunk_end_dt.strftime('%H:%M')}...")
+            
+            # --- EXTRACT CHUNK ---
+            mysql_cursor = mysql_conn.cursor()
+            extract_query = f"""
+                SELECT * FROM {table_config['mysql_table']}
+                WHERE {table_config['timestamp_column']} >= {current_chunk_start}
+                  AND {table_config['timestamp_column']} <= {chunk_end}
+                ORDER BY {table_config['timestamp_column']}, {table_config['id_column']}
+            """
+            if limit and limit < 1000: extract_query += f" LIMIT {limit}" # Only limit small tests
+            
+            mysql_cursor.execute(extract_query)
+            
+            # Get metadata (only needed once, but safe to get every time)
+            if chunks_processed == 0:
+                raw_column_names = [desc[0] for desc in mysql_cursor.description]
+                column_types = {desc[0]: desc[1] for desc in mysql_cursor.description}
+                excluded_cols = table_config.get('excluded_columns', [])
+                column_defaults = table_config.get('column_defaults', {})
+                auto_defaults = table_config.get('auto_defaults', False)
+                keep_indices = [i for i, col in enumerate(raw_column_names) if col not in excluded_cols]
+                column_names = [raw_column_names[i] for i in keep_indices]
+            
+            rows = mysql_cursor.fetchall()
+            chunk_rows = len(rows)
+            mysql_cursor.close()
+            
+            if chunk_rows == 0:
+                current_chunk_start += chunk_seconds
+                continue
+                
+            # --- UPLOAD CHUNK ---
+            self._init_s3()
+            csv_buffer = StringIO()
+            writer = csv.writer(csv_buffer, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+            
+            for row in rows:
+                clean_row = []
+                for i in keep_indices:
+                    col_name = raw_column_names[i]
+                    val = row[i]
+                    if val is None:
+                        if col_name in column_defaults: val = column_defaults[col_name]
+                        elif auto_defaults:
+                            type_code = column_types.get(col_name)
+                            if type_code in (253, 254, 15, 252, 249, 250, 251): val = ''
+                            elif type_code in (1, 2, 3, 8, 9): val = 0
+                            elif type_code in (4, 5, 246): val = 0.0
+                    clean_row.append(val)
+                writer.writerow(clean_row)
+                
+            gz_buffer = BytesIO()
+            with gzip.GzipFile(fileobj=gz_buffer, mode='wb') as gz:
+                gz.write(csv_buffer.getvalue().encode('utf-8'))
+            gz_buffer.seek(0)
+            
+            s3_key = f"backfill/temp_{table_config['redshift_table']}_{date_str}_chunk_{current_chunk_start}_{int(time.time())}.csv.gz"
+            full_s3_path = f"s3://{self.bucket_name}/{s3_key}"
+            
+            logger.info(f"      Uploading {len(gz_buffer.getvalue())/1024:.1f} KB...")
+            self.s3_client.upload_fileobj(gz_buffer, self.bucket_name, s3_key)
+            
+            # --- COPY CHUNK ---
+            iam_role = os.environ.get('REDSHIFT_IAM_ROLE')
+            creds = ""
+            if iam_role: creds = f"IAM_ROLE '{iam_role}'"
+            else:
+                if not self.aws_ak or not self.aws_sk: raise ValueError("Missing AWS credentials")
+                creds = f"CREDENTIALS 'aws_access_key_id={self.aws_ak};aws_secret_access_key={self.aws_sk}'"
+                
+            copy_sql = f"""
+                COPY {table_config['redshift_table']} ({', '.join(column_names)})
+                FROM '{full_s3_path}'
+                {creds}
+                GZIP
+                CSV DELIMITER ','
+                IGNOREHEADER 0
+                ACCEPTINVCHARS
+                TRUNCATECOLUMNS
+                COMPUPDATE OFF
+                STATUPDATE OFF
+                REGION '{os.environ.get('S3_REGION', 'us-west-2')}'
+            """
+            
+            try:
+                redshift_cursor.execute(copy_sql)
+                redshift_conn.commit()
+                total_day_rows += chunk_rows
+                chunks_processed += 1
+            except Exception as e:
+                logger.error(f"Chunk COPY failed: {e}")
+                redshift_conn.rollback()
+                raise
+            finally:
+                try: self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
+                except: pass
+            
+            current_chunk_start += chunk_seconds
+
+        redshift_cursor.close()
+        
         duration = time.time() - start_time
-        return {'date': date_str, 'status': 'success', 'rows': total_rows, 'duration': duration}
+        rate = total_day_rows / duration if duration > 0 else 0
+        logger.info(f"✅ {date_str}: Loaded {total_day_rows:,} rows via S3 (in {chunks_processed} chunks) in {duration:.1f}s ({rate:,.0f} rows/sec)")
+        
+        return {'date': date_str, 'status': 'success', 'rows': total_day_rows, 'duration': duration}
     
     def load_day_data(self, mysql_conn, redshift_conn, table_config: Dict, date_dt: datetime,
                       skip_if_exists: bool = True, limit: int = None, use_s3: bool = False) -> Dict[str, Any]:
@@ -511,6 +527,9 @@ class RawDataBackfiller:
         
         # Get connections using the correct project APIs
         logger.info("Connecting to databases...")
+        
+        # Optimize MySQL connection for high throughput (backfill specific)
+        os.environ['MYSQL_COMPRESS'] = 'true'
         
         mysql_connection_name = table_config['mysql_connection']
         
