@@ -680,8 +680,21 @@ class GeminiRedshiftLoader:
                 files_to_load.append(s3_uri)
                 logger.debug(f"Will load file: {key}")
             
+            # For full_sync replace, only the latest file is needed — the table is truncated
+            # before each load, so every file is a complete snapshot. Loading all historical
+            # files would re-insert the same rows N times and waste time/money.
+            is_full_sync_replace = (
+                cdc_strategy is not None and
+                hasattr(cdc_strategy, 'get_sync_mode') and
+                cdc_strategy.get_sync_mode() == 'replace'
+            )
+            if is_full_sync_replace and len(files_to_load) > 1:
+                latest = max(files_to_load)  # YYYYMMDD_HHMMSS in filename → lex max = most recent
+                logger.info(f"Full sync replace mode: keeping only latest file (skipping {len(files_to_load) - 1} older snapshots)")
+                files_to_load = [latest]
+
             logger.info(f"SIMPLIFIED RESULT: {len(files_to_load)} files to load (excluded {len(processed_files)} processed files)")
-            
+
             # Show files to load
             for i, file_uri in enumerate(files_to_load, 1):
                 file_name = file_uri.split('/')[-1]
@@ -748,8 +761,12 @@ class GeminiRedshiftLoader:
                             column_list = f" {mapped_list}"
                             logger.info(f"Using explicit column list with mappings: {len(source_columns)} columns")
                         else:
-                            column_list = f" ({', '.join(source_columns)})"
-                            logger.info(f"Using explicit column list from source: {len(source_columns)} columns")
+                            # For PARQUET format, Redshift maps columns by name from the file metadata.
+                            # Do NOT pass an explicit column list — old files may have fewer columns
+                            # than the current MySQL schema, and a mismatched count causes error 15007.
+                            # Name-based matching lets old files load with NULLs for new columns.
+                            column_list = ""
+                            logger.info(f"Using parquet name-based column matching ({len(source_columns)} source columns, no explicit list)")
                 except Exception as e:
                     logger.warning(f"Failed to build column list from schema: {e}, using default matching")
                     column_list = ""
