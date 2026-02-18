@@ -56,7 +56,8 @@ class RawDataBackfiller:
                 'email': '', 'instruction': '', 'sign_name': '',
                 'unit': '', 'buzzer': '', 'city': '', 'state': '', 
                 'sender_name': '', 'sender_phone': '',
-                'return_name': '', 'return_phone': '', 'return_address': ''
+                'return_name': '', 'return_phone': '', 'return_address': '',
+                'postscript': '', 'zip': '', 'country': '', 'province': ''
             }
         },
         'uni_tracking_info': {
