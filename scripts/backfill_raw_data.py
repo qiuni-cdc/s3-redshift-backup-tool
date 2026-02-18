@@ -100,28 +100,54 @@ class RawDataBackfiller:
         if self.s3_client:
             return
 
-        # 1. Try Airflow Connection (matches DAG behavior)
+        # 0. Emergency: manually load .env if present (fixes missing Docker env vars)
         try:
-            from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-            hook = S3Hook(aws_conn_id='aws_default')
-            credentials = hook.get_credentials()
-            if credentials:
-                self.s3_client = hook.get_conn()
-                self.aws_ak = credentials.access_key
-                self.aws_sk = credentials.secret_key
-                logger.info("Initialized S3 client using Airflow Connection 'aws_default'")
+            from dotenv import load_dotenv
+            # Search paths for .env
+            search_paths = [
+                Path.cwd() / '.env',
+                Path.cwd() / 'airflow_poc' / '.env',
+                Path(__file__).parent.parent / '.env', # Project root
+                Path(__file__).parent.parent / 'airflow_poc' / '.env'
+            ]
+            
+            for p in search_paths:
+                if p.exists():
+                    logger.info(f"Loading environment from {p}")
+                    load_dotenv(p)
+                    break
+        except ImportError:
+            logger.warning("python-dotenv not installed, skipping manual .env load")
+
+        # 1. Try Airflow Connection Direct Inspection (most reliable for Airflow Context)
+        try:
+            from airflow.hooks.base import BaseHook
+            conn = BaseHook.get_connection('aws_default')
+            if conn.login and conn.password:
+                self.aws_ak = conn.login
+                self.aws_sk = conn.password
+                self.s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=self.aws_ak,
+                    aws_secret_access_key=self.aws_sk,
+                    region_name=os.environ.get('S3_REGION', 'us-west-2')
+                )
+                logger.info(f"Initialized S3 from Airflow Connection 'aws_default' (found key: {self.aws_ak[:4]}****)")
                 return
         except Exception as e:
-            logger.debug(f"Could not use Airflow S3Hook: {e}")
+            logger.debug(f"Could not use Airflow Connection: {e}")
 
-        # 2. Fallback to Env Vars / Boto3
+        # 2. Fallback to Env Vars / Boto3 (for non-Airflow contexts)
+        # Check standard AND fallback keys
+        ak = os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('S3_ACCESS_KEY') or os.environ.get('AWS_ACCESS_KEY_ID_QA')
+        sk = os.environ.get('AWS_SECRET_ACCESS_KEY') or os.environ.get('S3_SECRET_KEY') or os.environ.get('AWS_SECRET_ACCESS_KEY_QA')
+        
         self.s3_client = boto3.client(
             's3',
-            region_name=os.environ.get('S3_REGION', 'us-west-2')
+            region_name=os.environ.get('S3_REGION', 'us-west-2'),
+            aws_access_key_id=ak,
+            aws_secret_access_key=sk
         )
-        # Debug credentials from Env
-        ak = os.environ.get('AWS_ACCESS_KEY_ID')
-        sk = os.environ.get('AWS_SECRET_ACCESS_KEY')
         
         if ak and sk:
             self.aws_ak = ak
