@@ -291,8 +291,8 @@ class RawDataBackfiller:
             GZIP
             CSV DELIMITER ','
             IGNOREHEADER 0
-            acceptinvchars
-            truncanctecolumns
+            ACCEPTINVCHARS
+            TRUNCATECOLUMNS
         """
         
         logger.info("   Executing Redshift COPY...")
