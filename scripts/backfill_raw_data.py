@@ -31,7 +31,7 @@ script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 
-from src.config.settings import load_config
+from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
 from src.core.redshift_loader import RedshiftLoader
 from src.utils.logging import get_logger
@@ -70,9 +70,9 @@ class RawDataBackfiller:
         }
     }
     
-    def __init__(self, config_path: str = None):
-        """Initialize backfiller with configuration"""
-        self.config = load_config(config_path)
+    def __init__(self):
+        """Initialize backfiller with configuration (reads from environment variables)"""
+        self.config = AppConfig()
         self.connection_manager = ConnectionManager(self.config)
         self.redshift_loader = RedshiftLoader(self.config, self.connection_manager)
         
@@ -338,7 +338,6 @@ Examples:
                        help='Force reload even if data exists')
     parser.add_argument('--dry-run', action='store_true',
                        help='Dry run - show what would be loaded without loading')
-    parser.add_argument('--config', help='Path to config file')
     
     args = parser.parse_args()
     
@@ -357,8 +356,8 @@ Examples:
     # Parse table names
     tables = [t.strip() for t in args.table.split(',')]
     
-    # Create backfiller
-    backfiller = RawDataBackfiller(args.config)
+    # Create backfiller (config read from environment variables)
+    backfiller = RawDataBackfiller()
     
     # Process each table
     for table in tables:
