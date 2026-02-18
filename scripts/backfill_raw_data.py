@@ -35,6 +35,7 @@ from src.config.settings import AppConfig
 from src.core.connections import ConnectionManager
 from src.core.redshift_loader import RedshiftLoader
 from src.utils.logging import get_logger
+import psycopg2
 
 logger = get_logger(__name__)
 
@@ -74,7 +75,7 @@ class RawDataBackfiller:
         """Initialize backfiller with configuration (reads from environment variables)"""
         self.config = AppConfig()
         self.connection_manager = ConnectionManager(self.config)
-        self.redshift_loader = RedshiftLoader(self.config, self.connection_manager)
+        self.redshift_loader = RedshiftLoader(self.config)
         
     def get_day_range_unix(self, date_dt: datetime) -> tuple:
         """
