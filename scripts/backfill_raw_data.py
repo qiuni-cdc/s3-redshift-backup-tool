@@ -180,6 +180,10 @@ class RawDataBackfiller:
             SELECT COUNT(*) 
             FROM {table_config['redshift_table']}
             WHERE {table_config['timestamp_column']} >= {start_unix}
+              AND {table_config['timestamp_column']} <= {end_unix}
+        """
+        
+        cursor = redshift_conn.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
         cursor.close()
