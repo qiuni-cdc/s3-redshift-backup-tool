@@ -21,7 +21,7 @@ Features:
 import argparse
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 # Standard MySQL type codes (approximate) - we use raw codes to avoid dependency on specific connector version
 # 253=VAR_STRING, 254=STRING, 15=VARCHAR, 252=BLOB, 246=NEWDECIMAL, 3=LONG, 8=LONGLONG, 1=TINY, 2=SHORT, 9=INT24, 7=TIMESTAMP, 12=DATETIME, 10=DATE
@@ -168,6 +168,9 @@ class RawDataBackfiller:
         Returns:
             (start_unix, end_unix): Start of day (00:00:00) and end of day (23:59:59)
         """
+        if date_dt.tzinfo is None:
+            date_dt = date_dt.replace(tzinfo=timezone.utc)
+            
         start_of_day = date_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1) - timedelta(seconds=1)
         return int(start_of_day.timestamp()), int(end_of_day.timestamp())
@@ -504,9 +507,9 @@ class RawDataBackfiller:
         
         table_config = self.TABLE_CONFIG[table_name]
         
-        # Convert Unix timestamps to datetime for day iteration
-        start_dt = datetime.fromtimestamp(start_unix).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_dt = datetime.fromtimestamp(end_unix).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Convert Unix timestamps to datetime for day iteration (UTC)
+        start_dt = datetime.fromtimestamp(start_unix, tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = datetime.fromtimestamp(end_unix, tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         
         if start_dt > end_dt:
             raise ValueError("Start timestamp must be before end timestamp")
@@ -661,8 +664,8 @@ Examples:
         start_unix = args.start_unix
         end_unix = args.end_unix
     elif args.start_date and args.end_date:
-        start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
+        start_dt = datetime.strptime(args.start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(args.end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
         start_unix = int(start_dt.timestamp())
         end_unix = int(end_dt.timestamp())
     else:
