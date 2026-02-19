@@ -223,8 +223,8 @@ class RawDataBackfiller:
             redshift_conn.rollback()
             raise
 
-        # 2. Process in CHUNKS (e.g. 4 hours) to avoid timeout/memory issues
-        CHUNK_HOURS = 4
+        # 2. Process in CHUNKS (e.g. 1 hour) to avoid timeout/memory issues
+        CHUNK_HOURS = 1
         chunk_seconds = CHUNK_HOURS * 3600
         current_chunk_start = start_unix
         
