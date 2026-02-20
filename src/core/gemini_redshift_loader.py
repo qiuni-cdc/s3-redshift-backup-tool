@@ -230,87 +230,18 @@ class GeminiRedshiftLoader:
                     if len(files) > 5:
                         logger.error(f"     ... and {len(files) - 5} more {error_type} errors")
             
-            # Get table schema/DDL
-            # Note: For v1.2.0, table_name might be scoped (e.g. "conn:schema.table")
-            # FlexibleSchemaManager needs to handle this or we strip it here
-            try:
-                # Get schema and DDL
-                # For basic schema retrieval, use the full name - manager handles scoping
-                flexible_schema, redshift_ddl = self.schema_manager.get_table_schema(table_name)
-                
-                if not redshift_ddl:
-                    raise Exception("Failed to generate DDL")
-                
-                # Fix DDL table name to match target Redshift table name
-                # (DDL comes with source table name, but we might want a different target name)
-                corrected_ddl = self._fix_ddl_table_name(redshift_ddl, redshift_table_name, table_name)
-                
-                # Ensure table exists
-                table_created = self._ensure_redshift_table(redshift_table_name, corrected_ddl, schema=target_schema)
-
-            except Exception as e:
-                logger.error(f"Schema/DDL generation failed: {e}")
-                # Log traceback for debugging
-                import traceback
-                logger.error(traceback.format_exc())
-                return False
-
-            # Step 3: Load data
-            total_rows = 0
-            loaded_files = []
-            failed = False
-            
-            # Use a single connection for the batch of files
-            try:
-                with self._redshift_connection(schema=target_schema) as conn:
-                    # If this is a full sync with REPLACE mode, and we have files to load,
-                    # we should TRUNCATE the table before loading the first file.
-                    # This ensures we replace the entire dataset.
-                    if cdc_strategy and hasattr(cdc_strategy, 'get_sync_mode') and cdc_strategy.get_sync_mode() == 'replace':
-                        logger.info(f"Full sync REPLACE mode detected. Truncating {redshift_table_name} before loading.")
-                        with conn.cursor() as cursor:
-                            cursor.execute(f"TRUNCATE TABLE {target_schema}.{redshift_table_name}")
-                            logger.info(f"Table {redshift_table_name} truncated.")
-
-                    for s3_uri in s3_files:
-                        try:
-                            # Load file - pass explicit table name to ensure we load to correct target
-                            # Also pass full_table_name for schema lookup (needed for column list generation)
-                            rows = self._copy_parquet_file(
-                                conn, 
-                                redshift_table_name, 
-                                s3_uri, 
-                                full_table_name=table_name,
-                                schema=target_schema
-                            )
-                            total_rows += rows
-                            loaded_files.append(s3_uri)
-                            
-                        except Exception as e:
-                            logger.error(f"Failed to load file {s3_uri}: {e}")
-                            failed = True
-                            self._set_error_status(table_name, str(e))
-                            break
-            except Exception as conn_err:
-                logger.error(f"Redshift connection error during load: {conn_err}")
-                failed = True
-                self._set_error_status(table_name, str(conn_err))
-            
-            if failed:
-                return False
-            
-            # Step 4: Update status
+            # Step 5: Update watermark and return
             current_time = datetime.now()
-            self._set_success_status(table_name, current_time, total_rows, loaded_files)
-            
+            self._set_success_status(table_name, current_time, total_rows_loaded, successful_file_list)
+
             logger.info(
                 "Redshift load complete",
                 table=table_name,
                 redshift_table=redshift_table_name,
-                files=len(s3_files),
-                rows=total_rows
+                files=len(successful_file_list),
+                rows=total_rows_loaded
             )
-            
+
             return True
             
         except Exception as e:
