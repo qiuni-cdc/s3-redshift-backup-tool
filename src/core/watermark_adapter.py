@@ -117,8 +117,14 @@ class WatermarkAdapter:
                 # For global watermark, return a default
                 watermark_data = None
 
-            if watermark_data and 'timestamp' in watermark_data:
-                return watermark_data['timestamp']
+            if watermark_data:
+                # v2.0 format: timestamp is at mysql_state.last_timestamp
+                mysql_ts = watermark_data.get('mysql_state', {}).get('last_timestamp')
+                if mysql_ts:
+                    return mysql_ts
+                # Legacy fallback: top-level 'timestamp' key (old format)
+                if 'timestamp' in watermark_data:
+                    return watermark_data['timestamp']
 
             # Default watermark for initial runs
             return "1970-01-01 00:00:00"
