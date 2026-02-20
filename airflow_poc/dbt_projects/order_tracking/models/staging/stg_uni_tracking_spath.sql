@@ -1,6 +1,6 @@
-{# Fetch the cutoff time (max(pathTime) - 30 days in seconds) dynamically #}
+{# Fetch the cutoff time (max(pathTime) - 7 days in seconds) dynamically #}
 {%- set cutoff_time_query -%}
-    select coalesce(max(pathTime), 0) - 2592000 from {{ this }}
+    select coalesce(max(pathTime), 0) - 604800 from {{ this }}
 {%- endset -%}
 
 {%- set cutoff_time = 0 -%}
@@ -35,7 +35,7 @@ with filtered as (
     select *
     from settlement_public.uni_tracking_spath_raw
     {% if is_incremental() %}
-    where pathTime > {{ cutoff_time }} -- Uses the 30-day lookback calculated above
+    where pathTime > {{ cutoff_time }} -- Uses the 7-day lookback calculated above
     {% else %}
     -- First run: load everything from raw
     {% endif %}

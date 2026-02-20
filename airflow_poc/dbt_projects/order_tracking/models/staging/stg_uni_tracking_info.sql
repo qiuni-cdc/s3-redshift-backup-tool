@@ -1,6 +1,6 @@
-{# Fetch the cutoff time (max(update_time) - 30 days in seconds) dynamically #}
+{# Fetch the cutoff time (max(update_time) - 7 days in seconds) dynamically #}
 {%- set cutoff_time_query -%}
-    select coalesce(max(update_time), 0) - 2592000 from {{ this }}
+    select coalesce(max(update_time), 0) - 604800 from {{ this }}
 {%- endset -%}
 
 {%- set cutoff_time = 0 -%}
@@ -34,7 +34,7 @@ with filtered as (
     select *
     from settlement_public.uni_tracking_info_raw
     {% if is_incremental() %}
-    where update_time > {{ cutoff_time }} -- Uses the 30-day lookback calculated above
+    where update_time > {{ cutoff_time }} -- Uses the 7-day lookback calculated above
     {% else %}
     -- First run: load everything from raw (process what was extracted)
     -- This ensures that whatever data is in the raw table (from the extraction task) is staged,
