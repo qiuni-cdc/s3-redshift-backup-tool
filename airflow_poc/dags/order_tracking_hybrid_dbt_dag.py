@@ -472,39 +472,11 @@ else:
     DBT_WITH_TUNNEL = f'''
     set -e
     export PYTHONUNBUFFERED=1
-    export DBT_LOG_PATH=/tmp  # Fix: prevent dbt from trying to write to read-only project dir
-    export DBT_TARGET_PATH=/tmp/target # Fix: prevent dbt from writing compiled artifacts to read-only project dir
+    export DBT_LOG_PATH=/tmp
+    export DBT_TARGET_PATH=/tmp/target
     cd {DBT_PROJECT_PATH}
     [ -f {DBT_VENV_PATH}/bin/activate ] && source {DBT_VENV_PATH}/bin/activate
     echo "Using direct Redshift connection (no SSH tunnel)"
-
-    echo "--- ENVIRONMENT CHECK ---"
-    echo "Ensuring compatible dbt versions..."
-    # Force dbt-core to match dbt-redshift 1.8.x to fix "Not compatible" error
-    # dbt-core 1.9.0-b2 is incompatible with dbt-redshift 1.8.0
-    pip install --disable-pip-version-check "dbt-core>=1.8.0,<1.9.0" "dbt-redshift>=1.8.0,<1.9.0" || echo "Warning: Failed to install dbt versions"
-    
-    echo "--- DEBUG INFO ---"
-    echo "PWD: $(pwd)"
-    echo "DBT Version:"
-    dbt --version || echo "Failed to get dbt version"
-    echo "Listing Profile:"
-    ls -la profiles.yml || echo "profiles.yml not found"
-    echo "Environment Variables (Masked):"
-    env | grep -E "REDSHIFT|DBT|HOST|PORT|USER" | sed 's/PASSWORD=*/PASSWORD=******/' | sort
-    echo "------------------"
-    
-    echo "Diagnosing network connectivity to {dbt_env_vars['DBT_REDSHIFT_HOST']}:{dbt_env_vars['DBT_REDSHIFT_PORT']}..."
-    python3 -c "import socket, sys; host='{dbt_env_vars['DBT_REDSHIFT_HOST']}'; port={dbt_env_vars['DBT_REDSHIFT_PORT']}; print(f'Connecting to {{host}}:{{port}}...'); s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(10); result = s.connect_ex((host, int(port))); print(f'Socket connect result: {{result}} (0=Success)'); sys.exit(result)"
-    
-    echo "Checking dbt connection (with --debug)..."
-    echo "Checking dbt connection (with --debug)..."
-    # Run dbt debug and redirect to file in /tmp to avoid permission issues
-    # Note: We use || echo to proceed even if dbt debug fails (e.g. on git check), relying on dbt run to catch real issues.
-    dbt debug --profiles-dir . --debug > /tmp/dbt_debug.log 2>&1 || echo "dbt debug failed with exit code $? (continuing - check logs above)"
-    
-    echo "dbt debug output:"
-    cat /tmp/dbt_debug.log
 '''
     DBT_CLEANUP_TUNNEL = ''
 
