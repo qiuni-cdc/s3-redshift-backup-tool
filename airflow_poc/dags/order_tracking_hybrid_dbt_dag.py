@@ -515,11 +515,29 @@ else:
 dbt_staging = BashOperator(
     task_id='dbt_staging',
     bash_command=DBT_WITH_TUNNEL + f'''
-    echo "Running dbt staging models"
-    dbt run --select staging --profiles-dir .
-    echo "Staging complete"
+    echo "=========================================="
+    echo "[$(date -u +%H:%M:%S)] Running dbt staging models"
+    echo "=========================================="
+
+    echo "[$(date -u +%H:%M:%S)] START stg_ecs_order_info"
+    dbt run --select stg_ecs_order_info --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] DONE  stg_ecs_order_info"
+    echo "------------------------------------------"
+
+    echo "[$(date -u +%H:%M:%S)] START stg_uni_tracking_info"
+    dbt run --select stg_uni_tracking_info --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] DONE  stg_uni_tracking_info"
+    echo "------------------------------------------"
+
+    echo "[$(date -u +%H:%M:%S)] START stg_uni_tracking_spath"
+    dbt run --select stg_uni_tracking_spath --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] DONE  stg_uni_tracking_spath"
+    echo "------------------------------------------"
+
+    echo "[$(date -u +%H:%M:%S)] All staging models complete"
+    echo "=========================================="
 ''' + DBT_CLEANUP_TUNNEL,
-    env=dbt_env_vars,  # Pass loaded environment variables (including credentials)
+    env=dbt_env_vars,
     dag=dag
 )
 
