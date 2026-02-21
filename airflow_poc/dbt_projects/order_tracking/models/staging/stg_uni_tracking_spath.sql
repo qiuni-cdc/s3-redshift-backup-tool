@@ -8,25 +8,21 @@
     - 2h window covers any duplicate with margin
     - Historical events have different pathTime → never matched for deletion
     - SORTKEY zone maps let Redshift skip 99%+ of old blocks during DELETE
+
+    NOTE: incremental_predicates uses a SQL subquery (not a Jinja variable) because
+    config() is evaluated at parse time (execute=False), so run_query() never fires there.
+    The subquery is evaluated by Redshift at runtime, giving the correct 2-hour window
+    and enabling zone map pruning on the SORTKEY (pathTime).
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(pathTime), 0) - 1800 from {{ this }}
 {%- endset -%}
 
-{%- set delete_cutoff_query -%}
-    select coalesce(max(pathTime), 0) - 7200 from {{ this }}
-{%- endset -%}
-
 {%- set source_cutoff = 0 -%}
-{%- set delete_cutoff = 0 -%}
 {%- if execute and is_incremental() -%}
     {%- set result = run_query(source_cutoff_query) -%}
     {%- if result and result.columns[0][0] -%}
         {%- set source_cutoff = result.columns[0][0] -%}
-    {%- endif -%}
-    {%- set result2 = run_query(delete_cutoff_query) -%}
-    {%- if result2 and result2.columns[0][0] -%}
-        {%- set delete_cutoff = result2.columns[0][0] -%}
     {%- endif -%}
 {%- endif -%}
 
@@ -38,7 +34,7 @@
         dist='order_id',
         sort='pathTime',
         incremental_predicates=[
-            this ~ ".pathTime > " ~ delete_cutoff
+            this ~ ".pathTime > (SELECT COALESCE(MAX(pathTime), 0) - 7200 FROM " ~ this ~ ")"
         ]
     )
 }}
