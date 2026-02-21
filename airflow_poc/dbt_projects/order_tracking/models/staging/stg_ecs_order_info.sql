@@ -1,6 +1,6 @@
-{# Fetch the cutoff time (max(add_time) - 7 days in seconds) dynamically #}
+{# Fetch the cutoff time (max(add_time) - 2 hours in seconds) dynamically #}
 {%- set cutoff_time_query -%}
-    select coalesce(max(add_time), 0) - 604800 from {{ this }}
+    select coalesce(max(add_time), 0) - 7200 from {{ this }}
 {%- endset -%}
 
 {%- set cutoff_time = 0 -%}
@@ -35,7 +35,7 @@ with filtered as (
     select *
     from settlement_public.ecs_order_info_raw
     {% if is_incremental() %}
-    where add_time > {{ cutoff_time }} -- Uses the 7-day lookback calculated above
+    where add_time > {{ cutoff_time }} -- Uses the 2-hour lookback calculated above
     {% else %}
     -- First run: load everything from raw
     {% endif %}
