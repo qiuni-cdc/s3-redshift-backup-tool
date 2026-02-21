@@ -1,19 +1,32 @@
 {#
-    Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
-    Scans only the latest raw batch for speed.
-    No incremental_predicates: delete is by compound key (order_id, traceSeq) only.
-    Since spath is append-only, each (order_id, traceSeq) is unique — no old staging
-    rows need time-based filtering to be found/deleted.
+    source_cutoff (30 min): how much raw data to READ — matches 15-min extraction window.
+    delete_cutoff (2 hours): how far back to DELETE in staging.
+
+    Safe because:
+    - pathTime is part of unique_key AND is the SORTKEY
+    - Extraction duplicates share the EXACT same pathTime (always within last 15 min)
+    - 2h window covers any duplicate with margin
+    - Historical events have different pathTime → never matched for deletion
+    - SORTKEY zone maps let Redshift skip 99%+ of old blocks during DELETE
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(pathTime), 0) - 1800 from {{ this }}
 {%- endset -%}
 
+{%- set delete_cutoff_query -%}
+    select coalesce(max(pathTime), 0) - 7200 from {{ this }}
+{%- endset -%}
+
 {%- set source_cutoff = 0 -%}
+{%- set delete_cutoff = 0 -%}
 {%- if execute and is_incremental() -%}
     {%- set result = run_query(source_cutoff_query) -%}
     {%- if result and result.columns[0][0] -%}
         {%- set source_cutoff = result.columns[0][0] -%}
+    {%- endif -%}
+    {%- set result2 = run_query(delete_cutoff_query) -%}
+    {%- if result2 and result2.columns[0][0] -%}
+        {%- set delete_cutoff = result2.columns[0][0] -%}
     {%- endif -%}
 {%- endif -%}
 
@@ -23,23 +36,26 @@
         unique_key=['order_id', 'traceSeq', 'pathTime'],
         incremental_strategy='delete+insert',
         dist='order_id',
-        sort='pathTime'
+        sort='pathTime',
+        incremental_predicates=[
+            this ~ ".pathTime > " ~ delete_cutoff
+        ]
     )
 }}
 
 /*
     Staging model for uni_tracking_spath (event history)
-    - Composite key: order_id + traceSeq
-    - Source scan: 30 min (matches 15-min extraction window + retry buffer)
-    - Delete: by (order_id, traceSeq) only — precise, no time filter needed
-    - Append-only source: each (order_id, traceSeq) event is written once
+    - Composite key: order_id + traceSeq + pathTime
+    - Source scan: 30 min (read only latest raw batch)
+    - Delete window: 2 hours (zone map pruning via SORTKEY)
+    - Append-only source: full event history preserved
 */
 
 with filtered as (
     select *
     from settlement_public.uni_tracking_spath_raw
     {% if is_incremental() %}
-    where pathTime > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
+    where pathTime > {{ source_cutoff }} -- 30-min source scan
     {% else %}
     -- First run: load everything from raw
     {% endif %}
