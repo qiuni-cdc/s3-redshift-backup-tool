@@ -1,13 +1,21 @@
-{# Fetch the cutoff time (max(update_time) - 2 hours in seconds) dynamically #}
-{%- set cutoff_time_query -%}
-    select coalesce(max(update_time), 0) - 7200 from {{ this }}
+{#
+    Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
+    Scans only the latest raw batch for speed.
+    No incremental_predicates: delete is by order_id only (no time restriction).
+    This is required because uni_tracking_info tracks the LATEST state per order —
+    an old staging row can have any update_time (e.g. 6 months ago). A time-based
+    delete window could miss it, leaving a duplicate. Deleting only by order_id
+    (via DISTKEY) is fast and always correct.
+#}
+{%- set source_cutoff_query -%}
+    select coalesce(max(update_time), 0) - 1800 from {{ this }}
 {%- endset -%}
 
-{%- set cutoff_time = 0 -%}
+{%- set source_cutoff = 0 -%}
 {%- if execute and is_incremental() -%}
-    {%- set result = run_query(cutoff_time_query) -%}
+    {%- set result = run_query(source_cutoff_query) -%}
     {%- if result and result.columns[0][0] -%}
-        {%- set cutoff_time = result.columns[0][0] -%}
+        {%- set source_cutoff = result.columns[0][0] -%}
     {%- endif -%}
 {%- endif -%}
 
@@ -17,24 +25,23 @@
         unique_key='order_id',
         incremental_strategy='delete+insert',
         dist='order_id',
-        sort='update_time',
-        incremental_predicates=[
-            this ~ ".update_time > " ~ cutoff_time
-        ]
+        sort='update_time'
     )
 }}
 
 /*
-    Staging model for uni_tracking_info
-    - MERGE strategy: updates existing records when state changes
-    - Optimized with dist/sort keys for fast joins
+    Staging model for uni_tracking_info (latest tracking state per order)
+    - Unique key: order_id
+    - Source scan: 30 min (matches 15-min extraction window + retry buffer)
+    - Delete: by order_id only — no time restriction, safe for any order age
+    - update_time is always NOW when modified, so new rows always land in 30-min window
 */
 
 with filtered as (
     select *
     from settlement_public.uni_tracking_info_raw
     {% if is_incremental() %}
-    where update_time > {{ cutoff_time }} -- Uses the 2-hour lookback calculated above
+    where update_time > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
     {% else %}
     -- First run: load everything from raw (process what was extracted)
     -- This ensures that whatever data is in the raw table (from the extraction task) is staged,
