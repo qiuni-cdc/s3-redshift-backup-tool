@@ -1,14 +1,12 @@
 {#
-    Two separate cutoffs:
-    - source_cutoff (30 min): how much raw data to READ — matches 15-min extraction window
-    - delete_cutoff (2 hours): how far back to DELETE in staging — safe for ecs_order_info
-      because add_time is the ORDER CREATION TIME and never changes. Same-batch overlap
-      between consecutive 15-min extractions is at most ~30 min, well within 2 hours.
+    Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
 
-    NOTE: incremental_predicates uses a SQL subquery (not a Jinja variable) because
-    config() is evaluated at parse time (execute=False), so run_query() never fires there.
-    The subquery is evaluated by Redshift at runtime, giving the correct 2-hour window
-    and enabling zone map pruning on the SORTKEY (add_time).
+    Strategy: merge (not delete+insert)
+    - MERGE uses DISTKEY (order_id) co-location → directly targets only batch rows
+    - Performance is O(batch_size), not O(table_size)
+    - delete+insert with IN subquery scans the entire staging table on every DELETE,
+      which becomes unusable as staging grows (17M rows now → 260M+ rows at 1 year)
+    - add_time is static (order creation time) → MERGE UPDATE is a no-op for existing rows
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(add_time), 0) - 1800 from {{ this }}
@@ -26,12 +24,9 @@
     config(
         materialized='incremental',
         unique_key='order_id',
-        incremental_strategy='delete+insert',
+        incremental_strategy='merge',
         dist='order_id',
-        sort='add_time',
-        incremental_predicates=[
-            this ~ ".add_time > (SELECT COALESCE(MAX(add_time), 0) - 7200 FROM " ~ this ~ ")"
-        ]
+        sort='add_time'
     )
 }}
 
@@ -39,8 +34,8 @@
     Staging model for ecs_order_info (basic order details)
     - Unique key: order_id
     - Source scan: 30 min (matches 15-min extraction window + retry buffer)
-    - Delete window: 2 hours (covers same-batch overlaps between consecutive runs)
-    - add_time is fixed at order creation — no historical updates expected
+    - Strategy: merge — DISTKEY co-location, O(batch_size) regardless of table size
+    - add_time is fixed at order creation — MERGE UPDATE is harmless for existing rows
 */
 
 with filtered as (

@@ -1,11 +1,13 @@
 {#
     Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
-    Scans only the latest raw batch for speed.
-    No incremental_predicates: delete is by order_id only (no time restriction).
-    This is required because uni_tracking_info tracks the LATEST state per order —
-    an old staging row can have any update_time (e.g. 6 months ago). A time-based
-    delete window could miss it, leaving a duplicate. Deleting only by order_id
-    (via DISTKEY) is fast and always correct.
+
+    Strategy: merge (not delete+insert)
+    - MERGE uses DISTKEY (order_id) co-location → directly targets only batch rows
+    - Performance is O(batch_size), not O(table_size)
+    - delete+insert with IN subquery scans the entire staging table on every DELETE,
+      which becomes unusable as staging grows (13.5M rows now → 200M+ rows at 1 year)
+    - update_time changes on every order touch → MERGE UPDATE correctly replaces old state
+    - No time restriction needed: MERGE matches by order_id directly, no window required
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(update_time), 0) - 1800 from {{ this }}
@@ -23,7 +25,7 @@
     config(
         materialized='incremental',
         unique_key='order_id',
-        incremental_strategy='delete+insert',
+        incremental_strategy='merge',
         dist='order_id',
         sort='update_time'
     )
@@ -33,8 +35,8 @@
     Staging model for uni_tracking_info (latest tracking state per order)
     - Unique key: order_id
     - Source scan: 30 min (matches 15-min extraction window + retry buffer)
-    - Delete: by order_id only — no time restriction, safe for any order age
-    - update_time is always NOW when modified, so new rows always land in 30-min window
+    - Strategy: merge — DISTKEY co-location, O(batch_size) regardless of table size
+    - update_time always reflects latest state → MERGE UPDATE keeps staging current
 */
 
 with filtered as (
