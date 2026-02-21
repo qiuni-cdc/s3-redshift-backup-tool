@@ -37,12 +37,11 @@ The staging layer runs 3 incremental models:
 - **Fix**: Removed from production DAG path.
 - **Status**: ✅ Done
 
-### 5. `threads: 1` in dev profile — models run sequentially (IN PROGRESS)
-- **Problem**: `profiles.yml` dev target has `threads: 1`. All 3 staging models run one after another even though they are fully independent tables.
-- **Potential fix**: Raise to `threads: 3` to run all 3 models in parallel
-- **Attempted**: Previously tried — resulted in an error (details not captured)
-- **Next step**: Re-attempt after baseline timing from fixes 3 & 4. Capture the exact error to investigate (connection limit? lock contention? SSH tunnel issue?)
-- **Status**: 🔄 Pending
+### 5. `threads: 1` in dev profile — models run sequentially (CLOSED - Won't Fix)
+- **Problem**: `profiles.yml` dev target has `threads: 1`. All 3 staging models run one after another.
+- **Tried**: `threads: 3` — caused a bottleneck (likely Redshift WLM queue or lock waits from 3 concurrent `delete+insert` operations hitting Redshift simultaneously)
+- **Decision**: Keep `threads: 1`. Sequential execution is more predictable and avoids Redshift concurrency issues. The gain from parallelism is offset by Redshift queuing.
+- **Status**: ✅ Closed — keeping threads: 1
 
 ### 6. Double SSH tunnel setup/teardown per cycle (OPEN)
 - **Problem**: `dbt_staging` and `dbt_test` are separate Airflow tasks, each independently setting up and tearing down an SSH tunnel (tunnel mode only).
@@ -73,7 +72,6 @@ The staging layer runs 3 incremental models:
 
 ## Next Steps
 
-1. Deploy current changes → time `dbt_staging` task in Airflow to get new baseline
-2. Re-attempt `threads: 3` in `profiles.yml` dev target → capture exact error
-3. Investigate error and fix (likely: connection pool, SSH multiplexing, or Redshift WLM queue)
-4. Consider merging `dbt_staging` + `dbt_test` into one task to eliminate double tunnel overhead
+1. **Run dbt staging standalone** — `dbt run --select staging --profiles-dir .` directly on server. Confirm models are fast with the optimizations already in place (pip install + dbt debug removed).
+2. **Full pipeline test** — Trigger DAG via Airflow UI with logical date = unix `1769300700` (gives sync window starting at `1769299200`, right after the loaded historic data). Measure end-to-end runtime.
+3. **Consider merging `dbt_staging` + `dbt_test`** into one task to eliminate double tunnel overhead (open, lower priority).
