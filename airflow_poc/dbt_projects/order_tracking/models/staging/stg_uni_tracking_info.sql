@@ -55,6 +55,9 @@ with filtered as (
     from settlement_public.uni_tracking_info_raw
     {% if is_incremental() %}
     where update_time > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
+    {% if var('source_end_time', none) %}
+    and update_time <= {{ var('source_end_time') }} -- optional cap for testing
+    {% endif %}
     {% else %}
     -- First run: load everything from raw (process what was extracted)
     -- This ensures that whatever data is in the raw table (from the extraction task) is staged,

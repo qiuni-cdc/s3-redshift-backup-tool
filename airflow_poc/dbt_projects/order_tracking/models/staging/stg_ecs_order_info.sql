@@ -46,6 +46,9 @@ with filtered as (
     from settlement_public.ecs_order_info_raw
     {% if is_incremental() %}
     where add_time > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
+    {% if var('source_end_time', none) %}
+    and add_time <= {{ var('source_end_time') }} -- optional cap for testing
+    {% endif %}
     {% else %}
     -- First run: load everything from raw
     {% endif %}
