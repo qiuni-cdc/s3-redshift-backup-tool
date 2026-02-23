@@ -26,7 +26,7 @@
         unique_key='order_id',
         incremental_strategy='delete+insert',
         dist='order_id',
-        sort='add_time',
+        sort=['add_time', 'order_id'],
         incremental_predicates=[
             this ~ ".add_time > (SELECT COALESCE(MAX(add_time), 0) - 7200 FROM " ~ this ~ ")"
         ]
