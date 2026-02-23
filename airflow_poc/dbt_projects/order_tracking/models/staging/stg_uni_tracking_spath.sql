@@ -52,6 +52,9 @@ with filtered as (
     from settlement_public.uni_tracking_spath_raw
     {% if is_incremental() %}
     where pathTime > {{ source_cutoff }} -- 30-min source scan
+    {% if var('source_end_time', none) %}
+    and pathTime <= {{ var('source_end_time') }} -- optional cap for testing
+    {% endif %}
     {% else %}
     -- First run: load everything from raw
     {% endif %}

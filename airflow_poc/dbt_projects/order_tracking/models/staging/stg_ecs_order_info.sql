@@ -1,12 +1,12 @@
 {#
     Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
+    Delete cutoff: 2 hours — limits MERGE DELETE scan on staging via incremental_predicates.
 
-    Strategy: merge (not delete+insert)
-    - MERGE uses DISTKEY (order_id) co-location → directly targets only batch rows
-    - Performance is O(batch_size), not O(table_size)
-    - delete+insert with IN subquery scans the entire staging table on every DELETE,
-      which becomes unusable as staging grows (17M rows now → 260M+ rows at 1 year)
-    - add_time is static (order creation time) → MERGE UPDATE is a no-op for existing rows
+    Strategy: delete+insert (not merge)
+    - add_time is static (order creation time) → new batches only ever contain NEW orders
+    - delete+insert with incremental_predicates limits DELETE to 2-hour window via SORTKEY zone maps
+    - Old orders (add_time > 2h ago) never appear in new batches → no correctness risk
+    - Subquery in incremental_predicates evaluated by Redshift at runtime → zone map pruning applies
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(add_time), 0) - 1800 from {{ this }}
@@ -24,9 +24,12 @@
     config(
         materialized='incremental',
         unique_key='order_id',
-        incremental_strategy='merge',
+        incremental_strategy='delete+insert',
         dist='order_id',
-        sort='add_time'
+        sort=['add_time', 'order_id'],
+        incremental_predicates=[
+            this ~ ".add_time > (SELECT COALESCE(MAX(add_time), 0) - 7200 FROM " ~ this ~ ")"
+        ]
     )
 }}
 
@@ -43,6 +46,9 @@ with filtered as (
     from settlement_public.ecs_order_info_raw
     {% if is_incremental() %}
     where add_time > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
+    {% if var('source_end_time', none) %}
+    and add_time <= {{ var('source_end_time') }} -- optional cap for testing
+    {% endif %}
     {% else %}
     -- First run: load everything from raw
     {% endif %}
@@ -58,3 +64,4 @@ ranked as (
 select * exclude(_rn)
 from ranked
 where _rn = 1
+order by add_time, order_id
