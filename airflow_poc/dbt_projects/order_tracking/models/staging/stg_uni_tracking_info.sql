@@ -1,5 +1,6 @@
 {#
     Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
+    Delete cutoff: 15 days — limits MERGE DELETE scan on staging via incremental_predicates.
 
     Strategy: merge (not delete+insert)
     - MERGE uses DISTKEY (order_id) co-location → directly targets only batch rows
@@ -7,7 +8,12 @@
     - delete+insert with IN subquery scans the entire staging table on every DELETE,
       which becomes unusable as staging grows (13.5M rows now → 200M+ rows at 1 year)
     - update_time changes on every order touch → MERGE UPDATE correctly replaces old state
-    - No time restriction needed: MERGE matches by order_id directly, no window required
+
+    incremental_predicates:
+    - update_time is the SORTKEY → Redshift zone maps skip old blocks during MERGE DELETE
+    - 15-day window: orders inactive >15 days are outside the delete scan
+    - Safe assumption: active orders have update_time within last 15 days
+    - Subquery evaluated by Redshift at runtime → zone map pruning applies
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(update_time), 0) - 1800 from {{ this }}
@@ -27,7 +33,10 @@
         unique_key='order_id',
         incremental_strategy='merge',
         dist='order_id',
-        sort='update_time'
+        sort='update_time',
+        incremental_predicates=[
+            this ~ ".update_time > (SELECT COALESCE(MAX(update_time), 0) - 1296000 FROM " ~ this ~ ")"
+        ]
     )
 }}
 
