@@ -33,6 +33,6 @@ order_tracking:
       user: "{{ env_var('REDSHIFT_PRO_USER') }}"
       password: "{{ env_var('REDSHIFT_PRO_PASSWORD') }}"
       dbname: dw
-      schema: settlement_ods
+      schema: settlement_public
       threads: 4
       connect_timeout: 30

@@ -33,5 +33,5 @@ tests:
 
 vars:
   # Configuration variables
-  raw_schema: 'settlment_public'
-  staging_schema: 'settlement_ods'
+  raw_schema: 'settlement_public'
+  staging_schema: 'settlement_public'

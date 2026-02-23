@@ -269,15 +269,26 @@ connections:
       ssh_tunnel:
         enabled: false 
     
-    redshift_settlement_ods_direct: 
-      host: redshift-dw.uniuni.com 
-      port: 5439 
-      database: dw 
-      username: "${REDSHIFT_PRO_USER}" 
-      password: "${REDSHIFT_PRO_PASSWORD}" 
-      schema: settlement_ods 
+    redshift_settlement_ods_direct:
+      host: redshift-dw.uniuni.com
+      port: 5439
+      database: dw
+      username: "${REDSHIFT_PRO_USER}"
+      password: "${REDSHIFT_PRO_PASSWORD}"
+      schema: settlement_ods
 
-      # Redshift SSH tunnel (your separate bastion) 
+      # Redshift SSH tunnel (your separate bastion)
+      ssh_tunnel:
+        enabled: false
+
+    redshift_settlement_public_direct:
+      host: redshift-dw.uniuni.com
+      port: 5439
+      database: dw
+      username: "${REDSHIFT_PRO_USER}"
+      password: "${REDSHIFT_PRO_PASSWORD}"
+      schema: settlement_public
+
       ssh_tunnel:
         enabled: false
 

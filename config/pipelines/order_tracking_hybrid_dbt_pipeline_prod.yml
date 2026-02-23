@@ -1,13 +1,16 @@
-# Order Tracking Pipeline - Hybrid + dbt Approach
-# Simple time-based extraction with dbt processing
-# Used by: order_tracking_hybrid_dbt_dag.py
+# Order Tracking Pipeline - Hybrid + dbt Approach (PROD cluster)
+# Direct connection to prod MySQL (no SSH needed - same network)
+# Prod Redshift, QA S3 bucket with separate prefix
+# Used for: prod cluster performance test
+# Note: Uses QA S3 bucket (redshift-dw-qa-uniuni-com) with a separate prefix
+#        to avoid mixing with QA pipeline data. Switch to s3_prod when going live.
 
 pipeline:
-  name: "order_tracking_hybrid_dbt"
-  description: "15-min time-based extraction with dbt deduplication"
-  source: "US_PROD_RO_SSH"
-  target: "redshift_default_direct"
-  s3_config: "s3_qa" 
+  name: "order_tracking_hybrid_dbt_prod"
+  description: "15-min time-based extraction with dbt deduplication - PROD cluster test"
+  source: "US_PROD_RO_DIRECT"
+  target: "redshift_settlement_public_direct"
+  s3_config: "s3_qa"
   version: "2.0.0"
   sync_frequency: "*/15 * * * *"
 
@@ -16,10 +19,10 @@ pipeline:
     batch_size: 100000
     timeout_minutes: 30
     max_parallel_tables: 3
-    query_timeout_seconds: 300         # 5 min - handles peak volumes
+    query_timeout_seconds: 300
 
   s3:
-    isolation_prefix: "order_tracking_hybrid_dbt/"
+    isolation_prefix: "order_tracking_hybrid_dbt_prod/"   # Separate prefix from QA pipeline
     partition_strategy: "datetime"
     compression: "snappy"
 
@@ -30,13 +33,13 @@ pipeline:
   dbt_settings:
     project_path: "/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/airflow_poc/dbt_projects/order_tracking"
     raw_schema: "settlement_public"
-    staging_schema: "settlement_ods"
+    staging_schema: "settlement_public"
 
 tables:
   kuaisong.ecs_order_info:
     cdc_strategy: "timestamp_only"
     cdc_timestamp_column: "add_time"
-    cdc_id_column: "order_id"  # CRITICAL: Required for stable sort order to prevent duplicates
+    cdc_id_column: "order_id"
     timestamp_format: "unix"
     primary_key: "order_id"
     description: "Order creation (~500K/day normal, ~2M/day peak)"
@@ -49,7 +52,7 @@ tables:
   kuaisong.uni_tracking_info:
     cdc_strategy: "timestamp_only"
     cdc_timestamp_column: "update_time"
-    cdc_id_column: "order_id"  # CRITICAL: Required for stable sort order to prevent duplicates
+    cdc_id_column: "order_id"
     timestamp_format: "unix"
     primary_key: "order_id"
     description: "Latest tracking state (~500K/day normal, ~2M/day peak)"
@@ -62,7 +65,7 @@ tables:
   kuaisong.uni_tracking_spath:
     cdc_strategy: "timestamp_only"
     cdc_timestamp_column: "pathTime"
-    cdc_id_column: "id"  # CRITICAL: Required for stable sort order to prevent duplicates (use 'id' not composite key)
+    cdc_id_column: "id"
     timestamp_format: "unix"
     primary_key: ["order_id", "traceSeq"]
     sequence_column: "traceSeq"

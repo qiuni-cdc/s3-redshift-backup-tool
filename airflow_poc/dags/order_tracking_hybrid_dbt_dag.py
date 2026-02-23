@@ -74,17 +74,17 @@ TABLES = {
     "ecs": {
         "full_name": "kuaisong.ecs_order_info",
         "timestamp_col": "add_time",
-        "target": "settlment_public.ecs_order_info_raw"
+        "target": "settlement_public.ecs_order_info_raw"
     },
     "uti": {
         "full_name": "kuaisong.uni_tracking_info",
         "timestamp_col": "update_time",
-        "target": "settlment_public.uni_tracking_info_raw"
+        "target": "settlement_public.uni_tracking_info_raw"
     },
     "uts": {
         "full_name": "kuaisong.uni_tracking_spath",
         "timestamp_col": "pathTime",
-        "target": "settlment_public.uni_tracking_spath_raw"
+        "target": "settlement_public.uni_tracking_spath_raw"
     }
 }
 
@@ -208,7 +208,6 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f venv/bin/activate ] && source venv/bin/activate
         # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
         echo "Extracting ecs_order_info using pipeline timestamp_only strategy"
@@ -229,7 +228,6 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f venv/bin/activate ] && source venv/bin/activate
         # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
         echo "Extracting uni_tracking_info using pipeline timestamp_only strategy"
@@ -249,7 +247,6 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         bash_command=f'''
         set -e
         cd {SYNC_TOOL_PATH}
-        [ -f venv/bin/activate ] && source venv/bin/activate
         [ -f venv/bin/activate ] && source venv/bin/activate
         # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
