@@ -61,3 +61,4 @@ ranked as (
 select * exclude(_rn)
 from ranked
 where _rn = 1
+order by add_time, order_id
