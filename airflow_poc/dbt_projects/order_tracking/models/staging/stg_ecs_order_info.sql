@@ -2,18 +2,11 @@
     Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
     Delete cutoff: 2 hours — limits MERGE DELETE scan on staging via incremental_predicates.
 
-    Strategy: merge (not delete+insert)
-    - MERGE uses DISTKEY (order_id) co-location → directly targets only batch rows
-    - Performance is O(batch_size), not O(table_size)
-    - delete+insert with IN subquery scans the entire staging table on every DELETE,
-      which becomes unusable as staging grows (17M rows now → 260M+ rows at 1 year)
-    - add_time is static (order creation time) → MERGE UPDATE is a no-op for existing rows
-
-    incremental_predicates:
-    - add_time is the SORTKEY → Redshift zone maps skip old blocks during MERGE DELETE
-    - New orders always have add_time within last 15 min (extraction window)
-    - 2-hour window safely covers the batch with margin; old blocks are pruned
-    - Subquery evaluated by Redshift at runtime → zone map pruning applies
+    Strategy: delete+insert (not merge)
+    - add_time is static (order creation time) → new batches only ever contain NEW orders
+    - delete+insert with incremental_predicates limits DELETE to 2-hour window via SORTKEY zone maps
+    - Old orders (add_time > 2h ago) never appear in new batches → no correctness risk
+    - Subquery in incremental_predicates evaluated by Redshift at runtime → zone map pruning applies
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(add_time), 0) - 1800 from {{ this }}
@@ -31,7 +24,7 @@
     config(
         materialized='incremental',
         unique_key='order_id',
-        incremental_strategy='merge',
+        incremental_strategy='delete+insert',
         dist='order_id',
         sort='add_time',
         incremental_predicates=[
