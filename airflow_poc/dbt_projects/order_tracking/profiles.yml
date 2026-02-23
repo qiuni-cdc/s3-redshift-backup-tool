@@ -35,4 +35,5 @@ order_tracking:
       dbname: dw
       schema: settlement_public
       threads: 4
-      connect_timeout: 30
+      connect_timeout: 900
+      keepalives_idle: 15
