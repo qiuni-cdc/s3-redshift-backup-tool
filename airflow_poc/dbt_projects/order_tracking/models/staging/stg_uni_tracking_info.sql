@@ -11,7 +11,7 @@
     Edge case: update_time can change after 2+ months (very rare).
     - Old row (update_time > 20 days ago) not deleted → new version inserted → duplicate order_id
     - post_hook detects and removes the older duplicate after every run
-    - post_hook is a no-op when no duplicates exist (near-instant GROUP BY on DISTKEY)
+    - post_hook only checks order_ids from the recent batch (not full table scan) → stays fast as table grows
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(update_time), 0) - 1800 from {{ this }}
@@ -36,7 +36,7 @@
             this ~ ".update_time > (SELECT COALESCE(MAX(update_time), 0) - 1728000 FROM " ~ this ~ ")"
         ],
         post_hook=[
-            "DELETE FROM {{ this }} USING (SELECT order_id, MAX(update_time) AS max_ut FROM {{ this }} GROUP BY order_id HAVING COUNT(*) > 1) dups WHERE {{ this }}.order_id = dups.order_id AND {{ this }}.update_time < dups.max_ut"
+            "DELETE FROM {{ this }} USING (SELECT all_rows.order_id, MAX(all_rows.update_time) AS max_ut FROM {{ this }} all_rows WHERE all_rows.order_id IN (SELECT DISTINCT order_id FROM settlement_public.uni_tracking_info_raw WHERE update_time >= (SELECT COALESCE(MAX(update_time), 0) - 1800 FROM {{ this }})) GROUP BY all_rows.order_id HAVING COUNT(*) > 1) dups WHERE {{ this }}.order_id = dups.order_id AND {{ this }}.update_time < dups.max_ut"
         ]
     )
 }}
@@ -47,7 +47,7 @@
     - Source scan: 30 min (matches 15-min extraction window + retry buffer)
     - Strategy: delete+insert with 20-day incremental_predicates on update_time
     - update_time always reflects latest state → ranked dedup keeps only latest per order_id
-    - post_hook removes rare duplicates from late updates (update_time > 20 days old)
+    - post_hook removes rare duplicates from late updates (update_time > 20 days old), scoped to recent batch order_ids only
 */
 
 with filtered as (
