@@ -146,23 +146,12 @@ def calculate_sync_window(**context):
         key='return_value'
     )
     
-    # Use Airflow's logical execution date (end of the interval) as the anchor
-    # valid_to = execution_date + schedule_interval (approx data_interval_start)
-    # Ideally use data_interval_start from context if available (Airflow 2.2+)
-    
-    # Fallback for compatibility or if specific context keys are missing
-    try:
-        # data_interval_start is the end of the schedule period (the "run time" in modern terms)
-        end_date = context.get('data_interval_start') 
-        if not end_date:
-            # Fallback to execution_date (start of interval) + 15 mins
-            end_date = context.get('execution_date') + timedelta(minutes=15)
-            
-        mysql_now = int(end_date.timestamp())
-        print(f"Using Logical Date (data_interval_start): {end_date} ({mysql_now})")
-    except Exception as e:
-        print(f"Error getting logical date, defaulting to current time: {e}")
-        mysql_now = int(datetime.now().timestamp())
+    # Always use wall clock time — this is a near-real-time pipeline.
+    # Using data_interval_start caused stale windows when Airflow ran
+    # a backlogged scheduled slot (e.g. Feb 21 slot running on Feb 24).
+    # Watermark handles idempotency so strict Airflow interval tracking is not needed.
+    mysql_now = int(datetime.utcnow().timestamp())
+    print(f"Using wall clock time (UTC): {datetime.utcnow().isoformat()} ({mysql_now})")
 
     buffer = BUFFER_MINUTES * 60
     lookback = INCREMENTAL_LOOKBACK_MINUTES * 60
