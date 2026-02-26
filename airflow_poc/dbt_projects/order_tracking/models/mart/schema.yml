@@ -57,8 +57,12 @@ models:
         description: Sequential event number within an order (0, 1, 2, ...)
         quote: true
         data_tests:
-          - not_null
+          - not_null:
+              config:
+                alias: not_null_mart_uts_traceseq  # lowercase alias prevents Redshift case-mismatch on --store-failures
       - name: pathTime
         description: Lead SORTKEY column — primary query filter (epoch integer)
         data_tests:
-          - not_null
+          - not_null:
+              config:
+                alias: not_null_mart_uts_pathtime  # lowercase alias prevents Redshift case-mismatch on --store-failures
