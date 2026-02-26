@@ -10,7 +10,7 @@ models:
     columns:
       - name: order_id
         description: Primary key — one row per active order
-        tests:
+        data_tests:
           - unique
           - not_null
 
@@ -25,12 +25,12 @@ models:
     columns:
       - name: order_id
         description: Primary key — one row per active order
-        tests:
+        data_tests:
           - unique
           - not_null
       - name: partner_id
         description: Lead SORTKEY column — primary query filter
-        tests:
+        data_tests:
           - not_null
 
   - name: mart_uni_tracking_spath
@@ -44,7 +44,7 @@ models:
     columns:
       - name: order_id
         description: Foreign key to mart_uni_tracking_info
-        tests:
+        data_tests:
           - not_null
           - relationships:
               to: ref('mart_uni_tracking_info')
@@ -56,9 +56,9 @@ models:
       - name: traceSeq
         description: Sequential event number within an order (0, 1, 2, ...)
         quote: true
-        tests:
+        data_tests:
           - not_null
       - name: pathTime
         description: Lead SORTKEY column — primary query filter (epoch integer)
-        tests:
+        data_tests:
           - not_null

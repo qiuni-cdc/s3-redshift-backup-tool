@@ -6,7 +6,7 @@ models:
     columns:
       - name: order_id
         description: Primary key - unique order identifier
-        tests:
+        data_tests:
           - unique
           # - not_null
 
@@ -15,7 +15,7 @@ models:
     columns:
       - name: order_id
         description: Foreign key to ecs_order_info
-        tests:
+        data_tests:
           - unique
           # - not_null
           - relationships:
@@ -31,7 +31,7 @@ models:
     columns:
       - name: order_id
         description: Foreign key to ecs_order_info
-        tests:
+        data_tests:
           # - not_null
           - relationships:
               to: ref('stg_ecs_order_info')

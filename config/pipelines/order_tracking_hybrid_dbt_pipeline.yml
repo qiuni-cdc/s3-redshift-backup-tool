@@ -29,7 +29,7 @@ pipeline:
 
   dbt_settings:
     project_path: "/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/airflow_poc/dbt_projects/order_tracking"
-    raw_schema: "settlment_public"
+    raw_schema: "settlement_public"
     staging_schema: "settlement_ods"
 
 tables:
