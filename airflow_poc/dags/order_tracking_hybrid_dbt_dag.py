@@ -1,23 +1,37 @@
 """
-Order Tracking Sync - Hybrid + dbt Approach
-============================================
+Order Tracking Sync — 15-Minute Pipeline
+=========================================
 
-Combines hybrid extraction strategies with dbt processing:
+Architecture: Raw → Mart directly. No staging layer.
 
-EXTRACTION (Airflow):
-  - Time-based extraction with 15-min window (handles peak volumes)
-  - Uses MySQL server time to avoid drift issues
-  - Parallel extraction of all 3 tables
+CYCLE (every 15 min):
+  ① Extraction (parallel, ~94s)
+       extract_ecs / extract_uti / extract_uts → *_raw tables in Redshift
 
-TRANSFORMATION (dbt):
-  - Deduplication via merge strategy
-  - Sequence gap detection
-  - Consistency tests
+  ② dbt: mart_uni_tracking_info  (~140s, must complete before ③ and ④)
+       delete+insert from uni_tracking_info_raw
+       4 post_hooks: stale hist cleanup → archive → safety check → trim
+
+  ③ dbt: mart_ecs_order_info  (parallel with ④, after ②)
+       insert from ecs_order_info_raw
+       2 post_hooks: archive inactive orders (LEFT JOIN anti-join) → DELETE USING trim
+
+  ④ dbt: mart_uni_tracking_spath  (parallel with ③, after ②)
+       insert from uni_tracking_spath_raw
+       3 post_hooks: archive → safety check → pure time-based trim
+
+  ⑤ dbt test — schema.yml uniqueness / not_null / relationship tests
+
+Estimated total: ~4 min. Headroom: ~11 min in 15-min schedule.
+max_active_runs=1 prevents concurrent cycles from overlapping.
+
+Monitoring (DQ checks + VACUUM) runs in a separate daily DAG:
+  order_tracking_daily_monitoring
 
 Tables:
-  - kuaisong.ecs_order_info (ecs) → add_time (~500K/day, ~2M/day peak)
+  - kuaisong.ecs_order_info  (ecs) → add_time  (~500K/day, ~2M/day peak)
   - kuaisong.uni_tracking_info (uti) → update_time (~500K/day, ~2M/day peak)
-  - kuaisong.uni_tracking_spath (uts) → pathTime, traceSeq (~2M/day, ~8M/day peak)
+  - kuaisong.uni_tracking_spath (uts) → pathTime  (~2M/day, ~8M/day peak)
 """
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -470,17 +484,53 @@ else:
     DBT_CLEANUP_TUNNEL = ''
 
 # ============================================================================
-# TASK 5: DBT RUN - Staging (Dedupe + Incremental)
+# TASK 5: DBT RUN - Mart: mart_uni_tracking_info (must complete before 5b/5c)
 # ============================================================================
+# execution_timeout is tighter here (10 min) — if mart_uti overruns its budget,
+# the next scheduled run must not start before this one finishes. max_active_runs=1
+# handles that at the DAG level, but a per-task timeout kills runaway cycles early.
 
-dbt_staging = BashOperator(
-    task_id='dbt_staging',
+dbt_mart_uti = BashOperator(
+    task_id='dbt_mart_uti',
     bash_command=DBT_WITH_TUNNEL + f'''
-    echo "[$(date -u +%H:%M:%S)] Running dbt staging models (per-model timing from dbt output below)"
-    dbt run --select staging --profiles-dir .
-    echo "[$(date -u +%H:%M:%S)] All staging models complete"
+    echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_info"
+    dbt run --select mart_uni_tracking_info --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_info complete"
 ''' + DBT_CLEANUP_TUNNEL,
     env=dbt_env_vars,
+    execution_timeout=timedelta(minutes=10),
+    dag=dag
+)
+
+# ============================================================================
+# TASK 5b/5c: DBT RUN - Mart: mart_ecs + mart_uts (parallel, after mart_uti)
+# ============================================================================
+# mart_ecs post_hooks LEFT JOIN against mart_uni_tracking_info — must read its
+# final state, so mart_uti must fully complete first.
+# mart_uts uses pure time-based retention (no mart_uti read) but still runs
+# after mart_uti for consistent cycle ordering.
+
+dbt_mart_ecs = BashOperator(
+    task_id='dbt_mart_ecs',
+    bash_command=DBT_WITH_TUNNEL + f'''
+    echo "[$(date -u +%H:%M:%S)] Running mart_ecs_order_info"
+    dbt run --select mart_ecs_order_info --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] mart_ecs_order_info complete"
+''' + DBT_CLEANUP_TUNNEL,
+    env=dbt_env_vars,
+    execution_timeout=timedelta(minutes=10),
+    dag=dag
+)
+
+dbt_mart_uts = BashOperator(
+    task_id='dbt_mart_uts',
+    bash_command=DBT_WITH_TUNNEL + f'''
+    echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_spath"
+    dbt run --select mart_uni_tracking_spath --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_spath complete"
+''' + DBT_CLEANUP_TUNNEL,
+    env=dbt_env_vars,
+    execution_timeout=timedelta(minutes=10),
     dag=dag
 )
 
@@ -500,17 +550,21 @@ dbt_staging = BashOperator(
 # )
 
 # ============================================================================
-# TASK 7: DBT TEST - Consistency Checks
+# TASK 7: DBT TEST - Mart Consistency Checks
 # ============================================================================
+# Scoped to --select mart: only tests mart model schema.yml (unique, not_null,
+# relationships). Staging tests are excluded — stg_* tables are no longer
+# updated in this pipeline so their relationship tests would produce false failures.
 
 dbt_test = BashOperator(
     task_id='dbt_test',
     bash_command=DBT_WITH_TUNNEL + f'''
-    echo "Running consistency tests"
-    dbt test --store-failures --profiles-dir .
-    echo "Tests complete"
+    echo "[$(date -u +%H:%M:%S)] Running mart consistency tests"
+    dbt test --select mart --store-failures --profiles-dir .
+    echo "[$(date -u +%H:%M:%S)] Tests complete"
 ''' + DBT_CLEANUP_TUNNEL,
-    env=dbt_env_vars,  # Pass loaded environment variables
+    env=dbt_env_vars,
+    execution_timeout=timedelta(minutes=5),
     dag=dag
 )
 
@@ -586,9 +640,11 @@ EXTRACTION:
   Total:          {total_rows:>10,} rows
 
 DBT:
-  Staging: Deduplicated via merge
-  Gaps:    {gap_count} detected
-  Tests:   Passed
+  mart_uti:  delete+insert, 4 post_hooks (hist cleanup, archive, safety check, trim)
+  mart_ecs:  insert + 2 post_hooks (archive inactive, DELETE USING trim)
+  mart_uts:  insert + 3 post_hooks (archive, safety check, time-based trim)
+  Gaps:      {gap_count} detected
+  Tests:     schema.yml (unique / not_null / relationships)
 
 STATUS: SUCCESS
 ================================================================================
@@ -607,5 +663,7 @@ summary = PythonOperator(
 # DEPENDENCIES
 # ============================================================================
 
-check_drift >> calc_window >> extraction_group >> validate >> dbt_staging >> dbt_test >> summary
+check_drift >> calc_window >> extraction_group >> validate >> dbt_mart_uti
+dbt_mart_uti >> [dbt_mart_ecs, dbt_mart_uts]
+[dbt_mart_ecs, dbt_mart_uts] >> dbt_test >> summary
 
