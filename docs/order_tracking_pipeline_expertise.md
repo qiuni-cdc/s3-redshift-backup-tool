@@ -265,10 +265,38 @@ airflow_poc/
 | `max_active_runs=1` on 15-min DAG | Prevents concurrent cycles from reading mid-write watermarks |
 | 2026_h1 hist tables not needed yet (Feb 2026) | Removed STEP 2b/1b blocks; uncomment `2026_h1` in `dbt_project.yml` ~Jul 2026 |
 | Step 1 in mart_uti must target LATEST hist table | Reactivated orders' stale entry is always in the most recent hist table (orders never dormant >~1 year) |
+| Raw tables grow forever without trim | Added `trim_raw` task (24h retention) — runs after `validate`, before `dbt_mart_uti` |
+| Schema typo in original code | `settlment_public` (typo) → `settlement_public` — fixed in DAG TABLES config and dbt_project.yml |
+| `--` SQL comments inside `{{ config() }}` block fail | Jinja parses `--` as operators inside `{{ }}`. Fix: use `{# #}` Jinja comments + `{%- set _ph = "..." -%}` variables, reference variables in `post_hook=[_ph1, _ph2, ...]` |
+| `CTAS` does not support `IF NOT EXISTS` in Redshift | Remove `IF NOT EXISTS` from hist table CTAS statements; only valid on regular `CREATE TABLE` |
+| `to_timestamp(integer)` does not exist in Redshift | Timestamps stored as epoch integers — just use raw integers in queries, no conversion needed |
+| `tests:` in schema.yml deprecated in dbt 1.8 | Rename to `data_tests:` in schema.yml to remove deprecation warning |
+| profiles.yml `dev` target defaults to localhost:15439 | Override with `DBT_REDSHIFT_HOST` and `DBT_REDSHIFT_PORT` env vars when running directly on QA server (no SSH tunnel needed — QA server can reach QA Redshift directly) |
+| Check raw table size before first mart run | Raw tables may have months of data — trim to a manageable window before first `dbt run` to avoid a multi-hour initial load |
 
 ---
 
-## 9. QA Testing Checklist
+## 9. dbt Commands (QA Server)
+
+QA server reaches Redshift directly — no SSH tunnel. Always pass these 4 env vars inline:
+
+```bash
+# compile
+REDSHIFT_QA_USER=sett_ddl_owner REDSHIFT_QA_PASSWORD='Qx2[,y4*voli3)M>' DBT_REDSHIFT_HOST=redshift-dw.qa.uniuni.com DBT_REDSHIFT_PORT=5439 dbt compile --select mart --profiles-dir .
+
+# run mart_uti (first, alone)
+REDSHIFT_QA_USER=sett_ddl_owner REDSHIFT_QA_PASSWORD='Qx2[,y4*voli3)M>' DBT_REDSHIFT_HOST=redshift-dw.qa.uniuni.com DBT_REDSHIFT_PORT=5439 dbt run --select mart_uni_tracking_info --profiles-dir .
+
+# run mart_ecs + mart_uts (after mart_uti passes)
+REDSHIFT_QA_USER=sett_ddl_owner REDSHIFT_QA_PASSWORD='Qx2[,y4*voli3)M>' DBT_REDSHIFT_HOST=redshift-dw.qa.uniuni.com DBT_REDSHIFT_PORT=5439 dbt run --select mart_ecs_order_info mart_uni_tracking_spath --profiles-dir .
+
+# run tests
+REDSHIFT_QA_USER=sett_ddl_owner REDSHIFT_QA_PASSWORD='Qx2[,y4*voli3)M>' DBT_REDSHIFT_HOST=redshift-dw.qa.uniuni.com DBT_REDSHIFT_PORT=5439 dbt test --select mart --store-failures --profiles-dir .
+```
+
+---
+
+## 10. QA Testing Checklist
 
 Pre-flight DDL (run once before first `dbt run`):
 ```sql
@@ -281,18 +309,19 @@ CREATE TABLE IF NOT EXISTS settlement_ods.order_tracking_exceptions (
     notes VARCHAR(512)
 ) DISTKEY(order_id) SORTKEY(exception_type, detected_at);
 
--- 2. 2025_h2 hist tables (CTAS from stg_* — same schema, zero rows)
-CREATE TABLE IF NOT EXISTS settlement_ods.hist_uni_tracking_info_2025_h2
-    DISTKEY(order_id) SORTKEY(update_time, order_id)
-    AS SELECT * FROM settlement_ods.stg_uni_tracking_info WHERE 1=0;
+-- 2. 2025_h2 hist tables — CTAS does NOT support IF NOT EXISTS in Redshift
+--    DROP TABLE first if re-running (tables are empty so nothing to lose)
+CREATE TABLE settlement_ods.hist_uni_tracking_info_2025_h2
+DISTKEY(order_id) SORTKEY(update_time, order_id)
+AS SELECT * FROM settlement_ods.stg_uni_tracking_info WHERE 1=0;
 
-CREATE TABLE IF NOT EXISTS settlement_ods.hist_ecs_order_info_2025_h2
-    DISTKEY(order_id) SORTKEY(partner_id, add_time, order_id)
-    AS SELECT * FROM settlement_ods.stg_ecs_order_info WHERE 1=0;
+CREATE TABLE settlement_ods.hist_ecs_order_info_2025_h2
+DISTKEY(order_id) SORTKEY(partner_id, add_time, order_id)
+AS SELECT * FROM settlement_ods.stg_ecs_order_info WHERE 1=0;
 
-CREATE TABLE IF NOT EXISTS settlement_ods.hist_uni_tracking_spath_2025_h2
-    DISTKEY(order_id) SORTKEY(pathTime, order_id)
-    AS SELECT * FROM settlement_ods.stg_uni_tracking_spath WHERE 1=0;
+CREATE TABLE settlement_ods.hist_uni_tracking_spath_2025_h2
+DISTKEY(order_id) SORTKEY(pathTime, order_id)
+AS SELECT * FROM settlement_ods.stg_uni_tracking_spath WHERE 1=0;
 ```
 
 Verification after first `dbt run --select mart`:
