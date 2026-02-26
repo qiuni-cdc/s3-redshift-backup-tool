@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """
-Cross-pipeline data quality comparison: MySQL uniods vs Redshift staging.
+Cross-pipeline data quality comparison: MySQL uniods (Kettle) vs Redshift mart.
 
 Compares data for a given UTC day between the old pipeline (MySQL uniods) and
-the new pipeline (Redshift staging), reporting missing rows, extra rows, and
+the new pipeline (Redshift mart layer), reporting missing rows, extra rows, and
 column-level value mismatches per table.
 
 Tables compared:
-  ecs  │ uniods.dw_ecs_order_info        ↔  settlement_ods.stg_ecs_order_info
-  uti  │ uniods.dw_uni_tracking_info     ↔  settlement_ods.stg_uni_tracking_info
-  uts  │ uniods.dw_uni_tracking_spath    ↔  settlement_ods.stg_uni_tracking_spath
+  ecs  │ uniods.dw_ecs_order_info        ↔  settlement_ods.mart_ecs_order_info
+  uti  │ uniods.dw_uni_tracking_info     ↔  settlement_ods.mart_uni_tracking_info
+  uts  │ uniods.dw_uni_tracking_spath    ↔  settlement_ods.mart_uni_tracking_spath
 
 Usage:
-    python airflow_poc/compare_pipelines.py --date 2026-02-01
-    python airflow_poc/compare_pipelines.py --date 2026-02-01 --table ecs
-    python airflow_poc/compare_pipelines.py --date 2026-02-01 --output mismatches.csv
+    # Compare full mart date range (recommended — auto-detects window from each mart table)
+    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel
+    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --table ecs
+    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --output mismatches.csv
+
+    # Compare a single day (legacy / spot-check)
     python airflow_poc/compare_pipelines.py --date 2026-02-01 --env qa --no-rs-tunnel
 
 Notes:
   - Requires SSH tunnel access to the MySQL bastion (35.83.114.196).
   - Run with --no-rs-tunnel when executing from inside the VPC (e.g. QA server).
-  - uts table (~2M rows/day, 17 cols) loads ~1.6 GB into memory across both sides.
-    Ensure at least 4 GB available when running all three tables together.
+  - Full-range mode processes data in --chunk-days chunks (default 30) to cap memory.
+    uts at full 6-month range is ~1.17B rows total; chunking keeps each batch ~200M rows.
   - Value comparison uses string coercion. Numeric float/decimal columns may show
     false positives if precision differs between MySQL and Redshift (e.g. 1.0 vs 1).
 """
@@ -46,7 +49,7 @@ load_dotenv()
 TABLE_CONFIG = {
     "ecs": {
         "mysql_table":    "dw_ecs_order_info",
-        "redshift_table": "stg_ecs_order_info",
+        "redshift_table": "mart_ecs_order_info",
         "pk":             ["order_id"],
         "date_col":       "add_time",         # unix timestamp
         "dw_exclude":     {"id"},             # auto-increment PK in uniods only
@@ -54,19 +57,19 @@ TABLE_CONFIG = {
     },
     "uti": {
         "mysql_table":    "dw_uni_tracking_info",
-        "redshift_table": "stg_uni_tracking_info",
+        "redshift_table": "mart_uni_tracking_info",
         "pk":             ["order_id"],
         "date_col":       "update_time",
         "dw_exclude":     {"id"},
-        "stg_exclude":    {"short_code"},     # present in stg only, no equivalent in dw
+        "stg_exclude":    {"short_code"},     # present in stg only, no equivalent in mart
     },
     "uts": {
         "mysql_table":    "dw_uni_tracking_spath",
-        "redshift_table": "stg_uni_tracking_spath",
+        "redshift_table": "mart_uni_tracking_spath",
         "pk":             ["order_id", "traceSeq", "pathTime"],
         "date_col":       "pathTime",
         "dw_exclude":     {"id"},
-        "stg_exclude":    {"_id"},            # MySQL source id surfaced in stg, no equivalent in dw
+        "stg_exclude":    {"_id"},            # MySQL source id surfaced in stg, no equivalent in mart
     },
 }
 
@@ -89,7 +92,7 @@ REDSHIFT_ENVS = {
         "database":    "dw",
         "user_env":    "REDSHIFT_QA_USER",
         "pass_env":    "REDSHIFT_QA_PASSWORD",
-        "schema":      "settlement_public",
+        "schema":      "settlement_ods",
         "ssh_bastion": "35.82.216.244",
     },
     "prod": {
@@ -183,6 +186,18 @@ def resolve_common_columns(mysql_cols: list, rs_cols: list,
     Preserves MySQL ordering; matching is case-insensitive."""
     rs_available = {c.lower() for c in rs_cols} - {c.lower() for c in stg_exclude}
     return [c for c in mysql_cols if c not in dw_exclude and c.lower() in rs_available]
+
+
+def get_mart_date_range(conn, schema: str, table: str, date_col: str) -> tuple:
+    """Return (min_unix, max_unix) of date_col in the mart table."""
+    dc = date_col.lower()
+    cur = conn.cursor()
+    cur.execute(f'SELECT MIN("{dc}"), MAX("{dc}") FROM {schema}."{table}"')
+    row = cur.fetchone()
+    cur.close()
+    if not row or row[0] is None:
+        raise ValueError(f"Mart table {schema}.{table} is empty — nothing to compare.")
+    return int(row[0]), int(row[1])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,12 +357,48 @@ def export_csv(results: dict, path: str):
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+def compare_one_table(mysql_conn, rs_conn, rs_cfg: dict, tbl_key: str,
+                      from_unix: int, to_unix: int, cols: list) -> dict:
+    """Fetch and compare one [from_unix, to_unix] slice of a table."""
+    cfg = TABLE_CONFIG[tbl_key]
+    mysql_df = fetch_mysql(
+        mysql_conn, cfg["mysql_table"], cfg["date_col"],
+        from_unix, to_unix, cols,
+    )
+    rs_df = fetch_redshift(
+        rs_conn, rs_cfg["schema"], cfg["redshift_table"], cfg["date_col"],
+        from_unix, to_unix, cols,
+    )
+    print(f"    MySQL={len(mysql_df):,}  Redshift={len(rs_df):,}", end="  ")
+    result = compare_dataframes(mysql_df, rs_df, cfg["pk"], cols)
+    del mysql_df, rs_df
+    return result
+
+
+def merge_results(agg: dict, chunk: dict) -> dict:
+    """Accumulate chunk result into aggregate."""
+    agg["mysql_rows"]       += chunk["mysql_rows"]
+    agg["rs_rows"]          += chunk["rs_rows"]
+    agg["missing_in_rs"]    += chunk["missing_in_rs"]
+    agg["extra_in_rs"]      += chunk["extra_in_rs"]
+    agg["value_mismatches"] += chunk["value_mismatches"]
+    # Keep first non-empty samples across chunks
+    if not agg["sample_missing"] and chunk["sample_missing"]:
+        agg["sample_missing"] = chunk["sample_missing"][:5]
+    if not agg["sample_extra"] and chunk["sample_extra"]:
+        agg["sample_extra"] = chunk["sample_extra"][:5]
+    if not agg["sample_mismatches"] and chunk["sample_mismatches"]:
+        agg["sample_mismatches"] = chunk["sample_mismatches"][:5]
+    return agg
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Cross-pipeline comparison: MySQL uniods vs Redshift staging"
+        description="Cross-pipeline comparison: MySQL uniods vs Redshift mart"
     )
-    parser.add_argument("--date",  required=True,
-                        help="UTC date to compare (YYYY-MM-DD)")
+    parser.add_argument("--date",  default=None,
+                        help="Single UTC date to compare (YYYY-MM-DD). "
+                             "Omit to use the full mart date range.")
     parser.add_argument("--table", choices=["ecs", "uti", "uts"],
                         help="Compare one table only (default: all three)")
     parser.add_argument("--output", metavar="FILE",
@@ -356,16 +407,22 @@ def main():
                         help="Redshift environment (default: prod)")
     parser.add_argument("--no-rs-tunnel", action="store_true",
                         help="Skip Redshift SSH tunnel (use when running inside VPC)")
+    parser.add_argument("--chunk-days", type=int, default=30,
+                        help="Chunk size in days for full-range mode (default: 30)")
     args = parser.parse_args()
-
-    day       = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    from_unix = int(day.timestamp())
-    to_unix   = from_unix + 86399   # 23:59:59 of the same day
 
     tables = [args.table] if args.table else ["ecs", "uti", "uts"]
     rs_cfg = REDSHIFT_ENVS[args.env]
 
-    print(f"Date:       {args.date}  ({from_unix} → {to_unix} UTC)")
+    single_day = args.date is not None
+    if single_day:
+        day       = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        from_unix = int(day.timestamp())
+        to_unix   = from_unix + 86399
+        print(f"Mode:       single day {args.date}  ({from_unix} → {to_unix} UTC)")
+    else:
+        print(f"Mode:       full mart range  (chunk={args.chunk_days} days)")
+
     print(f"Tables:     {tables}")
     print(f"Redshift:   {args.env}  schema={rs_cfg['schema']}")
 
@@ -407,27 +464,54 @@ def main():
             )
             print(f"  Columns: mysql={len(mysql_cols)}  rs={len(rs_cols)}  common={len(cols)}")
 
-            print(f"  Fetching MySQL data  [{cfg['date_col']} {from_unix}..{to_unix}]...")
-            mysql_df = fetch_mysql(
-                mysql_conn, cfg["mysql_table"], cfg["date_col"],
-                from_unix, to_unix, cols,
-            )
+            if single_day:
+                # ── Single-day mode ──────────────────────────────────────────
+                print(f"  Fetching [{cfg['date_col']} {from_unix}..{to_unix}]...")
+                result = compare_one_table(
+                    mysql_conn, rs_conn, rs_cfg, tbl_key,
+                    from_unix, to_unix, cols,
+                )
+                print()
+            else:
+                # ── Full-range mode: auto-detect mart window, chunk ──────────
+                min_t, max_t = get_mart_date_range(
+                    rs_conn, rs_cfg["schema"], cfg["redshift_table"], cfg["date_col"]
+                )
+                min_dt = datetime.fromtimestamp(min_t, tz=timezone.utc).strftime("%Y-%m-%d")
+                max_dt = datetime.fromtimestamp(max_t, tz=timezone.utc).strftime("%Y-%m-%d")
+                print(f"  Mart range: {min_dt} → {max_dt}  ({min_t} → {max_t})")
 
-            print(f"  Fetching Redshift data  [{cfg['date_col']} {from_unix}..{to_unix}]...")
-            rs_df = fetch_redshift(
-                rs_conn, rs_cfg["schema"], cfg["redshift_table"], cfg["date_col"],
-                from_unix, to_unix, cols,
-            )
+                agg = {
+                    "mysql_rows": 0, "rs_rows": 0, "common_cols": len(cols),
+                    "missing_in_rs": 0, "extra_in_rs": 0, "value_mismatches": 0,
+                    "sample_missing": [], "sample_extra": [], "sample_mismatches": [],
+                }
 
-            print(f"  Fetched: MySQL={len(mysql_df):,}  Redshift={len(rs_df):,}")
-            print("  Comparing...")
+                chunk_secs  = args.chunk_days * 86400
+                chunk_start = min_t
+                chunk_num   = 0
+                while chunk_start <= max_t:
+                    chunk_end = min(chunk_start + chunk_secs - 1, max_t)
+                    chunk_num += 1
+                    cs = datetime.fromtimestamp(chunk_start, tz=timezone.utc).strftime("%Y-%m-%d")
+                    ce = datetime.fromtimestamp(chunk_end,   tz=timezone.utc).strftime("%Y-%m-%d")
+                    print(f"  Chunk {chunk_num}: {cs} → {ce}", end="  ")
+                    chunk_result = compare_one_table(
+                        mysql_conn, rs_conn, rs_cfg, tbl_key,
+                        chunk_start, chunk_end, cols,
+                    )
+                    miss = chunk_result["missing_in_rs"]
+                    extra = chunk_result["extra_in_rs"]
+                    vm   = chunk_result["value_mismatches"]
+                    flag = " ✗" if (miss or extra or vm) else " ✓"
+                    print(f"missing={miss:,}  extra={extra:,}  value_mm={vm:,}{flag}")
+                    merge_results(agg, chunk_result)
+                    chunk_start = chunk_end + 1
 
-            result = compare_dataframes(mysql_df, rs_df, cfg["pk"], cols)
+                result = agg
+
             all_results[tbl_key] = result
             print_report(tbl_key, result)
-
-            # Free memory before next table
-            del mysql_df, rs_df
 
         if args.output:
             export_csv(all_results, args.output)
