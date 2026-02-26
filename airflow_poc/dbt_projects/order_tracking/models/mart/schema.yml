@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: mart_uni_tracking_info
+    description: >
+      Active orders — latest tracking state per order_id.
+      6-month rolling retention window on update_time.
+      Post-hooks: 4 steps (reactivation cleanup, archive to hist_uti, safety check, trim).
+      DISTKEY(order_id), SORTKEY(update_time, order_id).
+    columns:
+      - name: order_id
+        description: Primary key — one row per active order
+        tests:
+          - unique
+          - not_null
+
+  - name: mart_ecs_order_info
+    description: >
+      Active orders — ECS order creation metadata (partner_id, add_time, etc.).
+      Order_id-driven retention: trimmed only when mart_uni_tracking_info trims the same order.
+      Ensures 3-way JOIN never breaks for active orders regardless of add_time age.
+      Post-hooks: 2 steps (archive inactive to hist_ecs via LEFT JOIN anti-join, trim).
+      DISTKEY(order_id), SORTKEY(partner_id, add_time, order_id).
+      DAG dependency: runs AFTER mart_uni_tracking_info.
+    columns:
+      - name: order_id
+        description: Primary key — one row per active order
+        tests:
+          - unique
+          - not_null
+      - name: partner_id
+        description: Lead SORTKEY column — primary query filter
+        tests:
+          - not_null
+
+  - name: mart_uni_tracking_spath
+    description: >
+      Active orders — spath scan events, 6-month rolling retention window on pathTime.
+      Pure time-based retention: independent of mart_uni_tracking_info state.
+      Steady-state size: ~1.17B rows (195.3M rows/month × 6 months).
+      Post-hooks: 3 steps (archive to hist_uts, safety check, trim).
+      DISTKEY(order_id), SORTKEY(pathTime, order_id).
+      Can run in parallel with mart_ecs_order_info.
+    columns:
+      - name: order_id
+        description: Foreign key to mart_uni_tracking_info
+        tests:
+          - not_null
+          - relationships:
+              to: ref('mart_uni_tracking_info')
+              field: order_id
+              config:
+                severity: warn  # warn on orphans — spath may arrive before uti in edge cases
+                alias: mart_uts_uti_relationship
+                where: "pathTime >= extract(epoch from current_timestamp - interval '24 hours')"
+      - name: traceSeq
+        description: Sequential event number within an order (0, 1, 2, ...)
+        quote: true
+        tests:
+          - not_null
+      - name: pathTime
+        description: Lead SORTKEY column — primary query filter (epoch integer)
+        tests:
+          - not_null

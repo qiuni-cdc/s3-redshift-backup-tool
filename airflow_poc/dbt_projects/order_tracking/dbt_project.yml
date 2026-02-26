@@ -26,12 +26,30 @@ models:
       +materialized: incremental
     intermediate:
       +materialized: table
+    mart:
+      +materialized: incremental
 
 tests:
   +store_failures: true
   +schema: settlement_dws
 
 vars:
-  # Configuration variables
-  raw_schema: 'settlment_public'
+  # Schema configuration
+  raw_schema: 'settlment_public'      # note: typo preserved from original (settlment)
   staging_schema: 'settlement_ods'
+  mart_schema: 'settlement_ods'       # schema for mart tables and hist tables
+
+  # 6-month hist periods — ADD one entry here every 1 Jan and 1 Jul.
+  # Also: create the new hist tables in Redshift (DDL in order_tracking_final_design.md §15)
+  #        update mart_uti step 1 table name (latest hist_uti for reactivation cleanup)
+  #        add step 2 INSERT blocks to mart_uni_tracking_info and mart_uni_tracking_spath
+  hist_periods:
+    - name: '2025_h2'
+      start: '2025-07-01'
+      end:   '2026-01-01'
+    - name: '2026_h1'
+      start: '2026-01-01'
+      end:   '2026-07-01'
+    # - name: '2026_h2'        # add this on 1 Jul 2026
+    #   start: '2026-07-01'
+    #   end:   '2027-01-01'

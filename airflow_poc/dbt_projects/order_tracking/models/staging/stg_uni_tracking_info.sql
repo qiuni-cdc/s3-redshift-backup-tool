@@ -1,17 +1,21 @@
 {#
     Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
-    Delete cutoff: 20 days — limits DELETE scan on staging via SORTKEY zone maps.
+    Retention: 20 days — keeps staging compact as an active-orders working layer.
 
     Strategy: delete+insert (not merge)
-    - Orders don't stay active beyond 20 days → any order in a new batch has update_time within 20 days
-    - delete+insert with incremental_predicates limits DELETE to 20-day window via SORTKEY zone maps
-    - Old rows outside the 20-day window are never re-extracted → no correctness risk
-    - Subquery in incremental_predicates evaluated by Redshift at runtime → zone map pruning applies
+    - No incremental_predicates: DELETE is WHERE order_id IN (batch) — no time window.
+    - Always correct regardless of order lifecycle (0 days or 90 days).
+    - Retention post_hook trims rows older than 20 days after every cycle, keeping
+      the table at ~10-14M rows so DELETE scans stay fast without zone map pruning.
 
-    Edge case: update_time can change after 2+ months (very rare).
-    - Old row (update_time > 20 days ago) not deleted → new version inserted → duplicate order_id
-    - post_hook detects and removes the older duplicate after every run
-    - post_hook only checks order_ids from the recent batch (not full table scan) → stays fast as table grows
+    Why remove incremental_predicates:
+    - Old design: 20-day window on DELETE, two-band post_hooks to fix resulting duplicates.
+    - Root cause: orders with lifecycle > 20 days kept stale duplicate rows.
+    - Fix: remove the time window entirely. order_id DELETE always finds the old row.
+    - Once retention keeps the table at 20-day size, zone map pruning from
+      incremental_predicates provides zero benefit — all rows are already in the window.
+
+    See: airflow_poc/docs/stg_uti_dedup_final.md for full analysis.
 #}
 {%- set source_cutoff_query -%}
     select coalesce(max(update_time), 0) - 1800 from {{ this }}
@@ -32,11 +36,8 @@
         incremental_strategy='delete+insert',
         dist='order_id',
         sort=['update_time', 'order_id'],
-        incremental_predicates=[
-            this ~ ".update_time > (SELECT COALESCE(MAX(update_time), 0) - 1728000 FROM " ~ this ~ ")"
-        ],
         post_hook=[
-            "DELETE FROM {{ this }} USING (SELECT all_rows.order_id, MAX(all_rows.update_time) AS max_ut FROM {{ this }} all_rows WHERE all_rows.order_id IN (SELECT DISTINCT order_id FROM settlement_public.uni_tracking_info_raw WHERE update_time >= (SELECT COALESCE(MAX(update_time), 0) - 1800 FROM {{ this }})) GROUP BY all_rows.order_id HAVING COUNT(*) > 1) dups WHERE {{ this }}.order_id = dups.order_id AND {{ this }}.update_time < dups.max_ut"
+            "DELETE FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 1728000 FROM {{ this }})"
         ]
     )
 }}
@@ -45,9 +46,10 @@
     Staging model for uni_tracking_info (latest tracking state per order)
     - Unique key: order_id
     - Source scan: 30 min (matches 15-min extraction window + retry buffer)
-    - Strategy: delete+insert with 20-day incremental_predicates on update_time
+    - Strategy: delete+insert with no time-window constraint (always correct)
     - update_time always reflects latest state → ranked dedup keeps only latest per order_id
-    - post_hook removes rare duplicates from late updates (update_time > 20 days old), scoped to recent batch order_ids only
+    - Tie-break: id DESC (stable secondary sort for non-deterministic update_time ties)
+    - post_hook: retention trim to 20-day window — keeps table compact at ~10-14M rows
 */
 
 with filtered as (
@@ -68,7 +70,10 @@ with filtered as (
 ranked as (
     select
         *,
-        row_number() over (partition by order_id order by update_time desc) as _rn
+        row_number() over (
+            partition by order_id
+            order by update_time desc, id desc  -- id breaks ties deterministically
+        ) as _rn
     from filtered
 )
 
