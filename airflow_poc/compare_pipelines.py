@@ -7,9 +7,9 @@ the new pipeline (Redshift mart layer), reporting missing rows, extra rows, and
 column-level value mismatches per table.
 
 Tables compared:
-  ecs  │ uniods.dw_ecs_order_info        ↔  settlement_ods.mart_ecs_order_info
-  uti  │ uniods.dw_uni_tracking_info     ↔  settlement_ods.mart_uni_tracking_info
-  uts  │ uniods.dw_uni_tracking_spath    ↔  settlement_ods.mart_uni_tracking_spath
+  ecs  │ kuaisong.ecs_order_info         ↔  settlement_ods.mart_ecs_order_info
+  uti  │ kuaisong.uni_tracking_info      ↔  settlement_ods.mart_uni_tracking_info
+  uts  │ kuaisong.uni_tracking_spath     ↔  settlement_ods.mart_uni_tracking_spath
 
 Usage:
     # Compare full mart date range (recommended — auto-detects window from each mart table)
@@ -48,28 +48,28 @@ load_dotenv()
 
 TABLE_CONFIG = {
     "ecs": {
-        "mysql_table":    "dw_ecs_order_info",
+        "mysql_table":    "ecs_order_info",
         "redshift_table": "mart_ecs_order_info",
         "pk":             ["order_id"],
         "date_col":       "add_time",         # unix timestamp
-        "dw_exclude":     {"id"},             # auto-increment PK in uniods only
+        "dw_exclude":     {"id"},             # auto-increment PK in PROD only
         "stg_exclude":    set(),
     },
     "uti": {
-        "mysql_table":    "dw_uni_tracking_info",
+        "mysql_table":    "uni_tracking_info",
         "redshift_table": "mart_uni_tracking_info",
         "pk":             ["order_id"],
         "date_col":       "update_time",
         "dw_exclude":     {"id"},
-        "stg_exclude":    {"short_code"},     # present in stg only, no equivalent in mart
+        "stg_exclude":    set(),
     },
     "uts": {
-        "mysql_table":    "dw_uni_tracking_spath",
+        "mysql_table":    "uni_tracking_spath",
         "redshift_table": "mart_uni_tracking_spath",
         "pk":             ["order_id", "traceSeq", "pathTime"],
         "date_col":       "pathTime",
         "dw_exclude":     {"id"},
-        "stg_exclude":    {"_id"},            # MySQL source id surfaced in stg, no equivalent in mart
+        "stg_exclude":    set(),
     },
 }
 
@@ -78,9 +78,9 @@ TABLE_CONFIG = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 MYSQL_CONFIG = {
-    "host":        "us-west-2.ro.db.analysis.uniuni.com.internal",
+    "host":        "us-west-2.ro.db.uniuni.com.internal",
     "port":        3306,
-    "database":    "uniods",
+    "database":    "kuaisong",
     "ssh_bastion": "35.83.114.196",
 }
 
@@ -139,7 +139,7 @@ def connect_mysql(tunnel: SSHTunnelForwarder):
         host="127.0.0.1",
         port=tunnel.local_bind_port,
         user=os.getenv("DB_USER"),
-        password=os.getenv("DB_US_DW_RO_PASSWORD"),
+        password=os.getenv("DB_PASSWORD"),
         database=MYSQL_CONFIG["database"],
         connection_timeout=60,
     )
