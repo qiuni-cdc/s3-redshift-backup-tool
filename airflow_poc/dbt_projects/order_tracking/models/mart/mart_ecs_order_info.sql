@@ -40,6 +40,19 @@
     {%- endif -%}
 {%- endif -%}
 
+{# STEP 1a: Archive inactive orders to 2025_h2 (Jul 2025 – Jan 2026).
+   LEFT JOIN anti-join: orders absent from mart_uti = no longer active = safe to archive.
+   NULL-safe: LEFT JOIN WHERE uti.order_id IS NULL handles NULL order_ids correctly.
+   NOT IN guard: idempotent — skips order_ids already in hist on retry.
+   ADD a step 1b block here when data starts aging into the next period (see dbt_project.yml). #}
+{%- set _ph1a = "INSERT INTO {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2 SELECT ecs.* FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL AND ecs.add_time >= extract(epoch from '2025-07-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-01-01'::timestamp) AND ecs.order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2)" -%}
+
+{# STEP 2: Trim — DELETE USING anti-join (NULL-safe).
+   Removes ecs rows for orders no longer in mart_uti (trimmed as inactive).
+   DELETE USING LEFT JOIN is NULL-safe and efficient via DISTKEY(order_id) co-location
+   — the hash anti-join is always local, no cross-node shuffle. #}
+{%- set _ph2 = "DELETE FROM {{ this }} USING (SELECT ecs.order_id FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL) to_trim WHERE {{ this }}.order_id = to_trim.order_id" -%}
+
 {{
     config(
         materialized='incremental',
@@ -50,21 +63,7 @@
         incremental_predicates=[
             this ~ ".add_time > (SELECT COALESCE(MAX(add_time), 0) - 7200 FROM " ~ this ~ ")"
         ],
-        post_hook=[
-
-            -- STEP 1a: Archive inactive orders to 2025_h2 (Jul 2025 – Jan 2026).
-            -- LEFT JOIN anti-join: orders absent from mart_uti = trimmed from active = inactive.
-            -- NULL-safe: LEFT JOIN WHERE uti.order_id IS NULL correctly handles NULL order_ids.
-            -- NOT IN guard: idempotent — skips order_ids already in hist on retry.
-            "INSERT INTO {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2 SELECT ecs.* FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL AND ecs.add_time >= extract(epoch from '2025-07-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-01-01'::timestamp) AND ecs.order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2)",
-
-            -- STEP 2: Trim — DELETE USING anti-join.
-            -- Removes ecs rows for orders no longer in mart_uti (i.e. trimmed as inactive).
-            -- DELETE USING with LEFT JOIN is NULL-safe and efficient via DISTKEY(order_id)
-            -- co-location — the hash anti-join is always local, no cross-node shuffle.
-            "DELETE FROM {{ this }} USING (SELECT ecs.order_id FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL) to_trim WHERE {{ this }}.order_id = to_trim.order_id"
-
-        ]
+        post_hook=[_ph1a, _ph2]
     )
 }}
 

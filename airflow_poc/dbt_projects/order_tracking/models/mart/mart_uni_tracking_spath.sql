@@ -41,6 +41,22 @@
     {%- endif -%}
 {%- endif -%}
 
+{# STEP 1a: Archive spath events older than 6 months to 2025_h2 (Jul 2025 – Jan 2026).
+   NOT IN guard filters by (order_id, pathTime range) — more specific than order_id alone
+   since one order has many spath events across multiple periods.
+   ADD a step 1b block here when data starts aging into the next period (see dbt_project.yml). #}
+{%- set _ph1a = "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 SELECT * FROM {{ this }} WHERE pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND pathTime >= extract(epoch from '2025-07-01'::timestamp) AND pathTime < extract(epoch from '2026-01-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 WHERE pathTime >= extract(epoch from '2025-07-01'::timestamp))" -%}
+
+{# STEP 2: Safety check — catch spath events aged out but outside all defined periods.
+   Checks (order_id, pathTime) pair — specific enough since many events share an order_id.
+   Any ARCHIVE_ROUTING_GAP_UTS alert = missing period in post_hooks (config error).
+   Fix: add the missing period INSERT block and mark the exception as resolved. #}
+{%- set _ph2 = "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP_UTS', CURRENT_TIMESTAMP, 'pathTime outside all defined hist_uts periods — excluded from trim' FROM {{ this }} m WHERE m.pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 WHERE order_id = m.order_id AND pathTime = m.pathTime) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP_UTS' AND resolved_at IS NULL)" -%}
+
+{# STEP 3: Pure time-based trim — no order_id dependency, no mart_uti read.
+   Excludes any event flagged as ARCHIVE_ROUTING_GAP_UTS — never trim an unarchived event. #}
+{%- set _ph3 = "DELETE FROM {{ this }} WHERE pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE exception_type = 'ARCHIVE_ROUTING_GAP_UTS' AND resolved_at IS NULL)" -%}
+
 {{
     config(
         materialized='incremental',
@@ -51,24 +67,7 @@
         incremental_predicates=[
             this ~ ".pathTime > (SELECT COALESCE(MAX(pathTime), 0) - 7200 FROM " ~ this ~ ")"
         ],
-        post_hook=[
-
-            -- STEP 1a: Archive to 2025_h2 (Jul 2025 – Jan 2026).
-            -- NOT IN guard filters by order_id within the period range to ensure we only
-            -- skip order_ids that already have events archived in this specific period.
-            "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 SELECT * FROM {{ this }} WHERE pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND pathTime >= extract(epoch from '2025-07-01'::timestamp) AND pathTime < extract(epoch from '2026-01-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 WHERE pathTime >= extract(epoch from '2025-07-01'::timestamp))",
-
-            -- STEP 2: Safety check — catch spath events aged out but outside all defined periods.
-            -- Checks (order_id, pathTime) pair in each hist table — specific enough for spath.
-            -- Any ARCHIVE_ROUTING_GAP_UTS alert = a missing period in post_hooks (config error).
-            "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP_UTS', CURRENT_TIMESTAMP, 'pathTime outside all defined hist_uts periods — excluded from trim' FROM {{ this }} m WHERE m.pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 WHERE order_id = m.order_id AND pathTime = m.pathTime) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP_UTS' AND resolved_at IS NULL)",
-
-            -- STEP 3: Trim spath events older than 6 months.
-            -- Pure time-based: no order_id dependency, no mart_uti read.
-            -- Excludes any event flagged as ARCHIVE_ROUTING_GAP_UTS.
-            "DELETE FROM {{ this }} WHERE pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE exception_type = 'ARCHIVE_ROUTING_GAP_UTS' AND resolved_at IS NULL)"
-
-        ]
+        post_hook=[_ph1a, _ph2, _ph3]
     )
 }}
 

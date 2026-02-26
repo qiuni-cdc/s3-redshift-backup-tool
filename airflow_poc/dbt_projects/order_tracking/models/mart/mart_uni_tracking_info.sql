@@ -37,6 +37,28 @@
     {%- endif -%}
 {%- endif -%}
 
+{# STEP 1: Clean stale hist_uti entry for reactivated orders.
+   A reactivated order re-enters the mart with a fresh update_time — its previously archived
+   hist row is now stale. Delete it before the archive cycle writes a new one.
+   Orders are never dormant >~1 year so the stale entry is always in the latest hist table.
+   UPDATE THIS TABLE NAME on 1 Jan and 1 Jul (always points to the current hist table). #}
+{%- set _ph1 = "DELETE FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id IN (SELECT order_id FROM {{ this }} WHERE update_time >= (SELECT COALESCE(MAX(update_time), 0) - 900 FROM {{ this }}))" -%}
+
+{# STEP 2a: Archive aged-out rows to 2025_h2 (Jul 2025 – Jan 2026).
+   NOT IN guard: idempotent — skips order_ids already in hist on retry.
+   ADD a step 2b block here when data starts aging into the next period (see dbt_project.yml). #}
+{%- set _ph2a = "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 SELECT * FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND update_time >= extract(epoch from '2025-07-01'::timestamp) AND update_time < extract(epoch from '2026-01-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2)" -%}
+
+{# STEP 3: Safety check — catch rows aged out but not matched by any period.
+   Logged to exceptions and excluded from trim (step 4) — no silent data loss.
+   Any ARCHIVE_ROUTING_GAP alert = a missing period in post_hooks (config error).
+   Fix: add the missing period INSERT block and mark the exception as resolved. #}
+{%- set _ph3 = "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP', CURRENT_TIMESTAMP, 'update_time outside all defined hist_uti periods — excluded from trim' FROM {{ this }} m WHERE m.update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)" -%}
+
+{# STEP 4: Trim aged-out rows from active mart.
+   Excludes rows with open ARCHIVE_ROUTING_GAP exceptions — never trim an unarchived row. #}
+{%- set _ph4 = "DELETE FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)" -%}
+
 {{
     config(
         materialized='incremental',
@@ -44,31 +66,7 @@
         incremental_strategy='delete+insert',
         dist='order_id',
         sort=['update_time', 'order_id'],
-        post_hook=[
-
-            -- STEP 1: Clean stale hist_uti entry for reactivated orders.
-            -- A reactivated order re-enters the mart with a fresh update_time.
-            -- Its previously archived hist_uti row is now stale — delete it before
-            -- the next archive cycle writes a new one.
-            -- Orders never dormant >~1 year, so the stale entry is always in the
-            -- latest hist_uti table. Update this table name on 1 Jan and 1 Jul.
-            "DELETE FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id IN (SELECT order_id FROM {{ this }} WHERE update_time >= (SELECT COALESCE(MAX(update_time), 0) - 900 FROM {{ this }}))",
-
-            -- STEP 2a: Archive to 2025_h2 (Jul 2025 – Jan 2026).
-            -- NOT IN guard: idempotent — skips order_ids already in hist on retry.
-            "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 SELECT * FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND update_time >= extract(epoch from '2025-07-01'::timestamp) AND update_time < extract(epoch from '2026-01-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2)",
-
-            -- STEP 3: Safety check — catch rows aged out but not matched by any period.
-            -- These rows are logged to exceptions and EXCLUDED from trim in step 4.
-            -- Any ARCHIVE_ROUTING_GAP alert = a missing period in post_hooks (config error).
-            -- Fix: add the missing period INSERT and mark the exception as resolved.
-            "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP', CURRENT_TIMESTAMP, 'update_time outside all defined hist_uti periods — excluded from trim' FROM {{ this }} m WHERE m.update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)",
-
-            -- STEP 4: Trim aged-out rows from active mart.
-            -- Excludes rows flagged as ARCHIVE_ROUTING_GAP — never trim an unarchived row.
-            "DELETE FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)"
-
-        ]
+        post_hook=[_ph1, _ph2a, _ph3, _ph4]
     )
 }}
 
