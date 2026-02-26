@@ -35,7 +35,7 @@ tests:
 
 vars:
   # Schema configuration
-  raw_schema: 'settlment_public'      # note: typo preserved from original (settlment)
+  raw_schema: 'settlement_public'
   staging_schema: 'settlement_ods'
   mart_schema: 'settlement_ods'       # schema for mart tables and hist tables
 
@@ -47,9 +47,9 @@ vars:
     - name: '2025_h2'
       start: '2025-07-01'
       end:   '2026-01-01'
-    - name: '2026_h1'
-      start: '2026-01-01'
-      end:   '2026-07-01'
+    # - name: '2026_h1'        # add this on 1 Jan 2026 (when first data ages into this window)
+    #   start: '2026-01-01'
+    #   end:   '2026-07-01'
     # - name: '2026_h2'        # add this on 1 Jul 2026
     #   start: '2026-07-01'
     #   end:   '2027-01-01'

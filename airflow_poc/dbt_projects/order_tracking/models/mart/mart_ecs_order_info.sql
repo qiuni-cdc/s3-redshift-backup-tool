@@ -58,9 +58,6 @@
             -- NOT IN guard: idempotent — skips order_ids already in hist on retry.
             "INSERT INTO {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2 SELECT ecs.* FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL AND ecs.add_time >= extract(epoch from '2025-07-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-01-01'::timestamp) AND ecs.order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2)",
 
-            -- STEP 1b: Archive inactive orders to 2026_h1 (Jan 2026 – Jul 2026).
-            "INSERT INTO {{ var('mart_schema') }}.hist_ecs_order_info_2026_h1 SELECT ecs.* FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL AND ecs.add_time >= extract(epoch from '2026-01-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-07-01'::timestamp) AND ecs.order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_ecs_order_info_2026_h1)",
-
             -- STEP 2: Trim — DELETE USING anti-join.
             -- Removes ecs rows for orders no longer in mart_uti (i.e. trimmed as inactive).
             -- DELETE USING with LEFT JOIN is NULL-safe and efficient via DISTKEY(order_id)

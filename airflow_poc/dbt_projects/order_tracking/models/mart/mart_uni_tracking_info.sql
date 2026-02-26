@@ -58,14 +58,11 @@
             -- NOT IN guard: idempotent — skips order_ids already in hist on retry.
             "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 SELECT * FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND update_time >= extract(epoch from '2025-07-01'::timestamp) AND update_time < extract(epoch from '2026-01-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2)",
 
-            -- STEP 2b: Archive to 2026_h1 (Jan 2026 – Jul 2026).
-            "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_info_2026_h1 SELECT * FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND update_time >= extract(epoch from '2026-01-01'::timestamp) AND update_time < extract(epoch from '2026-07-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2026_h1)",
-
             -- STEP 3: Safety check — catch rows aged out but not matched by any period.
             -- These rows are logged to exceptions and EXCLUDED from trim in step 4.
             -- Any ARCHIVE_ROUTING_GAP alert = a missing period in post_hooks (config error).
             -- Fix: add the missing period INSERT and mark the exception as resolved.
-            "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP', CURRENT_TIMESTAMP, 'update_time outside all defined hist_uti periods — excluded from trim' FROM {{ this }} m WHERE m.update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2026_h1 WHERE order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)",
+            "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP', CURRENT_TIMESTAMP, 'update_time outside all defined hist_uti periods — excluded from trim' FROM {{ this }} m WHERE m.update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)",
 
             -- STEP 4: Trim aged-out rows from active mart.
             -- Excludes rows flagged as ARCHIVE_ROUTING_GAP — never trim an unarchived row.

@@ -1,5 +1,8 @@
 # S3 to Redshift Incremental Backup System
 
+## Expert Reference Files
+- **Order tracking pipeline (Airflow + dbt):** Read `docs/order_tracking_pipeline_expertise.md` before advising on this pipeline. Contains architecture decisions, retention logic, Redshift gotchas, maintenance calendar, and QA checklist.
+
 🎉 **PRODUCTION READY** - A fully operational Python application for incremental data backup from MySQL to S3 and Redshift, successfully migrated from Google Colab prototype with enterprise architecture, comprehensive testing, and verified deployment capabilities.
 
 ## 🆕 Latest Features (September 2025)

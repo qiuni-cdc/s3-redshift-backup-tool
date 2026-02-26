@@ -8,6 +8,11 @@ CYCLE (every 15 min):
   ① Extraction (parallel, ~94s)
        extract_ecs / extract_uti / extract_uts → *_raw tables in Redshift
 
+  ① Trim raw tables (~5s)
+       DELETE rows older than 24h from all three *_raw tables.
+       Raw tables are append-only landing zones — mart tables hold the retained data.
+       24h window kept as a replay buffer for manual reprocessing.
+
   ② dbt: mart_uni_tracking_info  (~140s, must complete before ③ and ④)
        delete+insert from uni_tracking_info_raw
        4 post_hooks: stale hist cleanup → archive → safety check → trim
@@ -88,17 +93,17 @@ TABLES = {
     "ecs": {
         "full_name": "kuaisong.ecs_order_info",
         "timestamp_col": "add_time",
-        "target": "settlment_public.ecs_order_info_raw"
+        "target": "settlement_public.ecs_order_info_raw"
     },
     "uti": {
         "full_name": "kuaisong.uni_tracking_info",
         "timestamp_col": "update_time",
-        "target": "settlment_public.uni_tracking_info_raw"
+        "target": "settlement_public.uni_tracking_info_raw"
     },
     "uts": {
         "full_name": "kuaisong.uni_tracking_spath",
         "timestamp_col": "pathTime",
-        "target": "settlment_public.uni_tracking_spath_raw"
+        "target": "settlement_public.uni_tracking_spath_raw"
     }
 }
 
@@ -316,6 +321,50 @@ def validate_extractions(**context):
 validate = PythonOperator(
     task_id='validate_extractions',
     python_callable=validate_extractions,
+    dag=dag
+)
+
+# ============================================================================
+# TASK 5: TRIM RAW TABLES (24-hour retention)
+# ============================================================================
+# Raw tables are append-only landing zones. Once dbt has processed a batch into
+# mart tables the raw rows are no longer needed. 24h window is kept as a replay
+# buffer — enough to manually reprocess any cycle from the last day if needed.
+# Runs after validate so we only trim once extraction is confirmed successful.
+
+def trim_raw_tables(**context):
+    """Delete raw table rows older than 24 hours."""
+    redshift = PostgresHook(postgres_conn_id='redshift_default')
+
+    tables = [
+        ('settlement_public.uni_tracking_info_raw', 'update_time'),
+        ('settlement_public.ecs_order_info_raw',    'add_time'),
+        ('settlement_public.uni_tracking_spath_raw', 'pathTime'),
+    ]
+
+    total_deleted = 0
+    cutoff = "extract(epoch from current_timestamp - interval '24 hours')"
+
+    print("Trimming raw tables (keeping last 24h):")
+    for table, ts_col in tables:
+        result = redshift.get_first(
+            f"SELECT COUNT(*) FROM {table} WHERE {ts_col} < {cutoff}"
+        )
+        count = result[0] if result else 0
+        if count > 0:
+            redshift.run(f"DELETE FROM {table} WHERE {ts_col} < {cutoff}")
+            print(f"  {table}: deleted {count:,} rows")
+        else:
+            print(f"  {table}: nothing to trim")
+        total_deleted += count
+
+    print(f"Total raw rows trimmed: {total_deleted:,}")
+    context['task_instance'].xcom_push(key='raw_rows_trimmed', value=total_deleted)
+    return total_deleted
+
+trim_raw = PythonOperator(
+    task_id='trim_raw_tables',
+    python_callable=trim_raw_tables,
     dag=dag
 )
 
@@ -610,6 +659,9 @@ def generate_summary(**context):
     ) or 0
     # gap_count disabled - gap detection not running
     gap_count = 0
+    raw_rows_trimmed = context['task_instance'].xcom_pull(
+        task_ids='trim_raw_tables', key='raw_rows_trimmed'
+    ) or 0
     time_drift = context['task_instance'].xcom_pull(
         task_ids='check_time_drift', key='time_drift_seconds'
     ) or 0
@@ -639,6 +691,9 @@ EXTRACTION:
   ─────────────────────────────────────
   Total:          {total_rows:>10,} rows
 
+RAW TABLE TRIM (24h retention):
+  Rows deleted:   {raw_rows_trimmed:>10,}
+
 DBT:
   mart_uti:  delete+insert, 4 post_hooks (hist cleanup, archive, safety check, trim)
   mart_ecs:  insert + 2 post_hooks (archive inactive, DELETE USING trim)
@@ -663,7 +718,7 @@ summary = PythonOperator(
 # DEPENDENCIES
 # ============================================================================
 
-check_drift >> calc_window >> extraction_group >> validate >> dbt_mart_uti
+check_drift >> calc_window >> extraction_group >> validate >> trim_raw >> dbt_mart_uti
 dbt_mart_uti >> [dbt_mart_ecs, dbt_mart_uts]
 [dbt_mart_ecs, dbt_mart_uts] >> dbt_test >> summary
 
