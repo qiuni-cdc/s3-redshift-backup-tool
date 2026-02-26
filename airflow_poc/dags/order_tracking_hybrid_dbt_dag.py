@@ -47,6 +47,7 @@ from airflow.utils.task_group import TaskGroup
 from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime, timedelta
 import json
+import psycopg2
 
 # ============================================================================
 # CONFIGURATION
@@ -334,7 +335,16 @@ validate = PythonOperator(
 
 def trim_raw_tables(**context):
     """Delete raw table rows older than 24 hours."""
-    redshift = PostgresHook(postgres_conn_id='redshift_default')
+    # Use env vars directly — avoids IAM auth issues with the redshift_default connection.
+    # Reads the same vars that the dbt tasks use.
+    host = os.environ.get('REDSHIFT_HOST', 'redshift-dw.qa.uniuni.com')
+    port = int(os.environ.get('REDSHIFT_PORT', '5439'))
+    user = os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER') or os.environ.get('REDSHIFT_PRO_USER')
+    password = os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD') or os.environ.get('REDSHIFT_PRO_PASSWORD')
+
+    conn = psycopg2.connect(host=host, port=port, dbname='dw', user=user, password=password)
+    conn.autocommit = True
+    cur = conn.cursor()
 
     tables = [
         ('settlement_public.uni_tracking_info_raw', 'update_time'),
@@ -345,19 +355,19 @@ def trim_raw_tables(**context):
     total_deleted = 0
     cutoff = "extract(epoch from current_timestamp - interval '24 hours')"
 
-    print("Trimming raw tables (keeping last 24h):")
+    print(f"Trimming raw tables (keeping last 24h) — host: {host}:{port}")
     for table, ts_col in tables:
-        result = redshift.get_first(
-            f"SELECT COUNT(*) FROM {table} WHERE {ts_col} < {cutoff}"
-        )
-        count = result[0] if result else 0
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {ts_col} < {cutoff}")
+        count = cur.fetchone()[0]
         if count > 0:
-            redshift.run(f"DELETE FROM {table} WHERE {ts_col} < {cutoff}")
+            cur.execute(f"DELETE FROM {table} WHERE {ts_col} < {cutoff}")
             print(f"  {table}: deleted {count:,} rows")
         else:
             print(f"  {table}: nothing to trim")
         total_deleted += count
 
+    cur.close()
+    conn.close()
     print(f"Total raw rows trimmed: {total_deleted:,}")
     context['task_instance'].xcom_push(key='raw_rows_trimmed', value=total_deleted)
     return total_deleted
