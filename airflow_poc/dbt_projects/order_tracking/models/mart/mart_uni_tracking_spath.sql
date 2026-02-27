@@ -29,18 +29,6 @@
     but DAG still runs after mart_uti for cycle ordering).
 #}
 
-{%- set source_cutoff_query -%}
-    select coalesce(max(pathTime), 0) - 1800 from {{ this }}
-{%- endset -%}
-
-{%- set source_cutoff = none -%}
-{%- if execute and is_incremental() -%}
-    {%- set result = run_query(source_cutoff_query) -%}
-    {%- if result and result.rows | length > 0 and result.rows[0][0] -%}
-        {%- set source_cutoff = result.rows[0][0] -%}
-    {%- endif -%}
-{%- endif -%}
-{{ log("mart_uts source_cutoff = " ~ source_cutoff, info=True) }}
 
 {# STEP 1a: Archive spath events older than 6 months to 2025_h2 (Jul 2025 – Jan 2026).
    NOT IN guard filters by (order_id, pathTime range) — more specific than order_id alone
@@ -88,11 +76,10 @@ with filtered as (
     select *
     from settlement_public.uni_tracking_spath_raw
     {% if is_incremental() %}
-    {% if source_cutoff is not none %}
-    where pathTime > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
-    {% else %}
-    where pathTime > extract(epoch from current_timestamp - interval '30 minutes') -- fallback: 30 min from now
-    {% endif %}
+    where pathTime > (
+        select coalesce(max(pathTime), 0) - 1800
+        from {{ this }}
+    ) -- 30-min source scan: only latest extraction batch
     {% if var('source_end_time', none) %}
     and pathTime <= {{ var('source_end_time') }} -- optional cap for testing
     {% endif %}
