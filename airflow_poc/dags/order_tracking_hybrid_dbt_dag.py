@@ -674,15 +674,17 @@ dbt_test = BashOperator(
 # ============================================================================
 
 def generate_summary(**context):
-    """Generate sync summary."""
+    """
+    Generate sync summary reflecting actual task outcomes.
+    Runs with trigger_rule=ALL_DONE so it executes even when upstream tasks fail.
+    STATUS is derived from real task states — never hardcoded.
+    """
     extraction_results = context['task_instance'].xcom_pull(
         task_ids='validate_extractions', key='extraction_results'
     ) or {}
     total_rows = context['task_instance'].xcom_pull(
         task_ids='validate_extractions', key='total_rows'
     ) or 0
-    # gap_count disabled - gap detection not running
-    gap_count = 0
     raw_rows_trimmed = context['task_instance'].xcom_pull(
         task_ids='trim_raw_tables', key='raw_rows_trimmed'
     ) or 0
@@ -692,6 +694,20 @@ def generate_summary(**context):
     sync_window = context['task_instance'].xcom_pull(
         task_ids='calculate_sync_window', key='sync_window'
     ) or {}
+
+    # Determine actual task states from the DAG run
+    dag_run = context['dag_run']
+    all_tis = {ti.task_id: ti.state for ti in dag_run.get_task_instances()}
+
+    dbt_tasks = ['dbt_mart_uti', 'dbt_mart_ecs', 'dbt_mart_uts', 'dbt_test']
+    failed_tasks  = [t for t in all_tis if all_tis[t] == 'failed']
+    skipped_tasks = [t for t in dbt_tasks if all_tis.get(t) == 'skipped']
+
+    overall_status = 'SUCCESS' if not failed_tasks else 'FAILED'
+
+    def task_badge(task_id):
+        state = all_tis.get(task_id, 'unknown')
+        return {'success': '✓', 'failed': '✗', 'skipped': '–', 'upstream_failed': '–'}.get(state, '?')
 
     summary = f"""
 ================================================================================
@@ -715,20 +731,32 @@ EXTRACTION:
   ─────────────────────────────────────
   Total:          {total_rows:>10,} rows
 
-RAW TABLE TRIM (24h retention):
+RAW TABLE TRIM:
   Rows deleted:   {raw_rows_trimmed:>10,}
 
-DBT:
-  mart_uti:  delete+insert, 4 post_hooks (hist cleanup, archive, safety check, trim)
-  mart_ecs:  insert + 2 post_hooks (archive inactive, DELETE USING trim)
-  mart_uts:  insert + 3 post_hooks (archive, safety check, time-based trim)
-  Gaps:      {gap_count} detected
-  Tests:     schema.yml (unique / not_null / relationships)
-
-STATUS: SUCCESS
+DBT TASKS:
+  {task_badge('dbt_mart_uti')} dbt_mart_uti   [{all_tis.get('dbt_mart_uti', 'unknown')}]
+  {task_badge('dbt_mart_ecs')} dbt_mart_ecs   [{all_tis.get('dbt_mart_ecs', 'unknown')}]
+  {task_badge('dbt_mart_uts')} dbt_mart_uts   [{all_tis.get('dbt_mart_uts', 'unknown')}]
+  {task_badge('dbt_test')}     dbt_test       [{all_tis.get('dbt_test', 'unknown')}]
+{f'''
+FAILED TASKS:
+  {chr(10).join('  - ' + t for t in failed_tasks)}
+''' if failed_tasks else ''}
+{f'''SKIPPED (upstream failure):
+  {chr(10).join('  - ' + t for t in skipped_tasks)}
+''' if skipped_tasks else ''}
+STATUS: {overall_status}
 ================================================================================
 """
     print(summary)
+
+    if overall_status == 'FAILED':
+        raise ValueError(
+            f"Cycle completed with failures: {', '.join(failed_tasks)}. "
+            "Check individual task logs for details."
+        )
+
     return summary
 
 summary = PythonOperator(
