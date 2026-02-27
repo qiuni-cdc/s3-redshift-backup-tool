@@ -60,8 +60,7 @@ HIST_UTS_TABLES = [
 # DQ checks only inspect orders active within this lookback window.
 # Stale orders can't develop *new* issues today, and pre-existing issues are
 # already in the exceptions table from a prior run.
-# 48h = 2× the daily schedule cadence — guarantees no gap between runs.
-DQ_LOOKBACK_HOURS = 48
+DQ_LOOKBACK_HOURS = 24
 DQ_LOOKBACK_SECS  = DQ_LOOKBACK_HOURS * 3600
 
 # Extraction count check (Test 0)
@@ -99,7 +98,7 @@ dag = DAG(
     'order_tracking_daily_monitoring',
     default_args=default_args,
     description='Daily DQ checks for order tracking mart',
-    schedule_interval='0 2 * * *',  # 2am UTC daily, off-peak
+    schedule_interval='0 3 * * *',  # 3am UTC daily, 1h after vacuum
     max_active_runs=1,
     catchup=False,
     tags=['order-tracking', 'monitoring', 'dq']

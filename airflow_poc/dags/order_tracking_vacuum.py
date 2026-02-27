@@ -10,7 +10,7 @@ VACUUM (§16 of order_tracking_final_design.md)
 
    mart_uti:  VACUUM DELETE ONLY — daily (96 DELETE cycles/day)
    mart_uts:  VACUUM DELETE ONLY — daily (96 DELETE cycles/day)
-   mart_ecs:  VACUUM DELETE ONLY — weekly (Sundays only; fewer deletes than uti/uts)
+   mart_ecs:  VACUUM DELETE ONLY — daily
    mart_ecs:  VACUUM SORT ONLY   — conditional (only if svv_table_info.unsorted > 15%)
 
 NOTE: VACUUM statements require autocommit mode (cannot run inside a transaction).
@@ -60,7 +60,7 @@ dag = DAG(
     'order_tracking_vacuum',
     default_args=default_args,
     description='Daily VACUUM for order tracking mart tables',
-    schedule_interval='0 3 * * *',  # 3am UTC daily, 1h after monitoring
+    schedule_interval='0 2 * * *',  # 2am UTC daily, runs before monitoring
     max_active_runs=1,
     catchup=False,
     tags=['order-tracking', 'vacuum']
@@ -118,19 +118,11 @@ def vacuum_mart_uts(**context):
 
 def vacuum_mart_ecs_delete(**context):
     """
-    VACUUM DELETE ONLY mart_ecs_order_info — runs weekly (Sundays only).
-
-    mart_ecs has fewer DELETE operations than mart_uti/uts (only when orders age out).
-    Weekly VACUUM is sufficient. Skipped on non-Sunday runs to save cluster resources.
+    VACUUM DELETE ONLY mart_ecs_order_info — runs every day.
     """
-    execution_date = context['execution_date']
-    if execution_date.weekday() != 6:  # 6 = Sunday
-        log.info(f"Skipping VACUUM mart_ecs — not Sunday (weekday={execution_date.weekday()})")
-        return
-
     conn = get_conn(autocommit=True)
     cur = conn.cursor()
-    log.info(f"Starting VACUUM DELETE ONLY {MART_ECS} (Sunday run)")
+    log.info(f"Starting VACUUM DELETE ONLY {MART_ECS}")
     cur.execute(f"VACUUM DELETE ONLY {MART_ECS}")
     log.info(f"VACUUM DELETE ONLY {MART_ECS} complete")
     cur.close()
