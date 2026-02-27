@@ -269,11 +269,36 @@ AND order_id NOT IN (
 
 ---
 
+## Issue 12 — mart_ecs incremental_predicates defeats DISTKEY · **High / Performance**
+
+**File:** `dbt_projects/order_tracking/models/mart/mart_ecs_order_info.sql`
+
+**Problem:**
+`mart_ecs` had `incremental_predicates` filtering `add_time > MAX - 7200` on the mart.
+The intent (per docs) was zone map pruning on `add_time` to restrict the DELETE scope.
+This does NOT work because `partner_id` is the leading sort key — zone maps on `add_time`
+require it to be the leading column. With `partner_id` leading, the filter touches
+~1 block per partner (300+ partners) instead of the last few blocks globally.
+
+Result: every 15-min cycle the dbt DELETE was scanning almost the entire mart_ecs table.
+Measured: 3m19s on 612K rows — vs mart_uts (3.8M rows) in 22s.
+
+**Fix:**
+Remove `incremental_predicates` entirely. Without it, dbt generates:
+`DELETE FROM mart_ecs WHERE order_id IN (batch)` — uses DISTKEY(order_id) co-location,
+near-zero cost since ECS is write-once and new order_ids aren't in the mart yet.
+
+`partner_id` sort key and 2h raw-relative source cutoff are both correct — unchanged.
+
+**Status:** ✅ Fixed — `mart_ecs_order_info.sql`
+
+---
+
 ## Summary
 
 | # | Issue | Severity | Status |
 |---|---|---|---|
-| 1 | Tie-break missing in mart_uti ranked CTE | Medium | ✅ Fixed |
+| 1 | Tie-break missing in mart_uti ranked CTE | Medium | ⚠️ Reverted — needs column verification |
 | 2 | ecs_order_info_raw never trimmed | Medium | ✅ Fixed |
 | 3 | HIST_UTS_TABLES hardcoded in monitoring | Low | ✅ Fixed |
 | 4 | VACUUM SORT runs unconditionally | Low | ☐ Blocked (DBA) |
@@ -284,3 +309,4 @@ AND order_id NOT IN (
 | 9 | NOT IN with NULL risk in trim steps | Medium | ☐ Open |
 | 10 | stg_ecs comment says "merge" | Cosmetic | ☐ Open |
 | 11 | Monitoring docstring says 2am | Cosmetic | ☐ Open |
+| 12 | mart_ecs incremental_predicates defeats DISTKEY | High / Performance | ✅ Fixed |

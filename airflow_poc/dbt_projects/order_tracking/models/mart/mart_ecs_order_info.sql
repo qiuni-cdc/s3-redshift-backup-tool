@@ -1,14 +1,19 @@
 {#
-    Source cutoff: 30 minutes — matches extraction window (15-min DAG + retry buffer).
-    Delete window: 2 hours — handles extraction retries via incremental_predicates on add_time.
+    Source cutoff: 2 hours from raw — catches any late-arriving new orders from the previous
+                   cycle without re-reading historical orders (raw-relative, not mart-relative).
     Retention: order_id-driven — a row is trimmed only when mart_uni_tracking_info has
                trimmed the same order_id.
 
-    Strategy: delete+insert
+    Strategy: delete+insert, NO incremental_predicates
     - add_time is set at order creation and never changes. New batches only contain NEW orders.
-    - 2-hour incremental_predicates window safely handles duplicate extraction: old orders
-      (add_time > 2 hours ago) never appear in new batches, so DELETE never touches them.
-    - ECS is write-once — the UPDATE branch of delete+insert is harmless (same data).
+    - No incremental_predicates: DELETE is WHERE order_id IN (batch) using DISTKEY(order_id)
+      co-location — each node checks only its own order_ids, near-zero cost for new orders.
+    - ECS is write-once — new order_ids are not in the mart yet, so DELETE is a no-op for
+      normal cycles. On retry (same order re-extracted), DELETE removes the duplicate correctly.
+    - Why NOT incremental_predicates: the sort key leads on partner_id (for downstream query
+      performance). A WHERE add_time > MAX-7200 filter cannot use zone maps with partner_id
+      leading — it touches ~1 block per partner (300+ partners) instead of just the last few
+      blocks. This made DELETE slower, not faster. DISTKEY hash join is the right mechanism.
 
     Why order_id-driven retention (NOT time-based on add_time):
     - mart_ecs has ONE row per order. Time-based trim would drop long-lifecycle orders
@@ -60,9 +65,6 @@
         incremental_strategy='delete+insert',
         dist='order_id',
         sort=['partner_id', 'add_time', 'order_id'],
-        incremental_predicates=[
-            this ~ ".add_time > (SELECT COALESCE(MAX(add_time), 0) - 7200 FROM " ~ this ~ ")"
-        ],
         post_hook=[_ph1a, _ph2]
     )
 }}
@@ -70,12 +72,16 @@
 /*
     Mart model for ecs_order_info — one row per active order, order creation metadata.
     - Unique key: order_id
-    - Source scan: 30 min (matches 15-min extraction window + retry buffer)
-    - Strategy: delete+insert with 2-hour incremental_predicates on add_time (retry safety)
+    - Source scan: 2h from raw's MAX(add_time) — catches late-arriving new orders safely
+    - Strategy: delete+insert, no incremental_predicates
+                DELETE = WHERE order_id IN (batch) via DISTKEY(order_id) hash join
+                ECS is write-once: DELETE is a near no-op on normal cycles (new orders
+                not yet in mart), correct on retries (removes duplicate before re-insert)
     - Retention: order_id-driven — trimmed only when mart_uti trims the same order
     - Post-hooks: 2 steps (archive inactive, trim with DELETE USING anti-join)
     - DISTKEY(order_id): JOIN co-location with mart_uti and mart_uts
     - SORTKEY(partner_id, add_time, order_id): partner_id filter cuts to ~0.3% of rows
+                for downstream queries (WHERE partner_id = X)
     - DAG dependency: runs AFTER mart_uni_tracking_info (enforced by ref() in post_hooks)
 */
 
