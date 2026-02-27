@@ -123,25 +123,17 @@ bloat table size, and degrade Redshift zone map pruning (slowing all queries).
 | `vacuum_mart_uti` | `mart_uni_tracking_info` | Daily | 96 DELETE cycles/day |
 | `vacuum_mart_uts` | `mart_uni_tracking_spath` | Daily | 96 DELETE cycles/day |
 | `vacuum_mart_ecs_delete` | `mart_ecs_order_info` | Daily | Post-trim DELETEs |
-| `vacuum_mart_ecs_sort` | `mart_ecs_order_info` | Conditional | Only when unsorted > 15% |
+| `vacuum_mart_ecs_sort` | `mart_ecs_order_info` | Daily | Unconditional — Redshift skips fast if nothing to sort |
 
-### Conditional VACUUM SORT for mart_ecs
+### VACUUM SORT for mart_ecs
 
 `mart_ecs` has `SORTKEY(partner_id, add_time, order_id)`. New orders arrive roughly
 in `add_time` order but `partner_id` is random — the unsorted region grows over time.
 Zone maps on `partner_id` (the primary query filter) degrade as unsorted % rises.
 
-The `vacuum_mart_ecs_sort` task checks `svv_table_info.unsorted`. If it exceeds **15%**,
-`VACUUM SORT ONLY` runs. Otherwise it skips. Expected trigger cadence: every 65–130 days.
-
-**Checking sort health manually:**
-```sql
-SELECT "table", tbl_rows, unsorted, stats_off
-FROM svv_table_info
-WHERE schema = 'settlement_ods'
-  AND "table" LIKE 'mart_%'
-ORDER BY unsorted DESC;
-```
+`VACUUM SORT ONLY` runs unconditionally every day. Redshift detects quickly when
+nothing needs sorting and returns immediately, so there is no wasted effort on
+already-sorted tables.
 
 ---
 
@@ -172,6 +164,5 @@ ORDER BY unsorted DESC;
 | `DQ_LOOKBACK_HOURS` | 24h | `order_tracking_daily_monitoring.py` |
 | `EXTRACTION_WINDOW_SECS` | 2h | `order_tracking_daily_monitoring.py` |
 | `EXTRACTION_BUFFER_SECS` | 5min | `order_tracking_daily_monitoring.py` |
-| `VACUUM_SORT_THRESHOLD_PCT` | 15% | `order_tracking_vacuum.py` |
 | Vacuum schedule | `0 2 * * *` | `order_tracking_vacuum.py` |
 | Monitoring schedule | `0 3 * * *` | `order_tracking_daily_monitoring.py` |

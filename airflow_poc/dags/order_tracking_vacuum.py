@@ -39,8 +39,6 @@ MART_UTI = f'{MART_SCHEMA}.mart_uni_tracking_info'
 MART_ECS = f'{MART_SCHEMA}.mart_ecs_order_info'
 MART_UTS = f'{MART_SCHEMA}.mart_uni_tracking_spath'
 
-VACUUM_SORT_THRESHOLD_PCT = 15  # trigger VACUUM SORT ONLY when unsorted % exceeds this
-
 # ============================================================================
 # DAG DEFINITION
 # ============================================================================
@@ -131,55 +129,19 @@ def vacuum_mart_ecs_delete(**context):
 
 def vacuum_mart_ecs_sort(**context):
     """
-    Conditional VACUUM SORT ONLY mart_ecs_order_info.
+    VACUUM SORT ONLY mart_ecs_order_info — runs every day.
 
     mart_ecs has SORTKEY(partner_id, add_time, order_id). New orders arrive in
     add_time order but partner_id is random — unsorted region grows over time.
     Zone maps on partner_id (the primary filter) degrade as unsorted % rises.
 
-    Only runs VACUUM SORT when svv_table_info.unsorted > VACUUM_SORT_THRESHOLD_PCT (15%).
-    Expected cadence: ~every 65–130 days. Running weekly wastes cluster resources.
+    Run unconditionally — Redshift skips quickly when nothing needs sorting.
+    (Conditional check via svv_table_info requires superuser privilege not held
+    by sett_ddl_owner.)
     """
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(f"""
-        SELECT unsorted, tbl_rows, stats_off
-        FROM svv_table_info
-        WHERE "table" = 'mart_ecs_order_info'
-          AND schema = '{MART_SCHEMA}'
-    """)
-    row = cur.fetchone()
-    cur.close()
-
-    if not row:
-        log.warning("mart_ecs_order_info not found in svv_table_info — skipping VACUUM SORT check")
-        conn.close()
-        return
-
-    unsorted_pct, tbl_rows, stats_off = row
-    unsorted_pct = unsorted_pct or 0
-    log.info(
-        f"mart_ecs health — rows: {tbl_rows:,}, unsorted: {unsorted_pct:.1f}%, stats_off: {stats_off}"
-    )
-
-    if unsorted_pct <= VACUUM_SORT_THRESHOLD_PCT:
-        log.info(
-            f"Skipping VACUUM SORT — unsorted {unsorted_pct:.1f}% is below threshold "
-            f"({VACUUM_SORT_THRESHOLD_PCT}%)"
-        )
-        conn.close()
-        return
-
-    log.info(
-        f"Triggering VACUUM SORT ONLY {MART_ECS} "
-        f"(unsorted {unsorted_pct:.1f}% > threshold {VACUUM_SORT_THRESHOLD_PCT}%)"
-    )
-    conn.close()
-
-    # Re-open with autocommit for VACUUM
     conn = get_conn(autocommit=True)
     cur = conn.cursor()
+    log.info(f"Starting VACUUM SORT ONLY {MART_ECS}")
     cur.execute(f"VACUUM SORT ONLY {MART_ECS}")
     log.info(f"VACUUM SORT ONLY {MART_ECS} complete")
     cur.close()
