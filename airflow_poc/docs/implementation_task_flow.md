@@ -1,3 +1,6 @@
+> **SUPERSEDED** — Use [`code_walkthrough_v2.md`](./code_walkthrough_v2.md) instead.
+> This document predates the CDC dual-bound fix, watermark seeding, validate_extractions gate, monitoring/vacuum DAG split, and mart_ecs source_cutoff fix.
+
 # Order Tracking Pipeline — Implementation Task Flow
 
 **Created**: 2026-02-25

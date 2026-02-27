@@ -8,10 +8,12 @@ Reclaims ghost rows from high-frequency DELETEs in the 15-min cycle.
 VACUUM (§16 of order_tracking_final_design.md)
    Without VACUUM, ghost rows bloat table size and degrade zone map effectiveness.
 
-   mart_uti:  VACUUM DELETE ONLY — daily (96 DELETE cycles/day)
-   mart_uts:  VACUUM DELETE ONLY — daily (96 DELETE cycles/day)
-   mart_ecs:  VACUUM DELETE ONLY — daily
-   mart_ecs:  VACUUM SORT ONLY   — conditional (only if svv_table_info.unsorted > 15%)
+   mart_uti:  VACUUM DELETE ONLY + ANALYZE — daily (96 DELETE cycles/day)
+   mart_uts:  VACUUM DELETE ONLY + ANALYZE — daily (96 DELETE cycles/day)
+   mart_ecs:  VACUUM DELETE ONLY → VACUUM SORT ONLY + ANALYZE — daily
+
+   ANALYZE follows each VACUUM to refresh query planner statistics.
+   Stale stats after high-churn DELETEs cause suboptimal query plans.
 
 NOTE: VACUUM statements require autocommit mode (cannot run inside a transaction).
       psycopg2 is used directly with conn.autocommit = True for all VACUUM tasks.
@@ -83,33 +85,41 @@ def get_conn(autocommit=False):
 
 def vacuum_mart_uti(**context):
     """
-    VACUUM DELETE ONLY mart_uni_tracking_info — runs every day.
+    VACUUM DELETE ONLY + ANALYZE mart_uni_tracking_info — runs every day.
 
     mart_uti receives 96 DELETE cycles/day (one per 15-min extraction).
     Each cycle deletes and re-inserts the current batch, creating ghost rows.
     Without daily VACUUM, ghost rows bloat the table and degrade zone map pruning.
+
+    ANALYZE follows VACUUM to refresh query planner statistics. Stale stats
+    after high-churn DELETEs cause suboptimal join and filter plans.
     """
     conn = get_conn(autocommit=True)
     cur = conn.cursor()
     log.info(f"Starting VACUUM DELETE ONLY {MART_UTI}")
     cur.execute(f"VACUUM DELETE ONLY {MART_UTI}")
-    log.info(f"VACUUM DELETE ONLY {MART_UTI} complete")
+    log.info(f"VACUUM DELETE ONLY {MART_UTI} complete — running ANALYZE")
+    cur.execute(f"ANALYZE {MART_UTI}")
+    log.info(f"ANALYZE {MART_UTI} complete")
     cur.close()
     conn.close()
 
 
 def vacuum_mart_uts(**context):
     """
-    VACUUM DELETE ONLY mart_uni_tracking_spath — runs every day.
+    VACUUM DELETE ONLY + ANALYZE mart_uni_tracking_spath — runs every day.
 
     mart_uts receives 96 time-based trim DELETEs/day (one per 15-min cycle).
     Daily VACUUM reclaims ghost rows and keeps zone map pruning effective.
+    ANALYZE refreshes statistics after the high-churn delete pattern.
     """
     conn = get_conn(autocommit=True)
     cur = conn.cursor()
     log.info(f"Starting VACUUM DELETE ONLY {MART_UTS}")
     cur.execute(f"VACUUM DELETE ONLY {MART_UTS}")
-    log.info(f"VACUUM DELETE ONLY {MART_UTS} complete")
+    log.info(f"VACUUM DELETE ONLY {MART_UTS} complete — running ANALYZE")
+    cur.execute(f"ANALYZE {MART_UTS}")
+    log.info(f"ANALYZE {MART_UTS} complete")
     cur.close()
     conn.close()
 
@@ -117,6 +127,9 @@ def vacuum_mart_uts(**context):
 def vacuum_mart_ecs_delete(**context):
     """
     VACUUM DELETE ONLY mart_ecs_order_info — runs every day.
+
+    ANALYZE is run by vacuum_mart_ecs_sort (which always follows this task),
+    so no ANALYZE here to avoid running it twice on the same table.
     """
     conn = get_conn(autocommit=True)
     cur = conn.cursor()
@@ -129,7 +142,7 @@ def vacuum_mart_ecs_delete(**context):
 
 def vacuum_mart_ecs_sort(**context):
     """
-    VACUUM SORT ONLY mart_ecs_order_info — runs every day.
+    VACUUM SORT ONLY + ANALYZE mart_ecs_order_info — runs every day.
 
     mart_ecs has SORTKEY(partner_id, add_time, order_id). New orders arrive in
     add_time order but partner_id is random — unsorted region grows over time.
@@ -138,12 +151,16 @@ def vacuum_mart_ecs_sort(**context):
     Run unconditionally — Redshift skips quickly when nothing needs sorting.
     (Conditional check via svv_table_info requires superuser privilege not held
     by sett_ddl_owner.)
+
+    ANALYZE runs after SORT to ensure planner stats reflect the re-sorted layout.
     """
     conn = get_conn(autocommit=True)
     cur = conn.cursor()
     log.info(f"Starting VACUUM SORT ONLY {MART_ECS}")
     cur.execute(f"VACUUM SORT ONLY {MART_ECS}")
-    log.info(f"VACUUM SORT ONLY {MART_ECS} complete")
+    log.info(f"VACUUM SORT ONLY {MART_ECS} complete — running ANALYZE")
+    cur.execute(f"ANALYZE {MART_ECS}")
+    log.info(f"ANALYZE {MART_ECS} complete")
     cur.close()
     conn.close()
 

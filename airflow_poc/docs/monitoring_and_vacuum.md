@@ -118,12 +118,12 @@ bloat table size, and degrade Redshift zone map pruning (slowing all queries).
 
 ### What it runs
 
-| Task | Table | Frequency | Why |
+| Task | Table | Operations | Why |
 |---|---|---|---|
-| `vacuum_mart_uti` | `mart_uni_tracking_info` | Daily | 96 DELETE cycles/day |
-| `vacuum_mart_uts` | `mart_uni_tracking_spath` | Daily | 96 DELETE cycles/day |
-| `vacuum_mart_ecs_delete` | `mart_ecs_order_info` | Daily | Post-trim DELETEs |
-| `vacuum_mart_ecs_sort` | `mart_ecs_order_info` | Daily | Unconditional — Redshift skips fast if nothing to sort |
+| `vacuum_mart_uti` | `mart_uni_tracking_info` | VACUUM DELETE ONLY → ANALYZE | 96 DELETE cycles/day; ANALYZE refreshes planner stats after high-churn deletes |
+| `vacuum_mart_uts` | `mart_uni_tracking_spath` | VACUUM DELETE ONLY → ANALYZE | 96 DELETE cycles/day; ANALYZE refreshes planner stats after high-churn deletes |
+| `vacuum_mart_ecs_delete` | `mart_ecs_order_info` | VACUUM DELETE ONLY | Post-trim DELETEs; no ANALYZE here — sort task runs it after |
+| `vacuum_mart_ecs_sort` | `mart_ecs_order_info` | VACUUM SORT ONLY → ANALYZE | Unconditional — Redshift skips fast if nothing to sort; ANALYZE reflects re-sorted layout |
 
 ### VACUUM SORT for mart_ecs
 
