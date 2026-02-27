@@ -29,13 +29,14 @@
     select coalesce(max(update_time), 0) - 1800 from {{ this }}
 {%- endset -%}
 
-{%- set source_cutoff = 0 -%}
+{%- set source_cutoff = none -%}
 {%- if execute and is_incremental() -%}
     {%- set result = run_query(source_cutoff_query) -%}
-    {%- if result and result.columns[0][0] -%}
-        {%- set source_cutoff = result.columns[0][0] -%}
+    {%- if result and result.rows | length > 0 and result.rows[0][0] -%}
+        {%- set source_cutoff = result.rows[0][0] -%}
     {%- endif -%}
 {%- endif -%}
+{{ log("mart_uti source_cutoff = " ~ source_cutoff, info=True) }}
 
 {# STEP 1: Clean stale hist_uti entry for reactivated orders.
    A reactivated order re-enters the mart with a fresh update_time — its previously archived
@@ -85,7 +86,11 @@ with filtered as (
     select *
     from settlement_public.uni_tracking_info_raw
     {% if is_incremental() %}
+    {% if source_cutoff is not none %}
     where update_time > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
+    {% else %}
+    where update_time > extract(epoch from current_timestamp - interval '30 minutes') -- fallback: 30 min from now
+    {% endif %}
     {% if var('source_end_time', none) %}
     and update_time <= {{ var('source_end_time') }} -- optional cap for testing
     {% endif %}
@@ -109,4 +114,3 @@ ranked as (
 select * exclude(_rn)
 from ranked
 where _rn = 1
-order by update_time, order_id

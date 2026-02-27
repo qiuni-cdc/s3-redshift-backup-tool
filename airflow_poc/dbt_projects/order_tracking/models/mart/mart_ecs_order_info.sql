@@ -37,13 +37,14 @@
     select coalesce(max(add_time), 0) - 7200 from settlement_public.ecs_order_info_raw
 {%- endset -%}
 
-{%- set source_cutoff = 0 -%}
+{%- set source_cutoff = none -%}
 {%- if execute and is_incremental() -%}
     {%- set result = run_query(source_cutoff_query) -%}
-    {%- if result and result.columns[0][0] -%}
-        {%- set source_cutoff = result.columns[0][0] -%}
+    {%- if result and result.rows | length > 0 and result.rows[0][0] -%}
+        {%- set source_cutoff = result.rows[0][0] -%}
     {%- endif -%}
 {%- endif -%}
+{{ log("mart_ecs source_cutoff = " ~ source_cutoff, info=True) }}
 
 {# STEP 1a: Archive inactive orders to 2025_h2 (Jul 2025 – Jan 2026).
    LEFT JOIN anti-join: orders absent from mart_uti = no longer active = safe to archive.
@@ -89,7 +90,11 @@ with filtered as (
     select *
     from settlement_public.ecs_order_info_raw
     {% if is_incremental() %}
+    {% if source_cutoff is not none %}
     where add_time > {{ source_cutoff }} -- 2h source scan from raw's latest (raw-relative, not mart-relative)
+    {% else %}
+    where add_time > extract(epoch from current_timestamp - interval '2 hours') -- fallback: 2h from now
+    {% endif %}
     {% if var('source_end_time', none) %}
     and add_time <= {{ var('source_end_time') }} -- optional cap for testing
     {% endif %}
@@ -111,4 +116,3 @@ ranked as (
 select * exclude(_rn)
 from ranked
 where _rn = 1
-order by add_time, order_id
