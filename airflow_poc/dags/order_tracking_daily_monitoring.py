@@ -2,9 +2,10 @@
 Order Tracking Daily Monitoring
 =================================
 
-Runs every day at 2am UTC (off-peak). Covers two concerns:
+Runs every day at 2am UTC (off-peak). Data quality checks only.
+VACUUM is handled by a separate DAG: order_tracking_vacuum.
 
-1. DATA QUALITY CHECKS (§12 of order_tracking_final_design.md)
+DATA QUALITY CHECKS (§12 of order_tracking_final_design.md)
    Four checks that catch extraction gaps and mart integrity issues.
 
    Test 0 — Extraction count comparison (MySQL vs Redshift raw)
@@ -24,20 +25,6 @@ Runs every day at 2am UTC (off-peak). Covers two concerns:
      Order in mart_uti with no matching row in mart_ecs.
      Happens when an order reactivates after its ecs row was archived to hist_ecs.
      Fix: restore from hist_ecs manually (see order_tracking_final_design.md §5).
-
-2. VACUUM (§16 of order_tracking_final_design.md)
-   Reclaims ghost rows from high-frequency DELETEs in the 15-min cycle.
-   Without VACUUM, ghost rows bloat table size and degrade zone map effectiveness.
-
-   mart_uti:  VACUUM DELETE ONLY — daily (96 DELETE cycles/day)
-   mart_uts:  VACUUM DELETE ONLY — daily (96 DELETE cycles/day)
-   mart_ecs:  VACUUM DELETE ONLY — weekly (Sundays only; fewer deletes than uti/uts)
-   mart_ecs:  VACUUM SORT ONLY   — conditional (only if svv_table_info.unsorted > 15%)
-
-NOTE: VACUUM statements require autocommit mode (cannot run inside a transaction).
-      psycopg2 is used directly with conn.autocommit = True for all VACUUM tasks.
-      PostgresHook is avoided — the redshift_default connection has IAM auth enabled
-      which triggers a boto3 RDS token fetch and fails with NoRegionError.
 """
 
 from airflow import DAG
@@ -69,8 +56,6 @@ HIST_UTS_TABLES = [
     f'{MART_SCHEMA}.hist_uni_tracking_spath_2026_h1',
     # f'{MART_SCHEMA}.hist_uni_tracking_spath_2026_h2',  # add on 1 Jul 2026
 ]
-
-VACUUM_SORT_THRESHOLD_PCT = 15  # trigger VACUUM SORT ONLY when unsorted % exceeds this
 
 # DQ checks only inspect orders active within this lookback window.
 # Stale orders can't develop *new* issues today, and pre-existing issues are
@@ -113,11 +98,11 @@ default_args = {
 dag = DAG(
     'order_tracking_daily_monitoring',
     default_args=default_args,
-    description='Daily DQ checks (exceptions table) + VACUUM for order tracking mart',
+    description='Daily DQ checks for order tracking mart',
     schedule_interval='0 2 * * *',  # 2am UTC daily, off-peak
     max_active_runs=1,
     catchup=False,
-    tags=['order-tracking', 'monitoring', 'dq', 'vacuum']
+    tags=['order-tracking', 'monitoring', 'dq']
 )
 
 # ============================================================================
@@ -444,121 +429,6 @@ def check_unresolved_exceptions(**context):
 
 
 # ============================================================================
-# TASK GROUP 2: VACUUM
-# ============================================================================
-
-def vacuum_mart_uti(**context):
-    """
-    VACUUM DELETE ONLY mart_uni_tracking_info — runs every day.
-
-    mart_uti receives 96 DELETE cycles/day (one per 15-min extraction).
-    Each cycle deletes and re-inserts the current batch, creating ghost rows.
-    Without daily VACUUM, ghost rows bloat the table and degrade zone map pruning.
-    """
-    conn = get_conn(autocommit=True)  # VACUUM requires autocommit
-    cur = conn.cursor()
-    log.info(f"Starting VACUUM DELETE ONLY {MART_UTI}")
-    cur.execute(f"VACUUM DELETE ONLY {MART_UTI}")
-    log.info(f"VACUUM DELETE ONLY {MART_UTI} complete")
-    cur.close()
-    conn.close()
-
-
-def vacuum_mart_uts(**context):
-    """
-    VACUUM DELETE ONLY mart_uni_tracking_spath — runs every day.
-
-    mart_uts receives 96 time-based trim DELETEs/day (one per 15-min cycle).
-    Daily VACUUM reclaims ghost rows and keeps zone map pruning effective.
-    """
-    conn = get_conn(autocommit=True)
-    cur = conn.cursor()
-    log.info(f"Starting VACUUM DELETE ONLY {MART_UTS}")
-    cur.execute(f"VACUUM DELETE ONLY {MART_UTS}")
-    log.info(f"VACUUM DELETE ONLY {MART_UTS} complete")
-    cur.close()
-    conn.close()
-
-
-def vacuum_mart_ecs_delete(**context):
-    """
-    VACUUM DELETE ONLY mart_ecs_order_info — runs weekly (Sundays only).
-
-    mart_ecs has fewer DELETE operations than mart_uti/uts (only when orders age out).
-    Weekly VACUUM is sufficient. Skipped on non-Sunday runs to save cluster resources.
-    """
-    execution_date = context['execution_date']
-    if execution_date.weekday() != 6:  # 6 = Sunday
-        log.info(f"Skipping VACUUM mart_ecs — not Sunday (weekday={execution_date.weekday()})")
-        return
-
-    conn = get_conn(autocommit=True)
-    cur = conn.cursor()
-    log.info(f"Starting VACUUM DELETE ONLY {MART_ECS} (Sunday run)")
-    cur.execute(f"VACUUM DELETE ONLY {MART_ECS}")
-    log.info(f"VACUUM DELETE ONLY {MART_ECS} complete")
-    cur.close()
-    conn.close()
-
-
-def vacuum_mart_ecs_sort(**context):
-    """
-    Conditional VACUUM SORT ONLY mart_ecs_order_info.
-
-    mart_ecs has SORTKEY(partner_id, add_time, order_id). New orders arrive in
-    add_time order but partner_id is random — unsorted region grows over time.
-    Zone maps on partner_id (the primary filter) degrade as unsorted % rises.
-
-    Only runs VACUUM SORT when svv_table_info.unsorted > VACUUM_SORT_THRESHOLD_PCT (15%).
-    Expected cadence: ~every 65–130 days. Running weekly wastes cluster resources.
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(f"""
-        SELECT unsorted, tbl_rows, stats_off
-        FROM svv_table_info
-        WHERE "table" = 'mart_ecs_order_info'
-          AND schema = '{MART_SCHEMA}'
-    """)
-    row = cur.fetchone()
-    cur.close()
-
-    if not row:
-        log.warning("mart_ecs_order_info not found in svv_table_info — skipping VACUUM SORT check")
-        conn.close()
-        return
-
-    unsorted_pct, tbl_rows, stats_off = row
-    unsorted_pct = unsorted_pct or 0
-    log.info(
-        f"mart_ecs health — rows: {tbl_rows:,}, unsorted: {unsorted_pct:.1f}%, stats_off: {stats_off}"
-    )
-
-    if unsorted_pct <= VACUUM_SORT_THRESHOLD_PCT:
-        log.info(
-            f"Skipping VACUUM SORT — unsorted {unsorted_pct:.1f}% is below threshold "
-            f"({VACUUM_SORT_THRESHOLD_PCT}%)"
-        )
-        conn.close()
-        return
-
-    log.info(
-        f"Triggering VACUUM SORT ONLY {MART_ECS} "
-        f"(unsorted {unsorted_pct:.1f}% > threshold {VACUUM_SORT_THRESHOLD_PCT}%)"
-    )
-    conn.close()
-
-    # Re-open with autocommit for VACUUM
-    conn = get_conn(autocommit=True)
-    cur = conn.cursor()
-    cur.execute(f"VACUUM SORT ONLY {MART_ECS}")
-    log.info(f"VACUUM SORT ONLY {MART_ECS} complete")
-    cur.close()
-    conn.close()
-
-
-# ============================================================================
 # DEFINE TASKS
 # ============================================================================
 
@@ -595,41 +465,9 @@ task_check_exceptions = PythonOperator(
     dag=dag
 )
 
-with TaskGroup("vacuum", dag=dag) as vacuum_group:
-
-    task_vacuum_uti = PythonOperator(
-        task_id='vacuum_mart_uti',
-        python_callable=vacuum_mart_uti,
-        dag=dag
-    )
-
-    task_vacuum_uts = PythonOperator(
-        task_id='vacuum_mart_uts',
-        python_callable=vacuum_mart_uts,
-        dag=dag
-    )
-
-    task_vacuum_ecs_delete = PythonOperator(
-        task_id='vacuum_mart_ecs_delete',
-        python_callable=vacuum_mart_ecs_delete,
-        dag=dag
-    )
-
-    task_vacuum_ecs_sort = PythonOperator(
-        task_id='vacuum_mart_ecs_sort',
-        python_callable=vacuum_mart_ecs_sort,
-        dag=dag
-    )
-
-    # mart_ecs sort VACUUM runs after delete VACUUM (more efficient order)
-    task_vacuum_ecs_delete >> task_vacuum_ecs_sort
-
 # ============================================================================
 # DEPENDENCIES
 # ============================================================================
 
 # DQ checks run in parallel, then exceptions check consolidates results
 dq_group >> task_check_exceptions
-
-# VACUUM runs in parallel with DQ checks — both start at DAG trigger, independent
-# (vacuum_uti and vacuum_uts are fully independent; vacuum_ecs has internal ordering)
