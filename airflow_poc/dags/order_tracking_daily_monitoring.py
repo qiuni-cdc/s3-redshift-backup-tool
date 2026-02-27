@@ -31,19 +31,19 @@ Runs every day at 2am UTC (off-peak). Covers two concerns:
    mart_ecs:  VACUUM SORT ONLY   — conditional (only if svv_table_info.unsorted > 15%)
 
 NOTE: VACUUM statements require autocommit mode (cannot run inside a transaction).
-      PostgresHook.get_conn() is used with conn.autocommit = True for all VACUUM tasks.
-
-Redshift connection: uses Airflow connection 'redshift_default'.
-Configure in Airflow UI → Admin → Connections.
+      psycopg2 is used directly with conn.autocommit = True for all VACUUM tasks.
+      PostgresHook is avoided — the redshift_default connection has IAM auth enabled
+      which triggers a boto3 RDS token fetch and fails with NoRegionError.
 """
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime, timedelta
 import logging
+import os
+import psycopg2
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +66,6 @@ HIST_UTS_TABLES = [
     # f'{MART_SCHEMA}.hist_uni_tracking_spath_2026_h2',  # add on 1 Jul 2026
 ]
 
-REDSHIFT_CONN_ID = 'redshift_default'
 VACUUM_SORT_THRESHOLD_PCT = 15  # trigger VACUUM SORT ONLY when unsorted % exceeds this
 
 # ============================================================================
@@ -99,8 +98,11 @@ dag = DAG(
 # ============================================================================
 
 def get_conn(autocommit=False):
-    hook = PostgresHook(postgres_conn_id=REDSHIFT_CONN_ID)
-    conn = hook.get_conn()
+    host     = os.environ.get('REDSHIFT_HOST', 'redshift-dw.qa.uniuni.com')
+    port     = int(os.environ.get('REDSHIFT_PORT', '5439'))
+    user     = os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER') or os.environ.get('REDSHIFT_PRO_USER')
+    password = os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD') or os.environ.get('REDSHIFT_PRO_PASSWORD')
+    conn = psycopg2.connect(host=host, port=port, dbname='dw', user=user, password=password)
     conn.autocommit = autocommit
     return conn
 

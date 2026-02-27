@@ -157,15 +157,16 @@ check_drift = BashOperator(
 
 def calculate_sync_window(**context):
     """
-    Calculate time window using MySQL server time from check_drift task.
-    15-min lookback + 5-min buffer = 20 min total coverage.
+    Compute the extraction upper bound (to_ts) passed as --end-time to all extraction tasks.
+    The 5-min buffer prevents pulling rows from in-flight transactions.
+    Lower bound is determined by the watermark stored in S3, not by this task.
     """
     # Parse JSON output from Icheck_time_drift BashOperator
     drift_output = context['task_instance'].xcom_pull(
         task_ids='check_time_drift',
         key='return_value'
     )
-    
+
     # Always use wall clock time — this is a near-real-time pipeline.
     # Using data_interval_start caused stale windows when Airflow ran
     # a backlogged scheduled slot (e.g. Feb 21 slot running on Feb 24).
@@ -174,27 +175,18 @@ def calculate_sync_window(**context):
     print(f"Using wall clock time (UTC): {datetime.utcnow().isoformat()} ({mysql_now})")
 
     buffer = BUFFER_MINUTES * 60
-    lookback = INCREMENTAL_LOOKBACK_MINUTES * 60
-
-    # For a run scheduled at 10:15 (covering 10:00-10:15):
-    # data_interval_start = 10:15
-    # to_unix = 10:15 - buffer (5m) = 10:10
-    # from_unix = 10:10 - lookback (15m) = 9:55
-    # This ensures 15m effective window, shifted by buffer.
-    
-    from_unix = mysql_now - lookback - buffer
     to_unix = mysql_now - buffer
 
+    # to_ts is the only value used downstream (--end-time for all extraction tasks).
+    # It caps extraction so rows from incomplete transactions are not pulled.
     sync_window = {
-        'from_unix': from_unix,
         'to_unix': to_unix,
-        'from_ts': datetime.fromtimestamp(from_unix).isoformat(),
         'to_ts': datetime.fromtimestamp(to_unix).isoformat(),
     }
 
-    print(f"Sync Window ({INCREMENTAL_LOOKBACK_MINUTES} min + {BUFFER_MINUTES} min buffer):")
-    print(f"  From: {sync_window['from_ts']} ({from_unix})")
-    print(f"  To:   {sync_window['to_ts']} ({to_unix})")
+    print(f"Extraction upper bound (--end-time, {BUFFER_MINUTES}-min buffer applied):")
+    print(f"  To: {sync_window['to_ts']} ({to_unix})")
+    print(f"  Lower bound: determined by watermark in S3 (see extraction task logs)")
 
     context['task_instance'].xcom_push(key='sync_window', value=sync_window)
     return sync_window
@@ -690,9 +682,9 @@ CONFIGURATION:
   Window: {INCREMENTAL_LOOKBACK_MINUTES} min + {BUFFER_MINUTES} min buffer
   Time drift: {time_drift}s {"(OK)" if abs(time_drift) <= TIME_DRIFT_THRESHOLD_SECONDS else "(WARNING)"}
 
-SYNC WINDOW:
-  From: {sync_window.get('from_ts', 'N/A')}
-  To:   {sync_window.get('to_ts', 'N/A')}
+EXTRACTION UPPER BOUND:
+  To (--end-time cap): {sync_window.get('to_ts', 'N/A')}
+  From (lower bound):  watermark-driven (see extraction task logs)
 
 EXTRACTION:
   ecs (orders):   {extraction_results.get('ecs', {}).get('rows', 0):>10,} rows
