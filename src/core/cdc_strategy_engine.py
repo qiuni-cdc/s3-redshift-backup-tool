@@ -234,11 +234,27 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
             where_clause = f"WHERE id > {safe_id_override}"
             logger.info(f"Using manual ID override for timestamp-only strategy: WHERE id > {safe_id_override}")
         elif last_timestamp:
-            # SECURITY: Sanitize timestamp value
-            safe_timestamp = _sanitize_sql_value(last_timestamp)
-
-            # Build base WHERE clause
-            base_where = f"{timestamp_col} > {safe_timestamp}"
+            # For unix integer columns, convert datetime strings to unix epoch so MySQL
+            # doesn't silently truncate '2026-02-27 04:15:17' → 2026 via implicit cast.
+            if is_unix_timestamp:
+                ts_str = str(last_timestamp).strip()
+                if any(c in ts_str for c in ['-', 'T', '/', ' ']):
+                    # Datetime string — convert to unix epoch (mirrors upper-bound logic)
+                    try:
+                        from datetime import datetime as _dt
+                        clean_ts = ts_str.replace('T', ' ').split('.')[0].split('+')[0].rstrip('Z').strip()
+                        lower_unix = int(_dt.strptime(clean_ts, '%Y-%m-%d %H:%M:%S').timestamp())
+                        base_where = f"{timestamp_col} > {lower_unix}"
+                        logger.info(f"Converted lower bound datetime string to unix: {ts_str} → {lower_unix}")
+                    except Exception as e:
+                        logger.warning(f"Failed to convert lower bound to unix: {e}. Using sanitized string.")
+                        base_where = f"{timestamp_col} > {_sanitize_sql_value(last_timestamp)}"
+                else:
+                    # Already numeric (unix integer or its string representation)
+                    base_where = f"{timestamp_col} > {_sanitize_sql_value(last_timestamp)}"
+            else:
+                # SECURITY: Sanitize timestamp value
+                base_where = f"{timestamp_col} > {_sanitize_sql_value(last_timestamp)}"
 
             # Add additional WHERE clause if specified (for index optimization)
             if self.config.additional_where:
@@ -433,8 +449,23 @@ class HybridCDCStrategy(CDCStrategy):
             where_clause = f"WHERE {id_col} > {safe_id_override}"
             logger.info(f"Using manual ID override for hybrid strategy: WHERE {id_col} > {safe_id_override}")
         elif last_timestamp:
-            # SECURITY: Sanitize values
-            safe_timestamp = _sanitize_sql_value(last_timestamp)
+            # For unix integer columns, convert datetime strings to unix epoch.
+            if is_unix_timestamp:
+                ts_str = str(last_timestamp).strip()
+                if any(c in ts_str for c in ['-', 'T', '/', ' ']):
+                    try:
+                        from datetime import datetime as _dt
+                        clean_ts = ts_str.replace('T', ' ').split('.')[0].split('+')[0].rstrip('Z').strip()
+                        lower_unix = int(_dt.strptime(clean_ts, '%Y-%m-%d %H:%M:%S').timestamp())
+                        safe_timestamp = str(lower_unix)
+                        logger.info(f"Converted lower bound datetime string to unix: {ts_str} → {lower_unix}")
+                    except Exception as e:
+                        logger.warning(f"Failed to convert lower bound to unix: {e}. Using sanitized string.")
+                        safe_timestamp = _sanitize_sql_value(last_timestamp)
+                else:
+                    safe_timestamp = _sanitize_sql_value(last_timestamp)
+            else:
+                safe_timestamp = _sanitize_sql_value(last_timestamp)
             safe_last_id = _sanitize_sql_value(last_id)
             # Hybrid condition: timestamp > last OR (timestamp = last AND id > last_id)
             where_clause = f"""WHERE {timestamp_col} > {safe_timestamp}
