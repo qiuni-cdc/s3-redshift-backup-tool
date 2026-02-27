@@ -48,6 +48,7 @@ from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime, timedelta
 import json
 import psycopg2
+from airflow.exceptions import AirflowException
 
 # ============================================================================
 # CONFIGURATION
@@ -89,6 +90,13 @@ PIPELINE_NAME = os.environ.get('SYNC_PIPELINE_NAME', 'order_tracking_hybrid_dbt_
 BUFFER_MINUTES = 5                    # Safety buffer to avoid incomplete transactions
 INCREMENTAL_LOOKBACK_MINUTES = 20     # 15-min window + 5-min buffer = 20 min total
 TIME_DRIFT_THRESHOLD_SECONDS = 60     # Alert if Airflow vs MySQL drift exceeds this
+
+# Extraction lag thresholds — lag = CURRENT_TIMESTAMP - MAX(ts) in Redshift raw.
+# uti/uts update every cycle (high-frequency): tight thresholds.
+# ecs add_time is write-once (new orders only): looser thresholds — quiet periods are legitimate.
+# WARN: logs to exceptions, pipeline continues.
+# ERROR: raises AirflowException, blocks dbt from running on stale data.
+EXCEPTIONS_TABLE = 'settlement_ods.order_tracking_exceptions'
 
 TABLES = {
     "ecs": {
@@ -386,6 +394,166 @@ def trim_raw_tables(**context):
 trim_raw = PythonOperator(
     task_id='trim_raw_tables',
     python_callable=trim_raw_tables,
+    dag=dag
+)
+
+# ============================================================================
+# TASK 5b: CHECK EXTRACTION LAG
+# ============================================================================
+# Runs after trim_raw (extraction confirmed good), before dbt.
+# Lag = CURRENT_TIMESTAMP - MAX(ts) in each raw table (Redshift-only, no MySQL needed).
+# uti/uts: WARN=20min, ERROR=30min  (high-frequency, tight SLA)
+# ecs:     WARN=60min, ERROR=120min (write-once add_time, quiet periods are legitimate)
+# When email_on_failure is enabled in default_args, ERROR auto-triggers email alert.
+
+def _send_lag_alert(subject, body):
+    """Send SMTP alert for extraction lag. Failure is logged but never blocks the pipeline."""
+    import smtplib
+    from email.mime.text import MIMEText
+
+    host     = os.environ.get('ALERT_SMTP_HOST',     'smtp.office365.com')
+    port     = int(os.environ.get('ALERT_SMTP_PORT', '587'))
+    user     = os.environ.get('ALERT_SMTP_USER',     'jasleen.tung@uniuni.com')
+    password = os.environ.get('ALERT_SMTP_PASSWORD', '')
+    to       = os.environ.get('ALERT_EMAIL_TO',      'jasleen.tung@uniuni.com')
+
+    msg            = MIMEText(body, 'plain')
+    msg['Subject'] = subject
+    msg['From']    = user
+    msg['To']      = to
+
+    try:
+        server = smtplib.SMTP(host, port, timeout=10)
+        server.ehlo()
+        server.starttls()
+        server.login(user, password)
+        server.sendmail(user, [to], msg.as_string())
+        server.quit()
+        print(f"Alert email sent → {to}")
+    except Exception as e:
+        print(f"WARNING: Alert email failed ({e}) — pipeline continues")
+
+
+def check_extraction_lag(**context):
+    """
+    Check extraction freshness: lag = CURRENT_TIMESTAMP - MAX(ts) in Redshift raw.
+    No MySQL connection needed — Redshift-only. Avoids SSH tunnel complexity.
+
+    Per-table thresholds (seconds):
+      uti/uts — update_time/pathTime change every cycle (high-frequency):
+        WARN=20min, ERROR=30min
+      ecs — add_time is write-once (new orders only, can legitimately be quiet):
+        WARN=60min, ERROR=120min
+
+    WARN: logs to exceptions, pipeline continues.
+    ERROR: raises AirflowException, blocks dbt from consuming stale data.
+    """
+    rs_host     = os.environ.get('REDSHIFT_HOST', 'redshift-dw.qa.uniuni.com')
+    rs_port     = int(os.environ.get('REDSHIFT_PORT', '5439'))
+    rs_user     = os.environ.get('REDSHIFT_QA_USER')     or os.environ.get('REDSHIFT_USER')
+    rs_password = os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD')
+
+    # (key, raw_table, ts_col, warn_seconds, error_seconds)
+    checks = [
+        ('uti', 'settlement_public.uni_tracking_info_raw',  'update_time', 1200, 1800),  # 20/30 min
+        ('uts', 'settlement_public.uni_tracking_spath_raw', 'pathTime',    1200, 1800),  # 20/30 min
+        ('ecs', 'settlement_public.ecs_order_info_raw',     'add_time',    3600, 7200),  # 60/120 min
+    ]
+
+    rs_conn = psycopg2.connect(
+        host=rs_host, port=rs_port, dbname='dw',
+        user=rs_user, password=rs_password,
+    )
+    rs_conn.autocommit = True
+
+    lag_results = {}
+    errors   = []
+    warnings = []
+
+    try:
+        cur = rs_conn.cursor()
+
+        print("Extraction lag check (CURRENT_TIMESTAMP - MAX(ts) in raw):")
+        print("-" * 60)
+
+        for key, raw_table, ts_col, warn_s, error_s in checks:
+            cur.execute(f"""
+                SELECT COALESCE(MAX({ts_col}), 0),
+                       EXTRACT(epoch FROM CURRENT_TIMESTAMP)::BIGINT - COALESCE(MAX({ts_col}), 0)
+                FROM {raw_table}
+            """)
+            raw_max, lag = cur.fetchone()
+            raw_max = int(raw_max)
+            lag     = int(lag)
+            lag_min = lag / 60
+            status  = ('OK'   if lag <= warn_s  else
+                       'WARN' if lag <= error_s else 'ERROR')
+
+            print(f"  {key}: raw_max={raw_max}  lag={lag_min:.1f}min  "
+                  f"[thresholds: warn={warn_s//60}min error={error_s//60}min]  [{status}]")
+            lag_results[key] = {'raw_max': raw_max, 'lag_seconds': lag}
+
+            if lag > warn_s:
+                note = (f"lag={lag}s ({lag_min:.1f}min) raw_max={raw_max} — "
+                        f"exceeds {'error' if lag > error_s else 'warn'} threshold "
+                        f"({error_s//60 if lag > error_s else warn_s//60}min)")
+                # Deduplicate: one entry per hour per table to avoid flooding
+                cur.execute(f"""
+                    INSERT INTO {EXCEPTIONS_TABLE} (order_id, exception_type, detected_at, notes)
+                    SELECT NULL, %s, CURRENT_TIMESTAMP, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {EXCEPTIONS_TABLE}
+                        WHERE exception_type = %s
+                          AND detected_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                          AND resolved_at IS NULL
+                    )
+                """, (f'EXTRACTION_LAG_{key.upper()}', note, f'EXTRACTION_LAG_{key.upper()}'))
+
+                if lag > error_s:
+                    errors.append(f"{key} lag={lag_min:.1f}min (>{error_s//60}min)")
+                else:
+                    warnings.append(f"{key} lag={lag_min:.1f}min (>{warn_s//60}min)")
+
+        print("-" * 60)
+        if warnings:
+            print(f"WARN  — {'; '.join(warnings)}")
+        if errors:
+            print(f"ERROR — {'; '.join(errors)} — dbt blocked")
+
+    finally:
+        rs_conn.close()
+
+    context['task_instance'].xcom_push(key='lag_results', value=lag_results)
+
+    # Send one email covering all issues (warn + error together)
+    if warnings or errors:
+        level   = 'ERROR' if errors else 'WARN'
+        all_issues = errors + warnings
+        subject = f"[{level}] Order Tracking Extraction Lag — {', '.join(all_issues)}"
+
+        lines = ["Pipeline: order_tracking_hybrid_dbt_sync",
+                 f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                 ""]
+        for key, r in lag_results.items():
+            lag_min = r['lag_seconds'] / 60
+            lines.append(f"  {key}: lag={lag_min:.1f}min  raw_max={r['raw_max']}")
+        if errors:
+            lines += ["", "dbt tasks have been BLOCKED. Check Airflow UI for details."]
+        else:
+            lines += ["", "dbt is running — monitor next cycle."]
+
+        _send_lag_alert(subject, "\n".join(lines))
+
+    if errors:
+        raise AirflowException(
+            "Extraction lag threshold exceeded — dbt blocked: " + "; ".join(errors)
+        )
+
+    return lag_results
+
+check_lag = PythonOperator(
+    task_id='check_extraction_lag',
+    python_callable=check_extraction_lag,
     dag=dag
 )
 
@@ -782,7 +950,7 @@ summary = PythonOperator(
 # DEPENDENCIES
 # ============================================================================
 
-check_drift >> calc_window >> extraction_group >> validate >> trim_raw >> dbt_mart_uti
+check_drift >> calc_window >> extraction_group >> validate >> trim_raw >> check_lag >> dbt_mart_uti
 dbt_mart_uti >> [dbt_mart_ecs, dbt_mart_uts]
 [dbt_mart_ecs, dbt_mart_uts] >> dbt_test >> summary
 
