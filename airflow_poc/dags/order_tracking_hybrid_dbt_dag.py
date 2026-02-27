@@ -209,17 +209,16 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f venv/bin/activate ] && source venv/bin/activate
-        # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
-        echo "Extracting ecs_order_info using pipeline timestamp_only strategy"
+        END_TIME="{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
+        echo "[$(date -u +%H:%M:%S)] [ecs] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
         python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['ecs']['full_name']} \
             --json-output /tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
+            --end-time "$END_TIME"
         ''',
         dag=dag
     )
@@ -230,17 +229,16 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f venv/bin/activate ] && source venv/bin/activate
-        # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
-        echo "Extracting uni_tracking_info using pipeline timestamp_only strategy"
+        END_TIME="{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
+        echo "[$(date -u +%H:%M:%S)] [uti] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
         python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['uti']['full_name']} \
             --json-output /tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
+            --end-time "$END_TIME"
         ''',
         dag=dag
     )
@@ -251,17 +249,16 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         set -e
         cd {SYNC_TOOL_PATH}
         [ -f venv/bin/activate ] && source venv/bin/activate
-        [ -f venv/bin/activate ] && source venv/bin/activate
-        # [ -f .env ] && source .env # Disable .env sourcing to prevent overwriting Docker env vars
 
-        echo "Extracting uni_tracking_spath using pipeline timestamp_only strategy"
+        END_TIME="{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
+        echo "[$(date -u +%H:%M:%S)] [uts] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
         python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['uts']['full_name']} \
             --json-output /tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
-            --end-time "{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
+            --end-time "$END_TIME"
         ''',
         dag=dag
     )
@@ -567,8 +564,13 @@ dbt_mart_uti = BashOperator(
     task_id='dbt_mart_uti',
     bash_command=DBT_WITH_TUNNEL + f'''
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_info"
-    dbt run --select mart_uni_tracking_info --profiles-dir .
-    echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_info complete"
+    dbt run --select mart_uni_tracking_info --profiles-dir . --debug \
+        > /tmp/dbt_uti_debug.log 2>&1
+    DBT_EXIT=$?
+    grep -E "(START sql|OK created|On model\.|post.hook|select coalesce.max|ERROR|WARN)" /tmp/dbt_uti_debug.log \
+        || true
+    echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_info complete (exit=$DBT_EXIT)"
+    exit $DBT_EXIT
 ''' + DBT_CLEANUP_TUNNEL,
     env=dbt_env_vars,
     execution_timeout=timedelta(minutes=10),
@@ -590,7 +592,7 @@ dbt_mart_ecs = BashOperator(
     dbt run --select mart_ecs_order_info --profiles-dir . --debug \
         > /tmp/dbt_ecs_debug.log 2>&1
     DBT_EXIT=$?
-    grep -E "(START sql|OK created|On model\.|post.hook|ERROR|WARN)" /tmp/dbt_ecs_debug.log \
+    grep -E "(START sql|OK created|On model\.|post.hook|select coalesce.max|ERROR|WARN)" /tmp/dbt_ecs_debug.log \
         || true
     echo "[$(date -u +%H:%M:%S)] mart_ecs_order_info complete (exit=$DBT_EXIT)"
     exit $DBT_EXIT
@@ -604,8 +606,13 @@ dbt_mart_uts = BashOperator(
     task_id='dbt_mart_uts',
     bash_command=DBT_WITH_TUNNEL + f'''
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_spath"
-    dbt run --select mart_uni_tracking_spath --profiles-dir .
-    echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_spath complete"
+    dbt run --select mart_uni_tracking_spath --profiles-dir . --debug \
+        > /tmp/dbt_uts_debug.log 2>&1
+    DBT_EXIT=$?
+    grep -E "(START sql|OK created|On model\.|post.hook|select coalesce.max|ERROR|WARN)" /tmp/dbt_uts_debug.log \
+        || true
+    echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_spath complete (exit=$DBT_EXIT)"
+    exit $DBT_EXIT
 ''' + DBT_CLEANUP_TUNNEL,
     env=dbt_env_vars,
     execution_timeout=timedelta(minutes=10),
