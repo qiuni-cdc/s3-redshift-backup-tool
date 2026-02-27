@@ -29,7 +29,7 @@
 #}
 
 {%- set source_cutoff_query -%}
-    select coalesce(max(add_time), 0) - 1800 from {{ this }}
+    select coalesce(max(add_time), 0) - 7200 from settlement_public.ecs_order_info_raw
 {%- endset -%}
 
 {%- set source_cutoff = 0 -%}
@@ -83,7 +83,7 @@ with filtered as (
     select *
     from settlement_public.ecs_order_info_raw
     {% if is_incremental() %}
-    where add_time > {{ source_cutoff }} -- 30-min source scan: only latest extraction batch
+    where add_time > {{ source_cutoff }} -- 2h source scan from raw's latest (raw-relative, not mart-relative)
     {% if var('source_end_time', none) %}
     and add_time <= {{ var('source_end_time') }} -- optional cap for testing
     {% endif %}

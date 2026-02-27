@@ -5,8 +5,12 @@ Order Tracking Daily Monitoring
 Runs every day at 2am UTC (off-peak). Covers two concerns:
 
 1. DATA QUALITY CHECKS (§12 of order_tracking_final_design.md)
-   Three SQL checks that write unresolved issues to order_tracking_exceptions.
-   The exceptions table is the single place to monitor — any unresolved row = alert.
+   Four checks that catch extraction gaps and mart integrity issues.
+
+   Test 0 — Extraction count comparison (MySQL vs Redshift raw)
+     Counts rows in a closed 2-hour window in both MySQL source and Redshift raw.
+     Any gap > 0 = rows dropped during extraction or Redshift COPY.
+     Raises directly (does not write to exceptions — this is an infrastructure alert).
 
    Test 1 — UTI/UTS time alignment
      update_time in mart_uti should equal MAX(pathTime) in mart_uts.
@@ -68,6 +72,29 @@ HIST_UTS_TABLES = [
 
 VACUUM_SORT_THRESHOLD_PCT = 15  # trigger VACUUM SORT ONLY when unsorted % exceeds this
 
+# DQ checks only inspect orders active within this lookback window.
+# Stale orders can't develop *new* issues today, and pre-existing issues are
+# already in the exceptions table from a prior run.
+# 48h = 2× the daily schedule cadence — guarantees no gap between runs.
+DQ_LOOKBACK_HOURS = 48
+DQ_LOOKBACK_SECS  = DQ_LOOKBACK_HOURS * 3600
+
+# Extraction count check (Test 0)
+# MySQL source host — direct internal connection (no SSH tunnel; server-side only)
+MYSQL_SOURCE_HOST = os.environ.get('MYSQL_SOURCE_HOST', 'us-west-2.ro.db.uniuni.com.internal')
+MYSQL_SOURCE_PORT = int(os.environ.get('MYSQL_SOURCE_PORT', '3306'))
+
+# Buffer matches calc_window (5 min); 2h window stays safely inside raw table's 24h retention
+EXTRACTION_BUFFER_SECS = 5 * 60
+EXTRACTION_WINDOW_SECS = 2 * 3600
+
+# (mysql_table, mysql_ts_col, raw_table, raw_ts_col) — all timestamps are unix epoch integers
+EXTRACTION_CHECK_TABLES = [
+    ('ecs', 'kuaisong.ecs_order_info',     'add_time',    'settlement_public.ecs_order_info_raw',      'add_time'),
+    ('uti', 'kuaisong.uni_tracking_info',  'update_time', 'settlement_public.uni_tracking_info_raw',   'update_time'),
+    ('uts', 'kuaisong.uni_tracking_spath', 'pathTime',    'settlement_public.uni_tracking_spath_raw',  'pathTime'),
+]
+
 # ============================================================================
 # DAG DEFINITION
 # ============================================================================
@@ -106,9 +133,109 @@ def get_conn(autocommit=False):
     conn.autocommit = autocommit
     return conn
 
+def get_mysql_conn():
+    """
+    Direct MySQL connection using env vars. No SSH tunnel — runs server-side only
+    where the internal host is reachable. Uses pymysql (ships with airflow-providers-mysql).
+    """
+    import pymysql
+    return pymysql.connect(
+        host=MYSQL_SOURCE_HOST,
+        port=MYSQL_SOURCE_PORT,
+        user=os.environ.get('DB_USER'),
+        password=os.environ.get('DB_US_PROD_RO_PASSWORD'),
+        database='kuaisong',
+        connect_timeout=30,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+
 # ============================================================================
 # TASK GROUP 1: DATA QUALITY CHECKS
 # ============================================================================
+
+def dq_extraction_count_check(**context):
+    """
+    Test 0 — Extraction count comparison (MySQL vs Redshift raw).
+
+    Queries both MySQL source and Redshift *_raw tables for the same closed 2-hour
+    window ending at now-5min (the same 5-min buffer used by calc_window).
+
+    Any table where MySQL count > Redshift raw count signals rows were dropped during
+    extraction or Redshift COPY. Raises directly — this is an infrastructure alert,
+    not a data exception. Does NOT write to order_tracking_exceptions.
+
+    Window: [now - 2h - 5min,  now - 5min)
+    Alarm condition: mysql_count > raw_count  (gap > 0)
+
+    Notes:
+    - All three tables use unix epoch integers for their timestamp columns.
+    - uni_tracking_info rows can appear more than once in raw (same order updated in
+      multiple cycles); raw_count >= mysql_count is normal for uti — alarm only triggers
+      if raw_count < mysql_count (missed extractions).
+    - ecs and uts rows are immutable after creation so exact match is expected.
+    """
+    import time as _time
+
+    to_unix   = int(_time.time()) - EXTRACTION_BUFFER_SECS
+    from_unix = to_unix - EXTRACTION_WINDOW_SECS
+
+    log.info(
+        "Test 0: extraction count window [%d, %d)  UTC %s → %s",
+        from_unix, to_unix,
+        datetime.utcfromtimestamp(from_unix).strftime('%Y-%m-%d %H:%M:%S'),
+        datetime.utcfromtimestamp(to_unix).strftime('%Y-%m-%d %H:%M:%S'),
+    )
+
+    gaps   = []
+    mysql_conn = None
+    rs_conn    = None
+
+    try:
+        mysql_conn = get_mysql_conn()
+        rs_conn    = get_conn()
+        mysql_cur  = mysql_conn.cursor()
+        rs_cur     = rs_conn.cursor()
+
+        for name, mysql_table, mysql_ts, raw_table, raw_ts in EXTRACTION_CHECK_TABLES:
+            # MySQL — parameterised query (safe)
+            mysql_cur.execute(
+                f"SELECT COUNT(*) AS cnt FROM {mysql_table} "
+                f"WHERE {mysql_ts} >= %s AND {mysql_ts} < %s",
+                (from_unix, to_unix),
+            )
+            row = mysql_cur.fetchone()
+            mysql_cnt = row['cnt'] if isinstance(row, dict) else row[0]
+
+            # Redshift raw — integer literals are safe (no user input)
+            rs_cur.execute(
+                f"SELECT COUNT(*) FROM {raw_table} "
+                f"WHERE {raw_ts} >= {from_unix} AND {raw_ts} < {to_unix}"
+            )
+            rs_cnt = rs_cur.fetchone()[0]
+
+            gap    = mysql_cnt - rs_cnt
+            status = "OK" if gap <= 0 else f"GAP={gap:,}"
+            log.info("  [%s] MySQL=%s  Redshift_raw=%s  %s", name, f"{mysql_cnt:,}", f"{rs_cnt:,}", status)
+
+            if gap > 0:
+                gaps.append(f"{name}: MySQL={mysql_cnt:,}, Redshift_raw={rs_cnt:,}, missing={gap:,}")
+
+    finally:
+        for c in [mysql_conn, rs_conn]:
+            try:
+                if c:
+                    c.close()
+            except Exception:
+                pass
+
+    if gaps:
+        raise ValueError(
+            f"Test 0 FAILED — extraction gaps in window [{from_unix}, {to_unix}): "
+            + "; ".join(gaps)
+        )
+
+    log.info("Test 0 PASSED — all tables match (MySQL source vs Redshift raw)")
+
 
 def dq_uti_uts_alignment(**context):
     """
@@ -118,13 +245,15 @@ def dq_uti_uts_alignment(**context):
     update_time should equal MAX(pathTime) for that order.
     Mismatch indicates: backdated update_time, missed extraction, or uti/uts drift.
 
+    Only inspects orders active within the last DQ_LOOKBACK_HOURS (48h).
+    Older orders can't have new mismatches; pre-existing ones are already in exceptions.
+
     Writes unresolved mismatches to order_tracking_exceptions as 'UTI_UTS_TIME_MISMATCH'.
     Expected result: 0 rows inserted.
     """
     conn = get_conn()
     cur = conn.cursor()
 
-    # Find mismatches and insert new unresolved ones into exceptions
     sql = f"""
         INSERT INTO {EXCEPTIONS} (order_id, exception_type, detected_at, notes)
         SELECT
@@ -136,6 +265,7 @@ def dq_uti_uts_alignment(**context):
                 || ' diff=' || (uti.update_time - MAX(uts.pathTime))::varchar || 's'
         FROM {MART_UTI} uti
         JOIN {MART_UTS} uts ON uti.order_id = uts.order_id
+        WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
         GROUP BY uti.order_id, uti.update_time
         HAVING uti.update_time <> MAX(uts.pathTime)
           AND NOT EXISTS (
@@ -163,6 +293,9 @@ def dq_missing_spath(**context):
     Checks mart_uts first. If not there, checks each hist_uts table.
     Missing from all = genuine data integrity issue.
 
+    Only inspects orders active within the last DQ_LOOKBACK_HOURS (48h).
+    Newly appeared orders that have no spath events are the real concern here.
+
     Writes to order_tracking_exceptions as 'ORDER_MISSING_SPATH'.
     Expected result: 0 rows inserted.
 
@@ -172,7 +305,6 @@ def dq_missing_spath(**context):
     conn = get_conn()
     cur = conn.cursor()
 
-    # Build the hist_uts NOT EXISTS clauses dynamically
     hist_not_exists = '\n'.join([
         f"AND NOT EXISTS (SELECT 1 FROM {tbl} h WHERE h.order_id = uti.order_id)"
         for tbl in HIST_UTS_TABLES
@@ -186,9 +318,10 @@ def dq_missing_spath(**context):
             CURRENT_TIMESTAMP,
             'No spath events in mart_uts or any hist_uts table'
         FROM {MART_UTI} uti
-        WHERE NOT EXISTS (
+        WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
+          AND NOT EXISTS (
             SELECT 1 FROM {MART_UTS} uts WHERE uts.order_id = uti.order_id
-        )
+          )
         {hist_not_exists}
           AND NOT EXISTS (
               SELECT 1 FROM {EXCEPTIONS} ex
@@ -216,6 +349,9 @@ def dq_reactivated_missing_ecs(**context):
     mart_ecs trimmed the ecs row when the order went dormant. The ecs extraction
     watermark (add_time-based) won't re-extract an old creation row.
 
+    Only inspects orders active within the last DQ_LOOKBACK_HOURS (48h).
+    A reactivated order must have a recent update_time to appear here.
+
     Manual fix required: restore ecs row from hist_ecs, delete stale hist entry.
     See: order_tracking_final_design.md §5 (mart_ecs reactivation).
 
@@ -234,7 +370,8 @@ def dq_reactivated_missing_ecs(**context):
             'Order in mart_uti but not in mart_ecs — restore from hist_ecs manually'
         FROM {MART_UTI} uti
         LEFT JOIN {MART_ECS} ecs ON uti.order_id = ecs.order_id
-        WHERE ecs.order_id IS NULL
+        WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
+          AND ecs.order_id IS NULL
           AND NOT EXISTS (
               SELECT 1 FROM {EXCEPTIONS} ex
               WHERE ex.order_id = uti.order_id
@@ -426,6 +563,12 @@ def vacuum_mart_ecs_sort(**context):
 # ============================================================================
 
 with TaskGroup("dq_checks", dag=dag) as dq_group:
+
+    task_dq_test0 = PythonOperator(
+        task_id='dq_extraction_count_check',
+        python_callable=dq_extraction_count_check,
+        dag=dag
+    )
 
     task_dq_test1 = PythonOperator(
         task_id='dq_uti_uts_alignment',

@@ -273,12 +273,17 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
 # ============================================================================
 
 def validate_extractions(**context):
-    """Validate all extractions completed successfully."""
+    """
+    Validate all extractions completed successfully.
+    Raises on any failure or error so dbt tasks are blocked from running on bad data.
+    Zero-row extractions are logged as warnings but do not fail (legitimate at off-peak).
+    """
     ds_nodash = context['ds_nodash']
     ts_nodash = context['ts_nodash']
 
     results = {}
     total_rows = 0
+    failed = []
 
     print("Extraction Results:")
     print("-" * 40)
@@ -294,13 +299,18 @@ def validate_extractions(**context):
                 rows = result.get('summary', {}).get('total_rows_processed', 0)
                 results[table_key] = {'status': 'success', 'rows': rows}
                 total_rows += rows
-                print(f"  {table_key}: {rows:,} rows")
+                if rows == 0:
+                    print(f"  {table_key}: 0 rows (warning — no new data this cycle)")
+                else:
+                    print(f"  {table_key}: {rows:,} rows")
             else:
                 error = result.get('error', 'Unknown')
                 results[table_key] = {'status': 'failed', 'error': error}
+                failed.append(f"{table_key}: {error}")
                 print(f"  {table_key}: FAILED - {error}")
         except Exception as e:
             results[table_key] = {'status': 'error', 'error': str(e)}
+            failed.append(f"{table_key}: {str(e)}")
             print(f"  {table_key}: ERROR - {str(e)}")
 
     print("-" * 40)
@@ -308,6 +318,12 @@ def validate_extractions(**context):
 
     context['task_instance'].xcom_push(key='extraction_results', value=results)
     context['task_instance'].xcom_push(key='total_rows', value=total_rows)
+
+    if failed:
+        raise ValueError(
+            f"Extraction failed for {len(failed)} table(s) — dbt blocked: "
+            + "; ".join(failed)
+        )
 
     return results
 
