@@ -23,7 +23,9 @@ ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY update_time DESC)
 ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY update_time DESC, id DESC)
 ```
 
-**Status:** ✅ Fixed — `mart_uni_tracking_info.sql`
+**Blocker:** Fix was applied with `id desc` but `uni_tracking_info_raw` has no column named `id` → caused `dbt_mart_uti` to fail in production. Reverted. Need to run `SELECT column_name FROM information_schema.columns WHERE table_name = 'uni_tracking_info_raw'` to find the actual unique row ID column name before re-applying.
+
+**Status:** ⚠️ Reverted — column name needs verification before re-applying
 
 ---
 
@@ -131,12 +133,154 @@ Run `compare_pipelines.py --table ecs` monthly to check mismatch rate between le
 
 ---
 
+---
+
+## Issue 6 — mart_uts archive NOT IN guard too broad · **High**
+
+**File:** `dbt_projects/order_tracking/models/mart/mart_uni_tracking_spath.sql`, post_hook step 1a
+
+**Problem:**
+mart_uts has MANY rows per order. Spath events age out incrementally — a few more events cross the 6-month line with each 15-min cycle. On the first cycle an order's events start aging out, some events get archived and the `order_id` is now in hist. On the next cycle, the `NOT IN (SELECT order_id ...)` guard blocks ALL remaining events for that order from ever being archived. They get flagged as `ARCHIVE_ROUTING_GAP_UTS` by the safety check and accumulate in mart_uts permanently (excluded from trim, never archived). The table grows without bound.
+
+The comment in the file even says *"NOT IN guard filters by (order_id, pathTime range) — more specific than order_id alone"* but the actual SQL only uses `order_id`. Comment and code disagree.
+
+**Current code:**
+```sql
+AND order_id NOT IN (
+    SELECT order_id FROM settlement_ods.hist_uni_tracking_spath_2025_h2
+    WHERE pathTime >= extract(epoch from '2025-07-01'::timestamp)
+)
+```
+
+**Fix:** Use `NOT EXISTS` on `(order_id, pathTime)` pair and alias the outer query:
+```sql
+-- outer SELECT * becomes SELECT m.*  FROM {{ this }} m
+AND NOT EXISTS (
+    SELECT 1 FROM settlement_ods.hist_uni_tracking_spath_2025_h2 h
+    WHERE h.order_id = m.order_id AND h.pathTime = m.pathTime
+)
+```
+
+**Status:** ☐ Open
+
+---
+
+## Issue 7 — mart_ecs missing safety check before trim · **High**
+
+**File:** `dbt_projects/order_tracking/models/mart/mart_ecs_order_info.sql`
+
+**Problem:**
+mart_uti (4 steps) and mart_uts (3 steps) both have a safety check step that catches unarchived rows before trim. mart_ecs goes directly archive → trim (2 steps) with no guard.
+
+If an inactive order's `add_time` falls outside all defined hist periods (e.g., an order created in Jan 2026+ with no 2026_h1 period defined), step 1a skips it and step 2 silently deletes it. No exception is logged, no alert fires.
+
+**Fix:**
+Add a step 1b safety check between archive and trim:
+```sql
+-- Step 1b: catch inactive orders whose add_time doesn't match any hist_ecs period
+INSERT INTO settlement_ods.order_tracking_exceptions (order_id, exception_type, detected_at, notes)
+SELECT DISTINCT ecs.order_id, 'ARCHIVE_ROUTING_GAP_ECS', CURRENT_TIMESTAMP,
+    'Inactive ECS order (add_time outside all defined hist_ecs periods) — excluded from trim'
+FROM {{ this }} ecs
+LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id
+WHERE uti.order_id IS NULL
+  AND ecs.add_time NOT BETWEEN extract(epoch from '2025-07-01'::timestamp)
+                             AND extract(epoch from '2026-01-01'::timestamp)
+  -- add NOT BETWEEN blocks for each defined period as they are added
+  AND NOT EXISTS (
+      SELECT 1 FROM settlement_ods.order_tracking_exceptions
+      WHERE order_id = ecs.order_id
+        AND exception_type = 'ARCHIVE_ROUTING_GAP_ECS'
+        AND resolved_at IS NULL
+  )
+```
+Then update step 2 (trim) to exclude `ARCHIVE_ROUTING_GAP_ECS` exceptions.
+
+**Status:** ☐ Open
+
+---
+
+## Issue 8 — 2026_h1 hist period not defined · **High (time-sensitive)**
+
+**File:** `dbt_projects/order_tracking/dbt_project.yml`, all 3 mart model post_hooks
+
+**Problem:**
+`dbt_project.yml` only has `2025_h2` defined. The comment says "add 2026_h1 on 1 Jan 2026" — that date is already past (today is Feb 2026).
+
+Archiving won't actually trigger until ~Aug 2026 (6 months after the Feb 2026 pipeline start). When it does, rows with `update_time / pathTime / add_time` in `[2026-01-01, 2026-07-01)` will have no archive block defined, the safety checks will fire `ARCHIVE_ROUTING_GAP` exceptions, and marts will grow beyond the 6-month target.
+
+**What needs to happen before Aug 2026:**
+1. Create hist tables in Redshift: `hist_uni_tracking_info_2026_h1`, `hist_ecs_order_info_2026_h1`, `hist_uni_tracking_spath_2026_h1`
+2. Add `2026_h1` entry to `dbt_project.yml` `hist_periods`
+3. Add step 2b archive blocks to `mart_uni_tracking_info.sql` and `mart_uni_tracking_spath.sql`
+4. Add step 1b archive block to `mart_ecs_order_info.sql`
+5. Add `NOT EXISTS` checks for `hist_*_2026_h1` to safety check steps in all 3 mart models
+6. Update mart_uti step 1 table name to `hist_uni_tracking_info_2026_h1` (reactivation cleanup)
+
+**Status:** ☐ Open — not urgent today, deadline ~Aug 2026
+
+---
+
+## Issue 9 — `NOT IN` with potential NULLs in trim steps · **Medium**
+
+**Files:**
+- `mart_uni_tracking_info.sql` post_hook step 4
+- `mart_uni_tracking_spath.sql` post_hook step 3
+
+**Problem:**
+Both trim steps use `NOT IN (SELECT order_id FROM exceptions WHERE ...)`. If `order_tracking_exceptions` ever contains a row with `NULL` order_id, `NOT IN` returns `UNKNOWN` for every candidate row — the entire trim silently deletes nothing. The mart table grows without bound and no error is raised.
+
+**Fix:** Add `AND order_id IS NOT NULL` to both subqueries:
+```sql
+-- mart_uti step 4 (and mart_uts step 3 — same pattern):
+AND order_id NOT IN (
+    SELECT order_id FROM settlement_ods.order_tracking_exceptions
+    WHERE exception_type = 'ARCHIVE_ROUTING_GAP'
+      AND resolved_at IS NULL
+      AND order_id IS NOT NULL   -- ← add this
+)
+```
+
+**Status:** ☐ Open
+
+---
+
+## Issue 10 — stg_ecs_order_info.sql comment says "merge" · **Cosmetic**
+
+**File:** `dbt_projects/order_tracking/models/staging/stg_ecs_order_info.sql`, line 40
+
+**Problem:** Comment says `Strategy: merge` but the model uses `incremental_strategy='delete+insert'`.
+
+**Fix:** Update comment to `Strategy: delete+insert`.
+
+**Status:** ☐ Open
+
+---
+
+## Issue 11 — Monitoring DAG docstring says 2am, schedule is 3am · **Cosmetic**
+
+**File:** `dags/order_tracking_daily_monitoring.py`, line 5
+
+**Problem:** Docstring says `Runs every day at 2am UTC` but actual schedule is `0 3 * * *` (3am UTC).
+
+**Fix:** Update docstring to 3am.
+
+**Status:** ☐ Open
+
+---
+
 ## Summary
 
-| # | Issue | Severity | Fix effort | Status |
-|---|---|---|---|---|
-| 1 | Tie-break missing in mart_uti ranked CTE | Medium | 1 line in dbt SQL | ✅ Fixed |
-| 2 | ecs_order_info_raw never trimmed | Medium | 1 line in trim_raw_tables | ✅ Fixed |
-| 3 | HIST_UTS_TABLES hardcoded in monitoring | Low | Replace hardcode with pg_tables query | ✅ Fixed |
-| 4 | VACUUM SORT runs unconditionally | Low | DBA permission grant required | ☐ Blocked |
-| 5 | ECS field change gap | Low | Monitor only for now | ☐ Watch |
+| # | Issue | Severity | Status |
+|---|---|---|---|
+| 1 | Tie-break missing in mart_uti ranked CTE | Medium | ✅ Fixed |
+| 2 | ecs_order_info_raw never trimmed | Medium | ✅ Fixed |
+| 3 | HIST_UTS_TABLES hardcoded in monitoring | Low | ✅ Fixed |
+| 4 | VACUUM SORT runs unconditionally | Low | ☐ Blocked (DBA) |
+| 5 | ECS field change gap | Low | ☐ Watch |
+| 6 | mart_uts archive NOT IN guard too broad | High | ☐ Open |
+| 7 | mart_ecs missing safety check before trim | High | ☐ Open |
+| 8 | 2026_h1 hist period not defined | High (Aug 2026 deadline) | ☐ Open |
+| 9 | NOT IN with NULL risk in trim steps | Medium | ☐ Open |
+| 10 | stg_ecs comment says "merge" | Cosmetic | ☐ Open |
+| 11 | Monitoring docstring says 2am | Cosmetic | ☐ Open |
