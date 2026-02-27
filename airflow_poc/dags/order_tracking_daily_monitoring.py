@@ -50,13 +50,6 @@ MART_ECS = f'{MART_SCHEMA}.mart_ecs_order_info'
 MART_UTS = f'{MART_SCHEMA}.mart_uni_tracking_spath'
 EXCEPTIONS = f'{MART_SCHEMA}.order_tracking_exceptions'
 
-# hist_uts tables — extend this list when new 6-month splits are created (1 Jan / 1 Jul)
-HIST_UTS_TABLES = [
-    f'{MART_SCHEMA}.hist_uni_tracking_spath_2025_h2',
-    f'{MART_SCHEMA}.hist_uni_tracking_spath_2026_h1',
-    # f'{MART_SCHEMA}.hist_uni_tracking_spath_2026_h2',  # add on 1 Jul 2026
-]
-
 # DQ checks only inspect orders active within this lookback window.
 # Stale orders can't develop *new* issues today, and pre-existing issues are
 # already in the exceptions table from a prior run.
@@ -107,6 +100,21 @@ dag = DAG(
 # ============================================================================
 # HELPER: get Redshift connection (normal mode for DQ, autocommit for VACUUM)
 # ============================================================================
+
+def _get_hist_uts_tables(cur):
+    """
+    Return all hist_uni_tracking_spath_* tables that exist in Redshift.
+    Queried dynamically so Test 2 stays correct after each 6-month period rotation
+    without any code change.
+    """
+    cur.execute(
+        "SELECT schemaname || '.' || tablename FROM pg_tables "
+        "WHERE schemaname = %s AND tablename LIKE 'hist_uni_tracking_spath_%%' "
+        "ORDER BY tablename",
+        (MART_SCHEMA,),
+    )
+    return [row[0] for row in cur.fetchall()]
+
 
 def get_conn(autocommit=False):
     host     = os.environ.get('REDSHIFT_HOST', 'redshift-dw.qa.uniuni.com')
@@ -289,9 +297,12 @@ def dq_missing_spath(**context):
     conn = get_conn()
     cur = conn.cursor()
 
+    hist_uts_tables = _get_hist_uts_tables(cur)
+    log.info("Test 2: checking %d hist_uts table(s): %s", len(hist_uts_tables), hist_uts_tables)
+
     hist_not_exists = '\n'.join([
         f"AND NOT EXISTS (SELECT 1 FROM {tbl} h WHERE h.order_id = uti.order_id)"
-        for tbl in HIST_UTS_TABLES
+        for tbl in hist_uts_tables
     ])
 
     sql = f"""

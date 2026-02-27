@@ -101,7 +101,7 @@ ranked as (
         *,
         row_number() over (
             partition by order_id
-            order by update_time desc
+            order by update_time desc, id desc  -- id desc breaks ties for identical update_time
         ) as _rn
     from filtered
 )
