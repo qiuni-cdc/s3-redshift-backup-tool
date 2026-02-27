@@ -362,7 +362,8 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
                 
                 # Get next chunk of exactly chunk_size rows (or remaining)
                 chunk_data, chunk_last_timestamp, chunk_last_id = self._get_next_chunk(
-                    cursor, table_name, last_timestamp, last_id, current_chunk_size, timestamp_column, id_column
+                    cursor, table_name, last_timestamp, last_id, current_chunk_size, timestamp_column, id_column,
+                    end_time=current_timestamp
                 )
                 
                 if not chunk_data:
@@ -1016,14 +1017,15 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             return s3_stats.get('total_files', 0)
     
     def _get_next_chunk(
-        self, 
-        cursor, 
-        table_name: str, 
-        last_timestamp: str, 
-        last_id: int, 
+        self,
+        cursor,
+        table_name: str,
+        last_timestamp: str,
+        last_id: int,
         chunk_size: int,
         timestamp_column: str,
-        id_column: str
+        id_column: str,
+        end_time: Optional[str] = None
     ) -> Tuple[List[Dict], str, int]:
         """
         Get next chunk using timestamp + ID pagination.
@@ -1072,7 +1074,7 @@ class RowBasedBackupStrategy(BaseBackupStrategy):
             table_schema = self._get_table_schema(cursor, table_name)
             
             query = self.cdc_integration.build_incremental_query(
-                mysql_table_name, watermark, chunk_size, table_config, table_schema
+                mysql_table_name, watermark, chunk_size, table_config, table_schema, end_time=end_time
             )
             
             # Enhanced logging: Show FULL query (not truncated)

@@ -152,7 +152,7 @@ class CDCStrategy(ABC):
         self.strategy_name = config.strategy.value
         
     @abstractmethod
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None, end_time: Optional[str] = None) -> str:
         """Build SQL query for incremental data extraction"""
         pass
     
@@ -185,29 +185,46 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
     Maintains compatibility with existing 'updated_at' based systems.
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None, end_time: Optional[str] = None) -> str:
         """Build timestamp-based incremental query"""
         # SECURITY: Validate table name and column names
         if not _validate_sql_identifier(table_name):
             raise CDCSecurityError(f"Invalid table name: {table_name}")
-        
+
         timestamp_col = self.config.timestamp_column
         if not _validate_sql_identifier(timestamp_col):
             raise CDCSecurityError(f"Invalid timestamp column: {timestamp_col}")
-        
+
         # Extract watermark data with manual ID override support
         # Check for manual ID override (consistent with other CDC strategies)
         metadata = watermark.get('metadata', {})
         cdc_config = metadata.get('cdc_config', {})
-        
+
         # For timestamp-only strategy, manual ID can provide starting point
         manual_id_override = None
         if cdc_config.get('manual_id_set') and 'id_start_override' in cdc_config:
             manual_id_override = cdc_config['id_start_override']
             logger.info(f"Manual ID override detected for timestamp-only strategy: {manual_id_override}")
-            
+
         last_timestamp = watermark.get('last_mysql_data_timestamp')
-        
+
+        # Determine is_unix_timestamp upfront — needed for both lower and upper bound
+        col_type = ''
+        if self.config.timestamp_format == 'unix':
+            is_unix_timestamp = True
+            logger.info(f"Using UNIX timestamp (configured): {timestamp_col}")
+        elif self.config.timestamp_format == 'datetime':
+            is_unix_timestamp = False
+            logger.info(f"Using datetime format (configured): {timestamp_col}")
+        else:  # 'auto' or None
+            if table_schema and timestamp_col in table_schema:
+                col_type = table_schema[timestamp_col].lower()
+            is_unix_timestamp = any(t in col_type for t in ['int', 'bigint', 'tinyint', 'smallint', 'mediumint'])
+            if is_unix_timestamp:
+                logger.info(f"Using UNIX timestamp conversion for {timestamp_col} (type: {col_type})")
+            else:
+                logger.info(f"Using standard datetime for {timestamp_col} (type: {col_type})")
+
         if manual_id_override is not None:
             # Manual ID override takes precedence - use ID-based filtering
             # SECURITY: Validate ID override
@@ -219,37 +236,10 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
         elif last_timestamp:
             # SECURITY: Sanitize timestamp value
             safe_timestamp = _sanitize_sql_value(last_timestamp)
-            
-            # Determine if this is a UNIX timestamp column
-            # Check both configuration and column type for comprehensive detection
-            is_unix_timestamp = False
-            col_type = ''
-            
-            # Method 1: Check timestamp_format configuration (explicit)
-            if self.config.timestamp_format == 'unix':
-                is_unix_timestamp = True
-                logger.info(f"Using UNIX timestamp (configured): {timestamp_col}")
-            elif self.config.timestamp_format == 'datetime':
-                is_unix_timestamp = False
-                logger.info(f"Using datetime format (configured): {timestamp_col}")
-            elif self.config.timestamp_format == 'auto' or self.config.timestamp_format is None:
-                # Method 2: Auto-detect from column type (backward compatibility)
-                if table_schema and timestamp_col in table_schema:
-                    col_type = table_schema[timestamp_col].lower()
-                is_unix_timestamp = any(t in col_type for t in ['int', 'bigint', 'tinyint', 'smallint', 'mediumint'])
-                if is_unix_timestamp:
-                    logger.info(f"Using UNIX timestamp conversion for {timestamp_col} (type: {col_type})")
-                else:
-                    logger.info(f"Using standard datetime for {timestamp_col} (type: {col_type})")
-            
+
             # Build base WHERE clause
-            if is_unix_timestamp:
-                # Direct Unix timestamp comparison (value is already a Unix epoch integer)
-                base_where = f"{timestamp_col} > {safe_timestamp}"
-            else:
-                # Standard datetime comparison
-                base_where = f"{timestamp_col} > {safe_timestamp}"
-            
+            base_where = f"{timestamp_col} > {safe_timestamp}"
+
             # Add additional WHERE clause if specified (for index optimization)
             if self.config.additional_where:
                 where_clause = f"WHERE {self.config.additional_where} AND {base_where}"
@@ -260,7 +250,27 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
         else:
             # First run - no watermark
             where_clause = ""
-        
+
+        # Apply end_time upper bound (enforces 5-min buffer; also bounds first-run queries)
+        if end_time:
+            try:
+                clean_end = end_time.replace('T', ' ').split('.')[0].split('+')[0]
+                if is_unix_timestamp:
+                    from datetime import datetime as _dt
+                    end_unix = int(_dt.strptime(clean_end, '%Y-%m-%d %H:%M:%S').timestamp())
+                    upper_cond = f"{timestamp_col} < {end_unix}"
+                else:
+                    safe_end = _sanitize_sql_value(clean_end)
+                    upper_cond = f"{timestamp_col} < {safe_end}"
+
+                if where_clause:
+                    where_clause = where_clause + f" AND {upper_cond}"
+                else:
+                    where_clause = f"WHERE {upper_cond}"
+                logger.info(f"Applied end_time upper bound: {upper_cond}")
+            except Exception as e:
+                logger.warning(f"Failed to apply end_time upper bound: {e}. Query will run without upper bound.")
+
         # Build ordering - validate ordering columns
         if self.config.ordering_columns:
             # SECURITY: Validate all ordering columns
@@ -272,34 +282,35 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
             order_clause = f"ORDER BY {', '.join(safe_ordering_cols)}"
         else:
             order_clause = f"ORDER BY {timestamp_col}"
-        
+
         # SECURITY: Validate limit is positive integer
         if not isinstance(limit, int) or limit <= 0:
             raise CDCSecurityError(f"Invalid limit value: {limit}")
-        
+
         query = f"""
         SELECT * FROM {table_name}
         {where_clause}
         {order_clause}
         LIMIT {limit}
         """.strip()
-        
+
         # Enhanced logging: Output complete query for debugging
         logger.info(f"TimestampOnly CDC query built", extra={
             "table": table_name,
             "timestamp_column": timestamp_col,
             "last_timestamp": last_timestamp,
+            "end_time": end_time,
             "limit": limit,
             "is_unix_timestamp": is_unix_timestamp,
             "where_clause": where_clause,
             "complete_query": query  # Full query for debugging
         })
-        
+
         # Also log to console for immediate visibility
         print(f"[CDC DEBUG] Executing query for {table_name}:")
         print(f"[CDC DEBUG] Query: {query}")
-        print(f"[CDC DEBUG] Watermark: last_timestamp={last_timestamp}, is_unix={is_unix_timestamp}")
-        
+        print(f"[CDC DEBUG] Watermark: last_timestamp={last_timestamp}, end_time={end_time}, is_unix={is_unix_timestamp}")
+
         return query
     
     def extract_watermark_data(self, rows: List[Dict[str, Any]]) -> WatermarkData:
@@ -372,38 +383,49 @@ class HybridCDCStrategy(CDCStrategy):
     - High-frequency updates
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None, end_time: Optional[str] = None) -> str:
         """Build hybrid timestamp+ID incremental query"""
         # SECURITY: Validate table name and column names
         if not _validate_sql_identifier(table_name):
             raise CDCSecurityError(f"Invalid table name: {table_name}")
-        
+
         timestamp_col = self.config.timestamp_column
         if not _validate_sql_identifier(timestamp_col):
             raise CDCSecurityError(f"Invalid timestamp column: {timestamp_col}")
-        
-        id_col = self.config.id_column  
+
+        id_col = self.config.id_column
         if not _validate_sql_identifier(id_col):
             raise CDCSecurityError(f"Invalid ID column: {id_col}")
-        
+
         # Extract watermark data with manual ID override support
         last_timestamp = watermark.get('last_mysql_data_timestamp')
-        
+
         # Check for manual ID override (same logic as IdOnlyCDCStrategy)
         metadata = watermark.get('metadata', {})
         cdc_config = metadata.get('cdc_config', {})
-        
+
         # Priority: manual ID override > last_processed_id > default 0
         if cdc_config.get('manual_id_set') and 'id_start_override' in cdc_config:
             last_id = cdc_config['id_start_override']
             logger.info(f"Using manual ID override for {table_name}: {last_id}")
         else:
             last_id = watermark.get('last_processed_id', 0)
-        
+
         # SECURITY: Validate limit is positive integer
         if not isinstance(limit, int) or limit <= 0:
             raise CDCSecurityError(f"Invalid limit value: {limit}")
-        
+
+        # Determine is_unix_timestamp for end_time upper bound formatting
+        col_type = ''
+        if self.config.timestamp_format == 'unix':
+            is_unix_timestamp = True
+        elif self.config.timestamp_format == 'datetime':
+            is_unix_timestamp = False
+        else:  # 'auto' or None
+            if table_schema and timestamp_col in table_schema:
+                col_type = table_schema[timestamp_col].lower()
+            is_unix_timestamp = any(t in col_type for t in ['int', 'bigint', 'tinyint', 'smallint', 'mediumint'])
+
         # Check for manual ID override (takes precedence for hybrid strategy)
         if cdc_config.get('manual_id_set') and 'id_start_override' in cdc_config:
             # Manual ID override - use ID-only filtering for hybrid strategy
@@ -420,26 +442,47 @@ class HybridCDCStrategy(CDCStrategy):
         else:
             # First run - no watermark
             where_clause = ""
-        
+
+        # Apply end_time upper bound (enforces 5-min buffer; also bounds first-run queries)
+        if end_time:
+            try:
+                clean_end = end_time.replace('T', ' ').split('.')[0].split('+')[0]
+                if is_unix_timestamp:
+                    from datetime import datetime as _dt
+                    end_unix = int(_dt.strptime(clean_end, '%Y-%m-%d %H:%M:%S').timestamp())
+                    upper_cond = f"{timestamp_col} < {end_unix}"
+                else:
+                    safe_end = _sanitize_sql_value(clean_end)
+                    upper_cond = f"{timestamp_col} < {safe_end}"
+
+                if where_clause:
+                    where_clause = where_clause + f" AND {upper_cond}"
+                else:
+                    where_clause = f"WHERE {upper_cond}"
+                logger.info(f"Applied end_time upper bound: {upper_cond}")
+            except Exception as e:
+                logger.warning(f"Failed to apply end_time upper bound: {e}. Query will run without upper bound.")
+
         # Hybrid ordering: timestamp, then ID
         order_clause = f"ORDER BY {timestamp_col}, {id_col}"
-        
+
         query = f"""
         SELECT * FROM {table_name}
         {where_clause}
         {order_clause}
         LIMIT {limit}
         """.strip()
-        
+
         logger.info(f"Hybrid CDC query built", extra={
             "table": table_name,
             "timestamp_column": timestamp_col,
             "id_column": id_col,
             "last_timestamp": last_timestamp,
+            "end_time": end_time,
             "last_id": last_id,
             "limit": limit
         })
-        
+
         return query
     
     def extract_watermark_data(self, rows: List[Dict[str, Any]]) -> WatermarkData:
@@ -505,7 +548,7 @@ class IdOnlyCDCStrategy(CDCStrategy):
     - Append-only transaction records
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None, end_time: Optional[str] = None) -> str:
         """Build ID-based incremental query"""
         # SECURITY: Validate table name and column names
         if not _validate_sql_identifier(table_name):
@@ -613,7 +656,7 @@ class FullSyncStrategy(CDCStrategy):
         if self.sync_mode not in valid_modes:
             raise ValueError(f"Invalid full_sync_mode '{self.sync_mode}'. Must be one of: {valid_modes}")
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None, end_time: Optional[str] = None) -> str:
         """Build full sync query based on mode"""
         # SECURITY: Validate table name
         if not _validate_sql_identifier(table_name):
@@ -789,7 +832,7 @@ class CustomSQLStrategy(CDCStrategy):
     - {limit}: Row limit
     """
     
-    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None) -> str:
+    def build_query(self, table_name: str, watermark: Dict[str, Any], limit: int, table_schema: Optional[Dict[str, str]] = None, end_time: Optional[str] = None) -> str:
         """Build custom user-defined query"""
         # SECURITY: Validate all inputs
         if not _validate_sql_identifier(table_name):

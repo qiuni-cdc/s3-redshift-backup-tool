@@ -112,23 +112,24 @@ class CDCBackupIntegration:
         self._cdc_strategies[table_name] = cdc_strategy
         return cdc_strategy
     
-    def build_incremental_query(self, 
-                               table_name: str, 
+    def build_incremental_query(self,
+                               table_name: str,
                                watermark: Dict[str, Any],
                                limit: int,
                                table_config: Optional[Dict[str, Any]] = None,
-                               table_schema: Optional[Dict[str, str]] = None) -> str:
+                               table_schema: Optional[Dict[str, str]] = None,
+                               end_time: Optional[str] = None) -> str:
         """
         Build incremental query using appropriate CDC strategy
-        
+
         This replaces the hardcoded query building in existing backup strategies.
         """
         try:
             # Get CDC strategy for this table
             cdc_strategy = self.get_cdc_strategy(table_name, table_config)
-            
+
             # Build query using strategy
-            query = cdc_strategy.build_query(table_name, watermark, limit, table_schema)
+            query = cdc_strategy.build_query(table_name, watermark, limit, table_schema, end_time=end_time)
             
             logger.info(f"Built incremental query for {table_name}", extra={
                 "table": table_name,

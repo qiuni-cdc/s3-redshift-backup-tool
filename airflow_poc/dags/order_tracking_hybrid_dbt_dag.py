@@ -338,9 +338,17 @@ def trim_raw_tables(**context):
     conn.autocommit = True
     cur = conn.cursor()
 
+    # ecs_order_info_raw is NOT trimmed by add_time here.
+    # add_time is the order creation time (can be months old) — trimming by it would
+    # delete historical orders from the raw table before mart_ecs can process them,
+    # causing mart_ecs to fall behind mart_uti and breaking the 3-way JOIN.
+    # ecs_order_info_raw grows slowly (write-once, ~500K orders/day peak) and is
+    # self-limiting: mart_ecs post_hook trims inactive orders, so raw rows for those
+    # orders are no longer needed after dbt processes them.
+    # Cleanup strategy: manual or a separate task that deletes raw rows whose order_id
+    # is already safely in mart_ecs.
     tables = [
         ('settlement_public.uni_tracking_info_raw', 'update_time'),
-        ('settlement_public.ecs_order_info_raw',    'add_time'),
         ('settlement_public.uni_tracking_spath_raw', 'pathTime'),
     ]
 
@@ -348,6 +356,7 @@ def trim_raw_tables(**context):
     cutoff = "extract(epoch from current_timestamp - interval '24 hours')"
 
     print(f"Trimming raw tables (keeping last 24h) — host: {host}:{port}")
+    print(f"  settlement_public.ecs_order_info_raw: skipped (trimmed by order_id, not add_time)")
     for table, ts_col in tables:
         cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {ts_col} < {cutoff}")
         count = cur.fetchone()[0]
