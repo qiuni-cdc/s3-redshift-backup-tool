@@ -587,8 +587,13 @@ dbt_mart_ecs = BashOperator(
     task_id='dbt_mart_ecs',
     bash_command=DBT_WITH_TUNNEL + f'''
     echo "[$(date -u +%H:%M:%S)] Running mart_ecs_order_info"
-    dbt run --select mart_ecs_order_info --profiles-dir .
-    echo "[$(date -u +%H:%M:%S)] mart_ecs_order_info complete"
+    dbt run --select mart_ecs_order_info --profiles-dir . --debug \
+        > /tmp/dbt_ecs_debug.log 2>&1
+    DBT_EXIT=$?
+    grep -E "(START sql|OK created|On model\.|post.hook|ERROR|WARN)" /tmp/dbt_ecs_debug.log \
+        || true
+    echo "[$(date -u +%H:%M:%S)] mart_ecs_order_info complete (exit=$DBT_EXIT)"
+    exit $DBT_EXIT
 ''' + DBT_CLEANUP_TUNNEL,
     env=dbt_env_vars,
     execution_timeout=timedelta(minutes=10),
