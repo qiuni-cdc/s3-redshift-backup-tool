@@ -60,6 +60,7 @@ x-airflow-common: &airflow-common
   volumes:
     - ./dags:/opt/airflow/dags
     - ./dbt_projects:/opt/airflow/dbt_projects
+    - ./logs:/opt/airflow/logs
     # CRITICAL: Mount code root to SYNC_TOOL_PATH so 'cd {SYNC_TOOL_PATH}' works
     - ../:/opt/airflow/sync_tool
     # Mount SSH Key (Using absolute path /home/ubuntu instead of ~ or Windows paths)
