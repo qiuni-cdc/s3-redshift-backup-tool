@@ -135,7 +135,7 @@ def get_mysql_conn():
         host=MYSQL_SOURCE_HOST,
         port=MYSQL_SOURCE_PORT,
         user=os.environ.get('DB_USER'),
-        password=os.environ.get('DB_US_PROD_RO_PASSWORD'),
+        password=os.environ.get('DB_US_PROD_RO_PASSWORD') or os.environ.get('DB_PASSWORD'),
         database='kuaisong',
         connect_timeout=30,
         cursorclass=pymysql.cursors.DictCursor,
