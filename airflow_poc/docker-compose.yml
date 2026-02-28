@@ -40,6 +40,13 @@ x-airflow-common: &airflow-common
     # Note: REDSHIFT_SSH_KEY_PATH is still defined for backward compatibility
     - REDSHIFT_SSH_KEY_PATH=/keys/jasleentung.pem
     
+    # Alert SMTP — extraction lag emails
+    - ALERT_SMTP_HOST=smtp.office365.com
+    - ALERT_SMTP_PORT=587
+    - ALERT_SMTP_USER=jasleen.tung@uniuni.com
+    - ALERT_SMTP_PASSWORD=Guruji@2312ninety
+    - ALERT_EMAIL_TO=jasleen.tung@uniuni.com
+
     # S3 Configuration for Backfill
     - S3_BUCKET_NAME=redshift-dw-qa-uniuni-com
     - S3_REGION=us-west-2
