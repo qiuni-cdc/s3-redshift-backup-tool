@@ -25,6 +25,12 @@ DATA QUALITY CHECKS (§12 of order_tracking_final_design.md)
      Order in mart_uti with no matching row in mart_ecs.
      Happens when an order reactivates after its ecs row was archived to hist_ecs.
      Fix: restore from hist_ecs manually (see order_tracking_final_design.md §5).
+
+   Test 4 — Mart freshness (pipeline liveness check)
+     mart_uti and mart_uts must have been updated within 30 minutes.
+     Safety net for when the 15-min pipeline itself goes down — check_extraction_lag
+     only fires when that DAG is running. mart_ecs excluded (add_time is write-once).
+     Raises directly (infrastructure alert, not written to exceptions table).
 """
 
 from airflow import DAG
@@ -64,6 +70,11 @@ DQ_LOOKBACK_SECS  = DQ_LOOKBACK_HOURS * 3600
 # Buffer matches calc_window (5 min); 2h window stays safely inside raw table's 24h retention
 EXTRACTION_BUFFER_SECS = 5 * 60
 EXTRACTION_WINDOW_SECS = 2 * 3600
+
+# Mart freshness threshold (Test 4)
+# Pipeline runs every 15 min — mart should never be >30 min stale unless pipeline is down.
+# mart_ecs excluded: add_time is write-once (new orders only) so quiet periods are legitimate.
+MART_FRESHNESS_THRESHOLD_MIN = 30
 
 # (mysql_table, mysql_ts_col, raw_table, raw_ts_col) — all timestamps are unix epoch integers
 EXTRACTION_CHECK_TABLES = [
@@ -484,6 +495,60 @@ def check_unresolved_exceptions(**context):
         )
 
 
+def dq_mart_freshness(**context):
+    """
+    Test 4 — Mart freshness check.
+
+    Verifies that mart_uti and mart_uts were updated within MART_FRESHNESS_THRESHOLD_MIN.
+    This is the safety net for when the 15-min pipeline itself stops running —
+    check_extraction_lag in the 15-min DAG only fires if that DAG is running.
+
+    mart_ecs is excluded: add_time is write-once (new orders only), so during quiet
+    periods MAX(add_time) can look legitimately stale even when the pipeline is healthy.
+
+    Raises directly (infrastructure alert — not written to order_tracking_exceptions).
+    """
+    import time as _time
+
+    now = int(_time.time())
+    threshold_secs = MART_FRESHNESS_THRESHOLD_MIN * 60
+
+    checks = [
+        ('mart_uti', MART_UTI, 'update_time'),
+        ('mart_uts', MART_UTS, 'pathTime'),
+    ]
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    stale = []
+
+    try:
+        for name, table, ts_col in checks:
+            cur.execute(f"SELECT COALESCE(MAX({ts_col}), 0) FROM {table}")
+            max_ts  = cur.fetchone()[0]
+            lag_min = (now - max_ts) / 60
+            status  = "OK" if lag_min <= MART_FRESHNESS_THRESHOLD_MIN else f"STALE={lag_min:.1f}min"
+            log.info(
+                "  [%s] MAX(%s) = %s  lag=%.1fmin  %s",
+                name, ts_col,
+                datetime.utcfromtimestamp(max_ts).strftime('%Y-%m-%d %H:%M:%S') + ' UTC',
+                lag_min, status,
+            )
+            if lag_min > MART_FRESHNESS_THRESHOLD_MIN:
+                stale.append(f"{name}: {lag_min:.1f}min stale (threshold={MART_FRESHNESS_THRESHOLD_MIN}min)")
+    finally:
+        cur.close()
+        conn.close()
+
+    if stale:
+        raise ValueError(
+            "Test 4 FAILED — mart tables are stale (pipeline may be down): "
+            + "; ".join(stale)
+        )
+
+    log.info("Test 4 PASSED — mart_uti and mart_uts are fresh (within %dmin)", MART_FRESHNESS_THRESHOLD_MIN)
+
+
 # ============================================================================
 # DEFINE TASKS
 # ============================================================================
@@ -511,6 +576,12 @@ with TaskGroup("dq_checks", dag=dag) as dq_group:
     task_dq_test3 = PythonOperator(
         task_id='dq_reactivated_missing_ecs',
         python_callable=dq_reactivated_missing_ecs,
+        dag=dag
+    )
+
+    task_dq_test4 = PythonOperator(
+        task_id='dq_mart_freshness',
+        python_callable=dq_mart_freshness,
         dag=dag
     )
 
