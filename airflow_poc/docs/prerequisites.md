@@ -145,6 +145,50 @@ git stash drop     # discard stash — remote version is correct
 
 ---
 
+## 7. Runbook — stuck run recovery
+
+**Symptom:**
+- New cycles not starting despite the schedule firing
+- Airflow UI shows one run stuck in `running` state for >15 minutes
+- `max_active_runs=1` is blocked by the stuck run
+
+**Root causes:**
+- Container restarted mid-run (before the stuck run's tasks finished)
+- A task exhausted all retries and is in a terminal state but downstream tasks are in a non-terminal state (e.g. `None` with no scheduler picking them up)
+
+**Step 1 — identify the stuck run:**
+```bash
+docker exec airflow_poc-airflow-scheduler-1 \
+  airflow dags list-runs -d order_tracking_hybrid_dbt_sync 2>&1 | grep running
+```
+
+**Step 2 — check which tasks are stuck:**
+```bash
+docker exec airflow_poc-airflow-scheduler-1 \
+  airflow tasks states-for-dag-run order_tracking_hybrid_dbt_sync \
+  <execution_date_from_step_1> 2>&1 | tail -20
+```
+
+**Step 3 — clear the stuck run (Airflow 2.8 syntax):**
+```bash
+docker exec airflow_poc-airflow-scheduler-1 \
+  airflow tasks clear order_tracking_hybrid_dbt_sync \
+  -s <execution_date> -e <execution_date_plus_1min> --yes
+```
+
+Example:
+```bash
+docker exec airflow_poc-airflow-scheduler-1 \
+  airflow tasks clear order_tracking_hybrid_dbt_sync \
+  -s 2026-02-28T00:00:00 -e 2026-02-28T00:01:00 --yes
+```
+
+**What this does:** Resets all tasks in that run to `None`. The scheduler re-queues them and the run restarts from the beginning. Watermarks are S3-backed so no data is lost or duplicated.
+
+**Note:** `airflow dags clear` (v1 syntax) does not exist in Airflow 2.8 — use `airflow tasks clear` with `-s`/`-e` flags.
+
+---
+
 ## Summary checklist
 
 | # | Step | One-time | Recurring |
@@ -155,3 +199,4 @@ git stash drop     # discard stash — remote version is correct
 | 4 | Create Redshift hist tables | Before archiving triggers (~Aug 2026) | Every 6 months (period rotation) |
 | 5 | Create order_tracking_exceptions table | Before first run | — |
 | 6 | `git pull` before `docker compose up` | Every deploy | Every deploy |
+| 7 | Stuck run recovery | As needed | As needed |

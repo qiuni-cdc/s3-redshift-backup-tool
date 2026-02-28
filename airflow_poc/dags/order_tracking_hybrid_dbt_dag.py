@@ -220,12 +220,24 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         END_TIME="{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
         echo "[$(date -u +%H:%M:%S)] [ecs] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
+        RESULT_FILE="/tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json"
         python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['ecs']['full_name']} \
-            --json-output /tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
+            --json-output "$RESULT_FILE" \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
             --end-time "$END_TIME"
+
+        # Push compact result to XCom (last stdout line — stored in Postgres, survives container restarts)
+        python3 -c "
+import json
+try:
+    d=json.load(open('$RESULT_FILE'))
+    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or '')}}
+except Exception as e:
+    r={{'status':'error','rows':0,'error':str(e)}}
+print(json.dumps(r))
+" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed"}}'
         ''',
         dag=dag
     )
@@ -240,12 +252,24 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         END_TIME="{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
         echo "[$(date -u +%H:%M:%S)] [uti] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
+        RESULT_FILE="/tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json"
         python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['uti']['full_name']} \
-            --json-output /tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
+            --json-output "$RESULT_FILE" \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
             --end-time "$END_TIME"
+
+        # Push compact result to XCom (last stdout line — stored in Postgres, survives container restarts)
+        python3 -c "
+import json
+try:
+    d=json.load(open('$RESULT_FILE'))
+    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or '')}}
+except Exception as e:
+    r={{'status':'error','rows':0,'error':str(e)}}
+print(json.dumps(r))
+" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed"}}'
         ''',
         dag=dag
     )
@@ -260,12 +284,24 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         END_TIME="{{{{ task_instance.xcom_pull(task_ids='calculate_sync_window', key='sync_window')['to_ts'].replace('T', ' ').split('.')[0] }}}}"
         echo "[$(date -u +%H:%M:%S)] [uts] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
+        RESULT_FILE="/tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json"
         python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['uts']['full_name']} \
-            --json-output /tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json \
+            --json-output "$RESULT_FILE" \
             --initial-lookback-minutes {INCREMENTAL_LOOKBACK_MINUTES} \
             --end-time "$END_TIME"
+
+        # Push compact result to XCom (last stdout line — stored in Postgres, survives container restarts)
+        python3 -c "
+import json
+try:
+    d=json.load(open('$RESULT_FILE'))
+    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or '')}}
+except Exception as e:
+    r={{'status':'error','rows':0,'error':str(e)}}
+print(json.dumps(r))
+" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed"}}'
         ''',
         dag=dag
     )
@@ -296,11 +332,26 @@ def validate_extractions(**context):
         filepath = f'/tmp/hybrid_{table_key}_{ds_nodash}_{ts_nodash}.json'
 
         try:
-            with open(filepath, 'r') as f:
-                result = json.load(f)
+            # Primary: XCom stored in Airflow Postgres — survives container restarts.
+            # BashOperator pushes the last stdout line as return_value after extraction succeeds.
+            xcom_raw = context['task_instance'].xcom_pull(
+                task_ids=f'extraction.extract_{table_key}',
+                key='return_value'
+            )
+            if xcom_raw is not None:
+                xcom_data = json.loads(xcom_raw) if isinstance(xcom_raw, str) else xcom_raw
+                status = xcom_data.get('status', 'unknown')
+                rows   = xcom_data.get('rows', 0)
+                error  = xcom_data.get('error', '')
+            else:
+                # Fallback: /tmp file (same container, pre-XCom behaviour)
+                with open(filepath, 'r') as f:
+                    d = json.load(f)
+                status = d.get('status', 'unknown')
+                rows   = d.get('summary', {}).get('total_rows_processed', 0)
+                error  = str(d.get('error', '') or '')
 
-            if result.get('status') == 'success':
-                rows = result.get('summary', {}).get('total_rows_processed', 0)
+            if status == 'success':
                 results[table_key] = {'status': 'success', 'rows': rows}
                 total_rows += rows
                 if rows == 0:
@@ -308,7 +359,6 @@ def validate_extractions(**context):
                 else:
                     print(f"  {table_key}: {rows:,} rows")
             else:
-                error = result.get('error', 'Unknown')
                 results[table_key] = {'status': 'failed', 'error': error}
                 failed.append(f"{table_key}: {error}")
                 print(f"  {table_key}: FAILED - {error}")
