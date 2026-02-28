@@ -334,6 +334,7 @@ def validate_extractions(**context):
 validate = PythonOperator(
     task_id='validate_extractions',
     python_callable=validate_extractions,
+    retries=0,  # /tmp files are written by this container only — retrying never recovers a missing file
     dag=dag
 )
 
@@ -515,7 +516,7 @@ def check_extraction_lag(**context):
         if warnings:
             print(f"WARN  — {'; '.join(warnings)}")
         if errors:
-            print(f"ERROR — {'; '.join(errors)} — dbt blocked")
+            print(f"ERROR — {'; '.join(errors)} — alert sent, dbt will still run")
 
     finally:
         rs_conn.close()
@@ -534,18 +535,13 @@ def check_extraction_lag(**context):
         for key, r in lag_results.items():
             lag_min = r['lag_seconds'] / 60
             lines.append(f"  {key}: lag={lag_min:.1f}min  raw_max={r['raw_max']}")
-        if errors:
-            lines += ["", "dbt tasks have been BLOCKED. Check Airflow UI for details."]
-        else:
-            lines += ["", "dbt is running — monitor next cycle."]
+        lines += ["", "dbt is running — pipeline will self-heal as extractions catch up."]
 
         _send_lag_alert(subject, "\n".join(lines))
 
-    if errors:
-        raise AirflowException(
-            "Extraction lag threshold exceeded — dbt blocked: " + "; ".join(errors)
-        )
-
+    # Alert-only — never block dbt. Blocking dbt on lag makes recovery slower:
+    # raw data is already in the table; running dbt advances the mart.
+    # The email alert is the action signal — not the pipeline block.
     return lag_results
 
 check_lag = PythonOperator(
@@ -940,6 +936,7 @@ summary = PythonOperator(
     task_id='summary',
     python_callable=generate_summary,
     trigger_rule=TriggerRule.ALL_DONE,
+    retries=0,  # Reporter only — retrying a summary is pointless and blocks max_active_runs=1
     dag=dag
 )
 
