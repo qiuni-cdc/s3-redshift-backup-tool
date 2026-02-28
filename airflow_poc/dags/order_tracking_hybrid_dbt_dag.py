@@ -124,8 +124,7 @@ default_args = {
     'owner': 'data-team',
     'depends_on_past': False,
     'start_date': datetime(2025, 1, 7),
-    'email_on_failure': True,
-    'email': ['jasleen.tung@uniuni.com'],
+    'email_on_failure': False,  # Airflow SMTP not configured — alerts handled by custom smtplib in check_extraction_lag
     'retries': 2,
     'retry_delay': timedelta(minutes=3),
     'execution_timeout': timedelta(minutes=60),
@@ -404,8 +403,6 @@ trim_raw = PythonOperator(
 # Lag = CURRENT_TIMESTAMP - MAX(ts) in each raw table (Redshift-only, no MySQL needed).
 # uti/uts: WARN=20min, ERROR=30min  (high-frequency, tight SLA)
 # ecs:     WARN=60min, ERROR=120min (write-once add_time, quiet periods are legitimate)
-# When email_on_failure is enabled in default_args, ERROR auto-triggers email alert.
-
 def _send_lag_alert(subject, body):
     """Send SMTP alert for extraction lag. Failure is logged but never blocks the pipeline."""
     import smtplib
