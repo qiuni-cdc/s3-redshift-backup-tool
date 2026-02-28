@@ -221,7 +221,9 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
         echo "[$(date -u +%H:%M:%S)] [ecs] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
         RESULT_FILE="/tmp/hybrid_ecs_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json"
-        python -m src.cli.main sync pipeline \
+        # timeout 300: kills CLI if SSH tunnel gets stuck (broken pipe / reconnect loop).
+        # Without this the CLI can hang silently for 60 min until execution_timeout fires.
+        timeout 300 python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['ecs']['full_name']} \
             --json-output "$RESULT_FILE" \
@@ -253,7 +255,7 @@ print(json.dumps(r))
         echo "[$(date -u +%H:%M:%S)] [uti] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
         RESULT_FILE="/tmp/hybrid_uti_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json"
-        python -m src.cli.main sync pipeline \
+        timeout 300 python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['uti']['full_name']} \
             --json-output "$RESULT_FILE" \
@@ -285,7 +287,7 @@ print(json.dumps(r))
         echo "[$(date -u +%H:%M:%S)] [uts] Extraction window: to=$END_TIME (from: watermark — see script log)"
 
         RESULT_FILE="/tmp/hybrid_uts_{{{{ ds_nodash }}}}_{{{{ ts_nodash }}}}.json"
-        python -m src.cli.main sync pipeline \
+        timeout 300 python -m src.cli.main sync pipeline \
             -p {PIPELINE_NAME} \
             -t {TABLES['uts']['full_name']} \
             --json-output "$RESULT_FILE" \
