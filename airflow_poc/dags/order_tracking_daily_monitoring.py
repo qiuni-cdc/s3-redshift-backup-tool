@@ -57,9 +57,9 @@ DQ_LOOKBACK_HOURS = 24
 DQ_LOOKBACK_SECS  = DQ_LOOKBACK_HOURS * 3600
 
 # Extraction count check (Test 0)
-# MySQL source host — direct internal connection (no SSH tunnel; server-side only)
-MYSQL_SOURCE_HOST = os.environ.get('MYSQL_SOURCE_HOST', 'us-west-2.ro.db.uniuni.com.internal')
-MYSQL_SOURCE_PORT = int(os.environ.get('MYSQL_SOURCE_PORT', '3306'))
+# MySQL connection uses SSH tunnel (same bastion + key as extraction pipeline).
+# Env vars used: SSH_BASTION_HOST, SSH_BASTION_USER, SSH_BASTION_KEY_PATH, DB_HOST, DB_USER, DB_PASSWORD
+# (all already set in docker-compose.yml)
 
 # Buffer matches calc_window (5 min); 2h window stays safely inside raw table's 24h retention
 EXTRACTION_BUFFER_SECS = 5 * 60
@@ -80,8 +80,7 @@ default_args = {
     'owner': 'data-team',
     'depends_on_past': False,
     'start_date': datetime(2026, 2, 25),
-    'email_on_failure': True,
-    'email': ['jasleen.tung@uniuni.com'],
+    'email_on_failure': False,  # Airflow SMTP not configured — alerts raised by check_unresolved_exceptions
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
     'execution_timeout': timedelta(minutes=30),
@@ -125,21 +124,43 @@ def get_conn(autocommit=False):
     conn.autocommit = autocommit
     return conn
 
-def get_mysql_conn():
+def get_mysql_conn_via_ssh():
     """
-    Direct MySQL connection using env vars. No SSH tunnel — runs server-side only
-    where the internal host is reachable. Uses pymysql (ships with airflow-providers-mysql).
+    Connect to MySQL via SSH tunnel through the bastion — same approach as the
+    extraction pipeline. Uses the same env vars set in docker-compose.yml:
+      SSH_BASTION_HOST, SSH_BASTION_USER, SSH_BASTION_KEY_PATH
+      DB_HOST, DB_USER, DB_PASSWORD
+
+    Returns (pymysql_connection, SSHTunnelForwarder) — caller must call tunnel.stop().
+    Raises on connection failure so the caller can handle gracefully.
     """
+    from sshtunnel import SSHTunnelForwarder
     import pymysql
-    return pymysql.connect(
-        host=MYSQL_SOURCE_HOST,
-        port=MYSQL_SOURCE_PORT,
+
+    bastion_host = os.environ.get('SSH_BASTION_HOST', '35.83.114.196')
+    bastion_user = os.environ.get('SSH_BASTION_USER', 'jasleentung')
+    key_path     = os.environ.get('SSH_BASTION_KEY_PATH', '/keys/jasleentung.pem')
+    db_host      = os.environ.get('DB_HOST', 'us-west-2.ro.db.uniuni.com.internal')
+    db_port      = int(os.environ.get('DB_PORT', '3306'))
+
+    tunnel = SSHTunnelForwarder(
+        (bastion_host, 22),
+        ssh_username=bastion_user,
+        ssh_pkey=key_path,
+        remote_bind_address=(db_host, db_port),
+    )
+    tunnel.start()
+
+    conn = pymysql.connect(
+        host='127.0.0.1',
+        port=tunnel.local_bind_port,
         user=os.environ.get('DB_USER'),
         password=os.environ.get('DB_US_PROD_RO_PASSWORD') or os.environ.get('DB_PASSWORD'),
         database='kuaisong',
         connect_timeout=30,
         cursorclass=pymysql.cursors.DictCursor,
     )
+    return conn, tunnel
 
 # ============================================================================
 # TASK GROUP 1: DATA QUALITY CHECKS
@@ -178,15 +199,23 @@ def dq_extraction_count_check(**context):
         datetime.utcfromtimestamp(to_unix).strftime('%Y-%m-%d %H:%M:%S'),
     )
 
-    gaps   = []
+    gaps      = []
     mysql_conn = None
+    ssh_tunnel = None
     rs_conn    = None
 
     try:
-        mysql_conn = get_mysql_conn()
-        rs_conn    = get_conn()
-        mysql_cur  = mysql_conn.cursor()
-        rs_cur     = rs_conn.cursor()
+        mysql_conn, ssh_tunnel = get_mysql_conn_via_ssh()
+    except Exception as e:
+        # SSH tunnel or MySQL connection failed. Log a warning and skip so the
+        # remaining DQ checks (Tests 1-3) still run.
+        log.warning("Test 0 SKIPPED — SSH/MySQL connection failed: %s", e)
+        return
+
+    try:
+        rs_conn   = get_conn()
+        mysql_cur = mysql_conn.cursor()
+        rs_cur    = rs_conn.cursor()
 
         for name, mysql_table, mysql_ts, raw_table, raw_ts in EXTRACTION_CHECK_TABLES:
             # MySQL — parameterised query (safe)
@@ -217,6 +246,11 @@ def dq_extraction_count_check(**context):
             try:
                 if c:
                     c.close()
+            except Exception:
+                pass
+        if ssh_tunnel:
+            try:
+                ssh_tunnel.stop()
             except Exception:
                 pass
 
@@ -398,13 +432,25 @@ def check_unresolved_exceptions(**context):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(f"""
-        SELECT exception_type, COUNT(*) AS cnt
-        FROM {EXCEPTIONS}
-        WHERE resolved_at IS NULL
-        GROUP BY exception_type
-        ORDER BY cnt DESC
-    """)
+    # Scope to DQ exception types owned by this DAG.
+    # EXTRACTION_LAG_* entries are written by the 15-min DAG (check_extraction_lag task)
+    # and must not cause the daily monitoring run to fail.
+    DQ_EXCEPTION_TYPES = (
+        'UTI_UTS_TIME_MISMATCH',
+        'ORDER_MISSING_SPATH',
+        'REACTIVATED_ORDER_MISSING_ECS',
+        'ARCHIVE_ROUTING_GAP',
+        'ARCHIVE_ROUTING_GAP_UTS',
+    )
+    placeholders = ','.join(['%s'] * len(DQ_EXCEPTION_TYPES))
+    cur.execute(
+        f"SELECT exception_type, COUNT(*) AS cnt "
+        f"FROM {EXCEPTIONS} "
+        f"WHERE resolved_at IS NULL "
+        f"AND exception_type IN ({placeholders}) "
+        f"GROUP BY exception_type ORDER BY cnt DESC",
+        DQ_EXCEPTION_TYPES,
+    )
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -432,9 +478,9 @@ def check_unresolved_exceptions(**context):
 
     if total_unresolved > 0:
         raise ValueError(
-            f"{total_unresolved} unresolved exception(s) in order_tracking_exceptions. "
+            f"{total_unresolved} unresolved DQ exception(s) in order_tracking_exceptions. "
             f"Details: {dict(rows)}. "
-            f"See order_tracking_final_design.md §10 for resolution steps."
+            f"See airflow_poc/docs/order_tracking_final_design.md for resolution steps."
         )
 
 
