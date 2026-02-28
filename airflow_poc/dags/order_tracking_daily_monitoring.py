@@ -291,26 +291,33 @@ def dq_uti_uts_alignment(**context):
     conn = get_conn()
     cur = conn.cursor()
 
+    # Redshift does not support correlated subqueries (NOT EXISTS) in INSERT...SELECT.
+    # Fix: compute aggregation in a subquery first, then LEFT JOIN anti-pattern for dedup.
     sql = f"""
         INSERT INTO {EXCEPTIONS} (order_id, exception_type, detected_at, notes)
         SELECT
-            uti.order_id,
+            m.order_id,
             'UTI_UTS_TIME_MISMATCH',
             CURRENT_TIMESTAMP,
-            'update_time=' || uti.update_time::varchar
-                || ' max_pathTime=' || MAX(uts.pathTime)::varchar
-                || ' diff=' || (uti.update_time - MAX(uts.pathTime))::varchar || 's'
-        FROM {MART_UTI} uti
-        JOIN {MART_UTS} uts ON uti.order_id = uts.order_id
-        WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
-        GROUP BY uti.order_id, uti.update_time
-        HAVING uti.update_time <> MAX(uts.pathTime)
-          AND NOT EXISTS (
-              SELECT 1 FROM {EXCEPTIONS} ex
-              WHERE ex.order_id = uti.order_id
-                AND ex.exception_type = 'UTI_UTS_TIME_MISMATCH'
-                AND ex.resolved_at IS NULL
-          )
+            'update_time=' || m.update_time::varchar
+                || ' max_pathTime=' || m.max_path_time::varchar
+                || ' diff=' || (m.update_time - m.max_path_time)::varchar || 's'
+        FROM (
+            SELECT
+                uti.order_id,
+                uti.update_time,
+                MAX(uts.pathTime) AS max_path_time
+            FROM {MART_UTI} uti
+            JOIN {MART_UTS} uts ON uti.order_id = uts.order_id
+            WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
+            GROUP BY uti.order_id, uti.update_time
+            HAVING uti.update_time <> MAX(uts.pathTime)
+        ) m
+        LEFT JOIN {EXCEPTIONS} ex
+            ON ex.order_id = m.order_id
+            AND ex.exception_type = 'UTI_UTS_TIME_MISMATCH'
+            AND ex.resolved_at IS NULL
+        WHERE ex.order_id IS NULL
     """
     cur.execute(sql)
     inserted = cur.rowcount
@@ -345,10 +352,12 @@ def dq_missing_spath(**context):
     hist_uts_tables = _get_hist_uts_tables(cur)
     log.info("Test 2: checking %d hist_uts table(s): %s", len(hist_uts_tables), hist_uts_tables)
 
-    hist_not_exists = '\n'.join([
-        f"AND NOT EXISTS (SELECT 1 FROM {tbl} h WHERE h.order_id = uti.order_id)"
-        for tbl in hist_uts_tables
-    ])
+    # Build a UNION ALL subquery combining mart_uts + all hist_uts tables.
+    # LEFT JOIN this against mart_uti to find orders with NO spath events anywhere.
+    # Redshift does not support correlated NOT EXISTS in INSERT...SELECT.
+    spath_sources = [f"SELECT order_id FROM {MART_UTS}"] + \
+                    [f"SELECT order_id FROM {tbl}" for tbl in hist_uts_tables]
+    spath_union = " UNION ALL ".join(spath_sources)
 
     sql = f"""
         INSERT INTO {EXCEPTIONS} (order_id, exception_type, detected_at, notes)
@@ -358,17 +367,14 @@ def dq_missing_spath(**context):
             CURRENT_TIMESTAMP,
             'No spath events in mart_uts or any hist_uts table'
         FROM {MART_UTI} uti
+        LEFT JOIN ({spath_union}) spath ON spath.order_id = uti.order_id
+        LEFT JOIN {EXCEPTIONS} ex
+            ON ex.order_id = uti.order_id
+            AND ex.exception_type = 'ORDER_MISSING_SPATH'
+            AND ex.resolved_at IS NULL
         WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
-          AND NOT EXISTS (
-            SELECT 1 FROM {MART_UTS} uts WHERE uts.order_id = uti.order_id
-          )
-        {hist_not_exists}
-          AND NOT EXISTS (
-              SELECT 1 FROM {EXCEPTIONS} ex
-              WHERE ex.order_id = uti.order_id
-                AND ex.exception_type = 'ORDER_MISSING_SPATH'
-                AND ex.resolved_at IS NULL
-          )
+          AND spath.order_id IS NULL
+          AND ex.order_id IS NULL
     """
     cur.execute(sql)
     inserted = cur.rowcount
@@ -401,6 +407,8 @@ def dq_reactivated_missing_ecs(**context):
     conn = get_conn()
     cur = conn.cursor()
 
+    # Redshift does not support correlated NOT EXISTS in INSERT...SELECT.
+    # Fix: LEFT JOIN anti-pattern for both mart_ecs absence and exceptions dedup.
     sql = f"""
         INSERT INTO {EXCEPTIONS} (order_id, exception_type, detected_at, notes)
         SELECT
@@ -410,14 +418,13 @@ def dq_reactivated_missing_ecs(**context):
             'Order in mart_uti but not in mart_ecs — restore from hist_ecs manually'
         FROM {MART_UTI} uti
         LEFT JOIN {MART_ECS} ecs ON uti.order_id = ecs.order_id
+        LEFT JOIN {EXCEPTIONS} ex
+            ON ex.order_id = uti.order_id
+            AND ex.exception_type = 'REACTIVATED_ORDER_MISSING_ECS'
+            AND ex.resolved_at IS NULL
         WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
           AND ecs.order_id IS NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM {EXCEPTIONS} ex
-              WHERE ex.order_id = uti.order_id
-                AND ex.exception_type = 'REACTIVATED_ORDER_MISSING_ECS'
-                AND ex.resolved_at IS NULL
-          )
+          AND ex.order_id IS NULL
     """
     cur.execute(sql)
     inserted = cur.rowcount
