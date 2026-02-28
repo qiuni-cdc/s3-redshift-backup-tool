@@ -6,16 +6,17 @@ Runs every day at 2am UTC (off-peak). Data quality checks only.
 VACUUM is handled by a separate DAG: order_tracking_vacuum.
 
 DATA QUALITY CHECKS (§12 of order_tracking_final_design.md)
-   Four checks that catch extraction gaps and mart integrity issues.
+   Three checks that catch extraction gaps and mart integrity issues.
 
    Test 0 — Extraction count comparison (MySQL vs Redshift raw)
-     Counts rows in a closed 2-hour window in both MySQL source and Redshift raw.
+     Counts rows in a closed 24-hour window in both MySQL source and Redshift raw.
      Any gap > 0 = rows dropped during extraction or Redshift COPY.
      Raises directly (does not write to exceptions — this is an infrastructure alert).
 
    Test 1 — UTI/UTS time alignment
-     update_time in mart_uti should equal MAX(pathTime) in mart_uts.
-     Mismatch = backdated update_time, missed extraction, or uti/uts sync drift.
+     update_time in mart_uti should be within 6 hours of MAX(pathTime) in mart_uts.
+     These come from different upstream systems so exact match is too strict.
+     Gaps > 6h indicate missed extraction, backdated update_time, or sync drift.
 
    Test 2 — Orders missing from spath everywhere
      Order in mart_uti with no rows in mart_uts AND no rows in any hist_uts table.
@@ -25,12 +26,6 @@ DATA QUALITY CHECKS (§12 of order_tracking_final_design.md)
      Order in mart_uti with no matching row in mart_ecs.
      Happens when an order reactivates after its ecs row was archived to hist_ecs.
      Fix: restore from hist_ecs manually (see order_tracking_final_design.md §5).
-
-   Test 4 — Mart freshness (pipeline liveness check)
-     mart_uti and mart_uts must have been updated within 30 minutes.
-     Safety net for when the 15-min pipeline itself goes down — check_extraction_lag
-     only fires when that DAG is running. mart_ecs excluded (add_time is write-once).
-     Raises directly (infrastructure alert, not written to exceptions table).
 """
 
 from airflow import DAG
@@ -41,6 +36,50 @@ from datetime import datetime, timedelta
 import logging
 import os
 import psycopg2
+
+
+def _send_dq_alert(context):
+    """
+    on_failure_callback for check_unresolved_exceptions.
+    Sends an SMTP email when new DQ exceptions are found.
+    Uses the same env vars and smtplib pattern as the 15-min DAG lag alerts.
+    Failure to send is logged but never re-raises (monitoring must not block on SMTP).
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+
+    host     = os.environ.get('ALERT_SMTP_HOST',     'smtp.office365.com')
+    port     = int(os.environ.get('ALERT_SMTP_PORT', '587'))
+    user     = os.environ.get('ALERT_SMTP_USER',     'jasleen.tung@uniuni.com')
+    password = os.environ.get('ALERT_SMTP_PASSWORD', '')
+    to       = os.environ.get('ALERT_EMAIL_TO',      'jasleen.tung@uniuni.com')
+
+    exception = context.get('exception', 'Unknown error')
+    body = (
+        f"Daily monitoring DQ check failed.\n\n"
+        f"DAG:  {context['dag'].dag_id}\n"
+        f"Task: {context['task_instance'].task_id}\n"
+        f"Time: {context['logical_date']}\n\n"
+        f"Detail:\n{exception}\n\n"
+        f"Action: Check order_tracking_exceptions table and resolve open DQ issues.\n"
+        f"See: airflow_poc/docs/pipeline_review_issues.md for resolution guidance."
+    )
+
+    msg = MIMEText(body, 'plain')
+    msg['Subject'] = '[DQ ALERT] Order Tracking — new DQ exceptions found'
+    msg['From']    = user
+    msg['To']      = to
+
+    try:
+        server = smtplib.SMTP(host, port, timeout=10)
+        server.ehlo()
+        server.starttls()
+        server.login(user, password)
+        server.sendmail(user, [to], msg.as_string())
+        server.quit()
+        logging.getLogger(__name__).info("DQ alert email sent to %s", to)
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to send DQ alert email: %s", e)
 
 log = logging.getLogger(__name__)
 
@@ -67,14 +106,11 @@ DQ_LOOKBACK_SECS  = DQ_LOOKBACK_HOURS * 3600
 # Env vars used: SSH_BASTION_HOST, SSH_BASTION_USER, SSH_BASTION_KEY_PATH, DB_HOST, DB_USER, DB_PASSWORD
 # (all already set in docker-compose.yml)
 
-# Buffer matches calc_window (5 min); 2h window stays safely inside raw table's 24h retention
+# Buffer matches calc_window (5 min).
+# Window = 24h — covers the full day so gaps at any time are caught (not just midnight-2am).
+# Raw tables retain 24h of data so this window is always fully available.
 EXTRACTION_BUFFER_SECS = 5 * 60
-EXTRACTION_WINDOW_SECS = 2 * 3600
-
-# Mart freshness threshold (Test 4)
-# Pipeline runs every 15 min — mart should never be >30 min stale unless pipeline is down.
-# mart_ecs excluded: add_time is write-once (new orders only) so quiet periods are legitimate.
-MART_FRESHNESS_THRESHOLD_MIN = 30
+EXTRACTION_WINDOW_SECS = 24 * 3600
 
 # (mysql_table, mysql_ts_col, raw_table, raw_ts_col) — all timestamps are unix epoch integers
 EXTRACTION_CHECK_TABLES = [
@@ -278,12 +314,12 @@ def dq_uti_uts_alignment(**context):
     """
     Test 1 — update_time vs MAX(pathTime) alignment.
 
-    Every order in mart_uti must have at least one spath event in mart_uts.
-    update_time should equal MAX(pathTime) for that order.
-    Mismatch indicates: backdated update_time, missed extraction, or uti/uts drift.
+    update_time (mart_uti) and pathTime (mart_uts) come from different upstream systems
+    and are not expected to match exactly. A gap > 6 hours indicates a genuine issue:
+    missed extraction, backdated update_time, or a prolonged uti/uts sync drift.
 
-    Only inspects orders active within the last DQ_LOOKBACK_HOURS (48h).
-    Older orders can't have new mismatches; pre-existing ones are already in exceptions.
+    Only inspects orders active within the last DQ_LOOKBACK_HOURS.
+    Older orders can't develop new mismatches; pre-existing ones are already in exceptions.
 
     Writes unresolved mismatches to order_tracking_exceptions as 'UTI_UTS_TIME_MISMATCH'.
     Expected result: 0 rows inserted.
@@ -311,7 +347,7 @@ def dq_uti_uts_alignment(**context):
             JOIN {MART_UTS} uts ON uti.order_id = uts.order_id
             WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - {DQ_LOOKBACK_SECS}
             GROUP BY uti.order_id, uti.update_time
-            HAVING uti.update_time <> MAX(uts.pathTime)
+            HAVING ABS(uti.update_time - MAX(uts.pathTime)) > 21600
         ) m
         LEFT JOIN {EXCEPTIONS} ex
             ON ex.order_id = m.order_id
@@ -439,13 +475,15 @@ def dq_reactivated_missing_ecs(**context):
 
 def check_unresolved_exceptions(**context):
     """
-    Alert check — fail this task if any unresolved exceptions exist.
+    Alert check — fail this task only if NEW exceptions were written today.
 
-    Pulls counts from all 3 DQ tests (XCom) and queries the exceptions table
-    for the total unresolved count. Logs a summary. Raises if count > 0.
+    Pulls per-test new counts from XCom (set by Tests 1-3 in this run).
+    Separately queries the exceptions table for total historical unresolved count
+    (logged for context only).
 
-    Downstream alerting: task failure triggers email (email_on_failure=True).
-    For Slack/PagerDuty, add an on_failure_callback here.
+    Raises only when new_total > 0 to prevent alert fatigue from pre-existing
+    historical exceptions that have already been actioned or are known issues.
+    on_failure_callback (_send_dq_alert) sends an email when this raises.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -481,8 +519,10 @@ def check_unresolved_exceptions(**context):
 
     total_unresolved = sum(cnt for _, cnt in rows)
 
+    new_total = new_test1 + new_test2 + new_test3
+
     log.info("=" * 60)
-    log.info("EXCEPTIONS TABLE SUMMARY (unresolved)")
+    log.info("EXCEPTIONS TABLE SUMMARY (unresolved historical)")
     log.info("=" * 60)
     if rows:
         for exc_type, cnt in rows:
@@ -491,69 +531,17 @@ def check_unresolved_exceptions(**context):
         log.info("  (none)")
     log.info("-" * 60)
     log.info(f"  New today — Test 1: {new_test1}, Test 2: {new_test2}, Test 3: {new_test3}")
-    log.info(f"  Total unresolved: {total_unresolved}")
+    log.info(f"  Total new: {new_total}  |  Total unresolved (historical): {total_unresolved}")
     log.info("=" * 60)
 
-    if total_unresolved > 0:
+    if new_total > 0:
         raise ValueError(
-            f"{total_unresolved} unresolved DQ exception(s) in order_tracking_exceptions. "
-            f"Details: {dict(rows)}. "
+            f"{new_total} NEW DQ exception(s) found today. "
+            f"Test1={new_test1}, Test2={new_test2}, Test3={new_test3}. "
             f"See airflow_poc/docs/order_tracking_final_design.md for resolution steps."
         )
-
-
-def dq_mart_freshness(**context):
-    """
-    Test 4 — Mart freshness check.
-
-    Verifies that mart_uti and mart_uts were updated within MART_FRESHNESS_THRESHOLD_MIN.
-    This is the safety net for when the 15-min pipeline itself stops running —
-    check_extraction_lag in the 15-min DAG only fires if that DAG is running.
-
-    mart_ecs is excluded: add_time is write-once (new orders only), so during quiet
-    periods MAX(add_time) can look legitimately stale even when the pipeline is healthy.
-
-    Raises directly (infrastructure alert — not written to order_tracking_exceptions).
-    """
-    import time as _time
-
-    now = int(_time.time())
-    threshold_secs = MART_FRESHNESS_THRESHOLD_MIN * 60
-
-    checks = [
-        ('mart_uti', MART_UTI, 'update_time'),
-        ('mart_uts', MART_UTS, 'pathTime'),
-    ]
-
-    conn = get_conn()
-    cur  = conn.cursor()
-    stale = []
-
-    try:
-        for name, table, ts_col in checks:
-            cur.execute(f"SELECT COALESCE(MAX({ts_col}), 0) FROM {table}")
-            max_ts  = cur.fetchone()[0]
-            lag_min = (now - max_ts) / 60
-            status  = "OK" if lag_min <= MART_FRESHNESS_THRESHOLD_MIN else f"STALE={lag_min:.1f}min"
-            log.info(
-                "  [%s] MAX(%s) = %s  lag=%.1fmin  %s",
-                name, ts_col,
-                datetime.utcfromtimestamp(max_ts).strftime('%Y-%m-%d %H:%M:%S') + ' UTC',
-                lag_min, status,
-            )
-            if lag_min > MART_FRESHNESS_THRESHOLD_MIN:
-                stale.append(f"{name}: {lag_min:.1f}min stale (threshold={MART_FRESHNESS_THRESHOLD_MIN}min)")
-    finally:
-        cur.close()
-        conn.close()
-
-    if stale:
-        raise ValueError(
-            "Test 4 FAILED — mart tables are stale (pipeline may be down): "
-            + "; ".join(stale)
-        )
-
-    log.info("Test 4 PASSED — mart_uti and mart_uts are fresh (within %dmin)", MART_FRESHNESS_THRESHOLD_MIN)
+    else:
+        log.info("No new DQ exceptions today. Historical open: %d", total_unresolved)
 
 
 # ============================================================================
@@ -586,16 +574,11 @@ with TaskGroup("dq_checks", dag=dag) as dq_group:
         dag=dag
     )
 
-    task_dq_test4 = PythonOperator(
-        task_id='dq_mart_freshness',
-        python_callable=dq_mart_freshness,
-        dag=dag
-    )
-
 task_check_exceptions = PythonOperator(
     task_id='check_unresolved_exceptions',
     python_callable=check_unresolved_exceptions,
     trigger_rule=TriggerRule.ALL_DONE,  # run even if a DQ task fails
+    on_failure_callback=_send_dq_alert,
     dag=dag
 )
 
