@@ -233,11 +233,11 @@ with TaskGroup("extraction", dag=dag) as extraction_group:
 import json
 try:
     d=json.load(open('$RESULT_FILE'))
-    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or '')}}
+    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or ''),'to_ts':'$END_TIME'}}
 except Exception as e:
-    r={{'status':'error','rows':0,'error':str(e)}}
+    r={{'status':'error','rows':0,'error':str(e),'to_ts':'$END_TIME'}}
 print(json.dumps(r))
-" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed"}}'
+" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed","to_ts":"$END_TIME"}}'
         ''',
         dag=dag
     )
@@ -265,11 +265,11 @@ print(json.dumps(r))
 import json
 try:
     d=json.load(open('$RESULT_FILE'))
-    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or '')}}
+    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or ''),'to_ts':'$END_TIME'}}
 except Exception as e:
-    r={{'status':'error','rows':0,'error':str(e)}}
+    r={{'status':'error','rows':0,'error':str(e),'to_ts':'$END_TIME'}}
 print(json.dumps(r))
-" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed"}}'
+" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed","to_ts":"$END_TIME"}}'
         ''',
         dag=dag
     )
@@ -297,11 +297,11 @@ print(json.dumps(r))
 import json
 try:
     d=json.load(open('$RESULT_FILE'))
-    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or '')}}
+    r={{'status':d.get('status','unknown'),'rows':d.get('summary',{{}}).get('total_rows_processed',0),'error':str(d.get('error','') or ''),'to_ts':'$END_TIME'}}
 except Exception as e:
-    r={{'status':'error','rows':0,'error':str(e)}}
+    r={{'status':'error','rows':0,'error':str(e),'to_ts':'$END_TIME'}}
 print(json.dumps(r))
-" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed"}}'
+" || echo '{{"status":"error","rows":0,"error":"xcom_summary_failed","to_ts":"$END_TIME"}}'
         ''',
         dag=dag
     )
@@ -774,6 +774,19 @@ else:
 dbt_mart_uti = BashOperator(
     task_id='dbt_mart_uti',
     bash_command=DBT_WITH_TUNNEL + f'''
+    python3 -c "
+import psycopg2, os
+from datetime import datetime
+try:
+    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
+    cur = conn.cursor()
+    cur.execute('SELECT COALESCE(MAX(update_time),0) FROM settlement_ods.mart_uni_tracking_info')
+    m = cur.fetchone()[0]
+    print(f'[dbt_mart_uti] Mart max: {datetime.utcfromtimestamp(m).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC | dbt scan: WHERE update_time > {datetime.utcfromtimestamp(m-1800).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC (30-min window)')
+    conn.close()
+except Exception as e:
+    print(f'[dbt_mart_uti] Could not query mart window: {{e}}')
+" || true
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_info"
     dbt run --select mart_uni_tracking_info --profiles-dir . --debug \
         > /tmp/dbt_uti_debug.log 2>&1
@@ -799,6 +812,19 @@ dbt_mart_uti = BashOperator(
 dbt_mart_ecs = BashOperator(
     task_id='dbt_mart_ecs',
     bash_command=DBT_WITH_TUNNEL + f'''
+    python3 -c "
+import psycopg2, os
+from datetime import datetime
+try:
+    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
+    cur = conn.cursor()
+    cur.execute('SELECT COALESCE(MAX(add_time),0) FROM settlement_ods.mart_ecs_order_info')
+    m = cur.fetchone()[0]
+    print(f'[dbt_mart_ecs] Mart max: {datetime.utcfromtimestamp(m).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC | dbt scan: WHERE add_time > {datetime.utcfromtimestamp(m-7200).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC (2-hr window)')
+    conn.close()
+except Exception as e:
+    print(f'[dbt_mart_ecs] Could not query mart window: {{e}}')
+" || true
     echo "[$(date -u +%H:%M:%S)] Running mart_ecs_order_info"
     dbt run --select mart_ecs_order_info --profiles-dir . --debug \
         > /tmp/dbt_ecs_debug.log 2>&1
@@ -816,6 +842,19 @@ dbt_mart_ecs = BashOperator(
 dbt_mart_uts = BashOperator(
     task_id='dbt_mart_uts',
     bash_command=DBT_WITH_TUNNEL + f'''
+    python3 -c "
+import psycopg2, os
+from datetime import datetime
+try:
+    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
+    cur = conn.cursor()
+    cur.execute('SELECT COALESCE(MAX(pathTime),0) FROM settlement_ods.mart_uni_tracking_spath')
+    m = cur.fetchone()[0]
+    print(f'[dbt_mart_uts] Mart max: {datetime.utcfromtimestamp(m).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC | dbt scan: WHERE pathTime > {datetime.utcfromtimestamp(m-1800).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC (30-min window)')
+    conn.close()
+except Exception as e:
+    print(f'[dbt_mart_uts] Could not query mart window: {{e}}')
+" || true
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_spath"
     dbt run --select mart_uni_tracking_spath --profiles-dir . --debug \
         > /tmp/dbt_uts_debug.log 2>&1
@@ -917,6 +956,17 @@ def generate_summary(**context):
     sync_window = context['task_instance'].xcom_pull(
         task_ids='calculate_sync_window', key='sync_window'
     ) or {}
+    # lag_results has raw_max per table (epoch) — shows actual data coverage after extraction
+    lag_results = context['task_instance'].xcom_pull(
+        task_ids='check_extraction_lag', key='lag_results'
+    ) or {}
+
+    def _fmt_epoch(epoch):
+        """Convert unix epoch to human-readable UTC string."""
+        try:
+            return datetime.utcfromtimestamp(int(epoch)).strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
+        except Exception:
+            return str(epoch)
 
     # Determine actual task states from the DAG run
     dag_run = context['dag_run']
@@ -943,9 +993,15 @@ CONFIGURATION:
   Window: {INCREMENTAL_LOOKBACK_MINUTES} min + {BUFFER_MINUTES} min buffer
   Time drift: {time_drift}s {"(OK)" if abs(time_drift) <= TIME_DRIFT_THRESHOLD_SECONDS else "(WARNING)"}
 
-EXTRACTION UPPER BOUND:
-  To (--end-time cap): {sync_window.get('to_ts', 'N/A')}
-  From (lower bound):  watermark-driven (see extraction task logs)
+EXTRACTION WINDOW:
+  Cap (--end-time):  {sync_window.get('to_ts', 'N/A')} UTC
+  From (lower bound): watermark per table — see "Processing backup window" in each extract_* log
+
+RAW DATA COVERAGE AFTER EXTRACTION:
+  ecs: up to {_fmt_epoch(lag_results.get('ecs', {}).get('raw_max', 0))}
+  uti: up to {_fmt_epoch(lag_results.get('uti', {}).get('raw_max', 0))}
+  uts: up to {_fmt_epoch(lag_results.get('uts', {}).get('raw_max', 0))}
+  (if uti/uts differ from cap — row limit was hit; next cycle will continue from here)
 
 EXTRACTION:
   ecs (orders):   {extraction_results.get('ecs', {}).get('rows', 0):>10,} rows
