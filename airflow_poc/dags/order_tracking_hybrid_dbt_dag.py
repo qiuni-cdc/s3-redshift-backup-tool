@@ -774,26 +774,26 @@ else:
 dbt_mart_uti = BashOperator(
     task_id='dbt_mart_uti',
     bash_command=DBT_WITH_TUNNEL + '''
-    python3 -c "
-import psycopg2, os
-from datetime import datetime
-try:
-    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
-    cur = conn.cursor()
-    cur.execute('SELECT COALESCE(MAX(update_time),0) FROM settlement_ods.mart_uni_tracking_info')
-    m = cur.fetchone()[0]
-    fmt = '%Y-%m-%d %H:%M:%S'
-    print('[dbt_mart_uti] Mart max: ' + datetime.utcfromtimestamp(m).strftime(fmt) + ' UTC | dbt scan: WHERE update_time > ' + datetime.utcfromtimestamp(m-1800).strftime(fmt) + ' UTC (30-min window)')
-    conn.close()
-except Exception as e:
-    print('[dbt_mart_uti] Could not query mart window: ' + str(e))
-" || true
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_info"
     dbt run --select mart_uni_tracking_info --profiles-dir . --debug \
         > /tmp/dbt_uti_debug.log 2>&1
     DBT_EXIT=$?
     grep -E "(START sql|OK created|On model\.|post.hook|select coalesce.max|ERROR|WARN)" /tmp/dbt_uti_debug.log \
         || true
+    python3 -c "
+import psycopg2, os
+from datetime import datetime
+try:
+    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
+    cur = conn.cursor()
+    cur.execute('SELECT COALESCE(MAX(update_time),0), COUNT(*) FROM settlement_ods.mart_uni_tracking_info')
+    mx, cnt = cur.fetchone()
+    fmt = '%Y-%m-%d %H:%M:%S'
+    print('[dbt_mart_uti] Mart now up to: ' + datetime.utcfromtimestamp(mx).strftime(fmt) + ' UTC (epoch ' + str(mx) + ') | total rows: ' + str(cnt))
+    conn.close()
+except Exception as e:
+    print('[dbt_mart_uti] Could not query mart range: ' + str(e))
+" || true
     echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_info complete (exit=$DBT_EXIT)"
     exit $DBT_EXIT
 ''' + DBT_CLEANUP_TUNNEL,
@@ -813,26 +813,26 @@ except Exception as e:
 dbt_mart_ecs = BashOperator(
     task_id='dbt_mart_ecs',
     bash_command=DBT_WITH_TUNNEL + '''
-    python3 -c "
-import psycopg2, os
-from datetime import datetime
-try:
-    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
-    cur = conn.cursor()
-    cur.execute('SELECT COALESCE(MAX(add_time),0) FROM settlement_ods.mart_ecs_order_info')
-    m = cur.fetchone()[0]
-    fmt = '%Y-%m-%d %H:%M:%S'
-    print('[dbt_mart_ecs] Mart max: ' + datetime.utcfromtimestamp(m).strftime(fmt) + ' UTC | dbt scan: WHERE add_time > ' + datetime.utcfromtimestamp(m-7200).strftime(fmt) + ' UTC (2-hr window)')
-    conn.close()
-except Exception as e:
-    print('[dbt_mart_ecs] Could not query mart window: ' + str(e))
-" || true
     echo "[$(date -u +%H:%M:%S)] Running mart_ecs_order_info"
     dbt run --select mart_ecs_order_info --profiles-dir . --debug \
         > /tmp/dbt_ecs_debug.log 2>&1
     DBT_EXIT=$?
     grep -E "(START sql|OK created|On model\.|post.hook|select coalesce.max|ERROR|WARN)" /tmp/dbt_ecs_debug.log \
         || true
+    python3 -c "
+import psycopg2, os
+from datetime import datetime
+try:
+    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
+    cur = conn.cursor()
+    cur.execute('SELECT COALESCE(MAX(add_time),0), COUNT(*) FROM settlement_ods.mart_ecs_order_info')
+    mx, cnt = cur.fetchone()
+    fmt = '%Y-%m-%d %H:%M:%S'
+    print('[dbt_mart_ecs] Mart now up to: ' + datetime.utcfromtimestamp(mx).strftime(fmt) + ' UTC (epoch ' + str(mx) + ') | total rows: ' + str(cnt))
+    conn.close()
+except Exception as e:
+    print('[dbt_mart_ecs] Could not query mart range: ' + str(e))
+" || true
     echo "[$(date -u +%H:%M:%S)] mart_ecs_order_info complete (exit=$DBT_EXIT)"
     exit $DBT_EXIT
 ''' + DBT_CLEANUP_TUNNEL,
@@ -844,26 +844,26 @@ except Exception as e:
 dbt_mart_uts = BashOperator(
     task_id='dbt_mart_uts',
     bash_command=DBT_WITH_TUNNEL + '''
-    python3 -c "
-import psycopg2, os
-from datetime import datetime
-try:
-    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
-    cur = conn.cursor()
-    cur.execute('SELECT COALESCE(MAX(pathTime),0) FROM settlement_ods.mart_uni_tracking_spath')
-    m = cur.fetchone()[0]
-    fmt = '%Y-%m-%d %H:%M:%S'
-    print('[dbt_mart_uts] Mart max: ' + datetime.utcfromtimestamp(m).strftime(fmt) + ' UTC | dbt scan: WHERE pathTime > ' + datetime.utcfromtimestamp(m-1800).strftime(fmt) + ' UTC (30-min window)')
-    conn.close()
-except Exception as e:
-    print('[dbt_mart_uts] Could not query mart window: ' + str(e))
-" || true
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_spath"
     dbt run --select mart_uni_tracking_spath --profiles-dir . --debug \
         > /tmp/dbt_uts_debug.log 2>&1
     DBT_EXIT=$?
     grep -E "(START sql|OK created|On model\.|post.hook|select coalesce.max|ERROR|WARN)" /tmp/dbt_uts_debug.log \
         || true
+    python3 -c "
+import psycopg2, os
+from datetime import datetime
+try:
+    conn = psycopg2.connect(host=os.environ.get('DBT_REDSHIFT_HOST','redshift-dw.qa.uniuni.com'), port=int(os.environ.get('DBT_REDSHIFT_PORT',5439)), dbname='dw', user=os.environ.get('REDSHIFT_QA_USER') or os.environ.get('REDSHIFT_USER'), password=os.environ.get('REDSHIFT_QA_PASSWORD') or os.environ.get('REDSHIFT_PASSWORD'))
+    cur = conn.cursor()
+    cur.execute('SELECT COALESCE(MAX(pathTime),0), COUNT(*) FROM settlement_ods.mart_uni_tracking_spath')
+    mx, cnt = cur.fetchone()
+    fmt = '%Y-%m-%d %H:%M:%S'
+    print('[dbt_mart_uts] Mart now up to: ' + datetime.utcfromtimestamp(mx).strftime(fmt) + ' UTC (epoch ' + str(mx) + ') | total rows: ' + str(cnt))
+    conn.close()
+except Exception as e:
+    print('[dbt_mart_uts] Could not query mart range: ' + str(e))
+" || true
     echo "[$(date -u +%H:%M:%S)] mart_uni_tracking_spath complete (exit=$DBT_EXIT)"
     exit $DBT_EXIT
 ''' + DBT_CLEANUP_TUNNEL,
