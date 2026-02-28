@@ -773,7 +773,7 @@ else:
 
 dbt_mart_uti = BashOperator(
     task_id='dbt_mart_uti',
-    bash_command=DBT_WITH_TUNNEL + f'''
+    bash_command=DBT_WITH_TUNNEL + '''
     python3 -c "
 import psycopg2, os
 from datetime import datetime
@@ -782,10 +782,11 @@ try:
     cur = conn.cursor()
     cur.execute('SELECT COALESCE(MAX(update_time),0) FROM settlement_ods.mart_uni_tracking_info')
     m = cur.fetchone()[0]
-    print(f'[dbt_mart_uti] Mart max: {datetime.utcfromtimestamp(m).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC | dbt scan: WHERE update_time > {datetime.utcfromtimestamp(m-1800).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC (30-min window)')
+    fmt = '%Y-%m-%d %H:%M:%S'
+    print('[dbt_mart_uti] Mart max: ' + datetime.utcfromtimestamp(m).strftime(fmt) + ' UTC | dbt scan: WHERE update_time > ' + datetime.utcfromtimestamp(m-1800).strftime(fmt) + ' UTC (30-min window)')
     conn.close()
 except Exception as e:
-    print(f'[dbt_mart_uti] Could not query mart window: {{e}}')
+    print('[dbt_mart_uti] Could not query mart window: ' + str(e))
 " || true
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_info"
     dbt run --select mart_uni_tracking_info --profiles-dir . --debug \
@@ -811,7 +812,7 @@ except Exception as e:
 
 dbt_mart_ecs = BashOperator(
     task_id='dbt_mart_ecs',
-    bash_command=DBT_WITH_TUNNEL + f'''
+    bash_command=DBT_WITH_TUNNEL + '''
     python3 -c "
 import psycopg2, os
 from datetime import datetime
@@ -820,10 +821,11 @@ try:
     cur = conn.cursor()
     cur.execute('SELECT COALESCE(MAX(add_time),0) FROM settlement_ods.mart_ecs_order_info')
     m = cur.fetchone()[0]
-    print(f'[dbt_mart_ecs] Mart max: {datetime.utcfromtimestamp(m).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC | dbt scan: WHERE add_time > {datetime.utcfromtimestamp(m-7200).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC (2-hr window)')
+    fmt = '%Y-%m-%d %H:%M:%S'
+    print('[dbt_mart_ecs] Mart max: ' + datetime.utcfromtimestamp(m).strftime(fmt) + ' UTC | dbt scan: WHERE add_time > ' + datetime.utcfromtimestamp(m-7200).strftime(fmt) + ' UTC (2-hr window)')
     conn.close()
 except Exception as e:
-    print(f'[dbt_mart_ecs] Could not query mart window: {{e}}')
+    print('[dbt_mart_ecs] Could not query mart window: ' + str(e))
 " || true
     echo "[$(date -u +%H:%M:%S)] Running mart_ecs_order_info"
     dbt run --select mart_ecs_order_info --profiles-dir . --debug \
@@ -841,7 +843,7 @@ except Exception as e:
 
 dbt_mart_uts = BashOperator(
     task_id='dbt_mart_uts',
-    bash_command=DBT_WITH_TUNNEL + f'''
+    bash_command=DBT_WITH_TUNNEL + '''
     python3 -c "
 import psycopg2, os
 from datetime import datetime
@@ -850,10 +852,11 @@ try:
     cur = conn.cursor()
     cur.execute('SELECT COALESCE(MAX(pathTime),0) FROM settlement_ods.mart_uni_tracking_spath')
     m = cur.fetchone()[0]
-    print(f'[dbt_mart_uts] Mart max: {datetime.utcfromtimestamp(m).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC | dbt scan: WHERE pathTime > {datetime.utcfromtimestamp(m-1800).strftime(\\\"%Y-%m-%d %H:%M:%S\\\")} UTC (30-min window)')
+    fmt = '%Y-%m-%d %H:%M:%S'
+    print('[dbt_mart_uts] Mart max: ' + datetime.utcfromtimestamp(m).strftime(fmt) + ' UTC | dbt scan: WHERE pathTime > ' + datetime.utcfromtimestamp(m-1800).strftime(fmt) + ' UTC (30-min window)')
     conn.close()
 except Exception as e:
-    print(f'[dbt_mart_uts] Could not query mart window: {{e}}')
+    print('[dbt_mart_uts] Could not query mart window: ' + str(e))
 " || true
     echo "[$(date -u +%H:%M:%S)] Running mart_uni_tracking_spath"
     dbt run --select mart_uni_tracking_spath --profiles-dir . --debug \
