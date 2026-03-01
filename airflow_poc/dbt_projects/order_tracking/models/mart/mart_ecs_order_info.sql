@@ -22,11 +22,15 @@
     - Order_id-driven: trim mart_ecs only when mart_uti has already trimmed the order.
       The 3-way JOIN is always intact for any active order regardless of add_time age.
 
-    Post-hooks (2 steps, run AFTER mart_uni_tracking_info):
+    Post-hooks (3 steps, run AFTER mart_uni_tracking_info):
       Step 1a/b: Archive ecs rows for inactive orders (not in mart_uti) to correct hist table.
                  Uses LEFT JOIN anti-join (NULL-safe — avoids NOT IN NULL trap at 90M+ rows).
-                 NOT IN guard: idempotent on retry.
+                 LEFT JOIN idempotency guard on order_id (one row per order, safe for ecs).
+      Step 1c: Safety check — catch inactive orders whose add_time falls outside all defined
+                 hist_ecs periods. Logs ARCHIVE_ROUTING_GAP_ECS to exceptions and excludes
+                 them from trim (step 2) — no silent data loss. Mirrors mart_uti step 3.
       Step 2: Trim — DELETE USING anti-join (NULL-safe, Redshift hash anti-join on DISTKEY).
+                 Excludes ARCHIVE_ROUTING_GAP_ECS exceptions — never trim an unarchived row.
 
     DAG dependency: mart_ecs MUST run after mart_uni_tracking_info completes.
     The LEFT JOIN in post_hooks reads mart_uti's final state for this cycle.
@@ -38,15 +42,24 @@
 {# STEP 1a: Archive inactive orders to 2025_h2 (Jul 2025 – Jan 2026).
    LEFT JOIN anti-join: orders absent from mart_uti = no longer active = safe to archive.
    NULL-safe: LEFT JOIN WHERE uti.order_id IS NULL handles NULL order_ids correctly.
-   NOT IN guard: idempotent — skips order_ids already in hist on retry.
+   Idempotency guard: LEFT JOIN on order_id (one row per order in ecs — safe to use order_id).
    ADD a step 1b block here when data starts aging into the next period (see dbt_project.yml). #}
-{%- set _ph1a = "INSERT INTO {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2 SELECT ecs.* FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL AND ecs.add_time >= extract(epoch from '2025-07-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-01-01'::timestamp) AND ecs.order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2)" -%}
+{%- set _ph1a = "INSERT INTO {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2 SELECT ecs.* FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id LEFT JOIN {{ var('mart_schema') }}.hist_ecs_order_info_2025_h2 h ON h.order_id = ecs.order_id WHERE uti.order_id IS NULL AND ecs.add_time >= extract(epoch from '2025-07-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-01-01'::timestamp) AND h.order_id IS NULL" -%}
+
+{# STEP 1c: Safety check — catch inactive orders whose add_time falls outside all defined
+   hist_ecs periods. Without this guard, orders with add_time outside all periods are silently
+   deleted by step 2 with no record. Mirrors mart_uti step 3 and mart_uts step 2.
+   Uses LEFT JOIN anti-pattern for the dedup check (Redshift: no correlated subqueries in INSERT).
+   ADD a NOT (add_time BETWEEN ...) block for each new period added in step 1b.
+   Update the NOT (...) condition when adding new hist_ecs periods. #}
+{%- set _ph1c = "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT ecs.order_id, 'ARCHIVE_ROUTING_GAP_ECS', CURRENT_TIMESTAMP, 'Inactive ECS order not archived — add_time outside all defined hist_ecs periods. Excluded from trim.' FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id LEFT JOIN {{ var('mart_schema') }}.order_tracking_exceptions ex ON ex.order_id = ecs.order_id AND ex.exception_type = 'ARCHIVE_ROUTING_GAP_ECS' AND ex.resolved_at IS NULL WHERE uti.order_id IS NULL AND NOT (ecs.add_time >= extract(epoch from '2025-07-01'::timestamp) AND ecs.add_time < extract(epoch from '2026-01-01'::timestamp)) AND ex.order_id IS NULL" -%}
 
 {# STEP 2: Trim — DELETE USING anti-join (NULL-safe).
    Removes ecs rows for orders no longer in mart_uti (trimmed as inactive).
+   Excludes ARCHIVE_ROUTING_GAP_ECS exceptions — never trim an unarchived row.
    DELETE USING LEFT JOIN is NULL-safe and efficient via DISTKEY(order_id) co-location
    — the hash anti-join is always local, no cross-node shuffle. #}
-{%- set _ph2 = "DELETE FROM {{ this }} USING (SELECT ecs.order_id FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id WHERE uti.order_id IS NULL) to_trim WHERE {{ this }}.order_id = to_trim.order_id" -%}
+{%- set _ph2 = "DELETE FROM {{ this }} USING (SELECT ecs.order_id FROM {{ this }} ecs LEFT JOIN {{ ref('mart_uni_tracking_info') }} uti ON ecs.order_id = uti.order_id LEFT JOIN {{ var('mart_schema') }}.order_tracking_exceptions ex ON ex.order_id = ecs.order_id AND ex.exception_type = 'ARCHIVE_ROUTING_GAP_ECS' AND ex.resolved_at IS NULL WHERE uti.order_id IS NULL AND ex.order_id IS NULL) to_trim WHERE {{ this }}.order_id = to_trim.order_id" -%}
 
 {{
     config(
@@ -55,7 +68,7 @@
         incremental_strategy='delete+insert',
         dist='order_id',
         sort=['partner_id', 'add_time', 'order_id'],
-        post_hook=[_ph1a, _ph2]
+        post_hook=[_ph1a, _ph1c, _ph2]
     )
 }}
 
@@ -68,7 +81,7 @@
                 ECS is write-once: DELETE is a near no-op on normal cycles (new orders
                 not yet in mart), correct on retries (removes duplicate before re-insert)
     - Retention: order_id-driven — trimmed only when mart_uti trims the same order
-    - Post-hooks: 2 steps (archive inactive, trim with DELETE USING anti-join)
+    - Post-hooks: 3 steps (archive inactive, safety check, trim with DELETE USING anti-join)
     - DISTKEY(order_id): JOIN co-location with mart_uti and mart_uts
     - SORTKEY(partner_id, add_time, order_id): partner_id filter cuts to ~0.3% of rows
                 for downstream queries (WHERE partner_id = X)

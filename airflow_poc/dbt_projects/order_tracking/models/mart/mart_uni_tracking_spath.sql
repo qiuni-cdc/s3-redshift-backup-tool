@@ -31,10 +31,13 @@
 
 
 {# STEP 1a: Archive spath events older than 6 months to 2025_h2 (Jul 2025 – Jan 2026).
-   NOT IN guard filters by (order_id, pathTime range) — more specific than order_id alone
-   since one order has many spath events across multiple periods.
+   Idempotency guard uses LEFT JOIN on (order_id, pathTime) pair — NOT order_id alone.
+   mart_uts has MANY rows per order; once any event is archived, order_id is in hist.
+   A guard on order_id alone would block ALL remaining events for that order from archiving.
+   LEFT JOIN on (order_id, pathTime) is the correct Redshift-compatible approach (NOT EXISTS
+   with correlation is unsupported in Redshift INSERT...SELECT).
    ADD a step 1b block here when data starts aging into the next period (see dbt_project.yml). #}
-{%- set _ph1a = "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 SELECT * FROM {{ this }} WHERE pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND pathTime >= extract(epoch from '2025-07-01'::timestamp) AND pathTime < extract(epoch from '2026-01-01'::timestamp) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 WHERE pathTime >= extract(epoch from '2025-07-01'::timestamp))" -%}
+{%- set _ph1a = "INSERT INTO {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 SELECT m.* FROM {{ this }} m LEFT JOIN {{ var('mart_schema') }}.hist_uni_tracking_spath_2025_h2 h ON h.order_id = m.order_id AND h.pathTime = m.pathTime WHERE m.pathTime < (SELECT COALESCE(MAX(pathTime), 0) - 15552000 FROM {{ this }}) AND m.pathTime >= extract(epoch from '2025-07-01'::timestamp) AND m.pathTime < extract(epoch from '2026-01-01'::timestamp) AND h.order_id IS NULL" -%}
 
 {# STEP 2: Safety check — catch spath events aged out but outside all defined periods.
    Checks (order_id, pathTime) pair — specific enough since many events share an order_id.
@@ -52,7 +55,7 @@
         unique_key=['order_id', 'traceSeq', 'pathTime'],
         incremental_strategy='delete+insert',
         dist='order_id',
-        sort=['pathTime', 'order_id'],
+        sort=['pathTime', 'code', 'order_id'],
         incremental_predicates=[
             this ~ ".pathTime > (SELECT COALESCE(MAX(pathTime), 0) - 7200 FROM " ~ this ~ ")"
         ],
@@ -68,7 +71,8 @@
     - Retention: pure time-based 6-month window on pathTime (~1.17B rows at steady state)
     - Post-hooks: 3 steps (archive, safety check, trim)
     - DISTKEY(order_id): JOIN co-location with mart_uti and mart_ecs
-    - SORTKEY(pathTime, order_id): zone maps skip all blocks before the query date
+    - SORTKEY(pathTime, code, order_id): zone maps on time + event type (code is the primary
+      analytical filter per idx_order_status_time_driver in uniods dw_uni_tracking_spath)
     - Independent of mart_uti state — can run in parallel with mart_ecs
 */
 

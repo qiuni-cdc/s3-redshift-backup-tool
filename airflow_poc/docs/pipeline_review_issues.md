@@ -161,7 +161,7 @@ AND NOT EXISTS (
 )
 ```
 
-**Status:** ☐ Open
+**Status:** ✅ Fixed — `mart_uni_tracking_spath.sql` — LEFT JOIN on (order_id, pathTime) replaces NOT IN guard on order_id alone
 
 ---
 
@@ -196,7 +196,7 @@ WHERE uti.order_id IS NULL
 ```
 Then update step 2 (trim) to exclude `ARCHIVE_ROUTING_GAP_ECS` exceptions.
 
-**Status:** ☐ Open
+**Status:** ✅ Fixed — `mart_ecs_order_info.sql` — added step 1c safety check (ARCHIVE_ROUTING_GAP_ECS) and updated trim step to exclude open exceptions. Added ARCHIVE_ROUTING_GAP_ECS to monitoring DAG DQ_EXCEPTION_TYPES.
 
 ---
 
@@ -294,6 +294,109 @@ near-zero cost since ECS is write-once and new order_ids aren't in the mart yet.
 
 ---
 
+---
+
+## Issue 13 — `check_unresolved_exceptions` task failure is by design · **Info / Clarification**
+
+**File:** `dags/order_tracking_daily_monitoring.py`
+
+**Clarification:**
+`check_unresolved_exceptions` raises `ValueError` whenever unresolved DQ exceptions exist in `order_tracking_exceptions`. This is **intentional** — the task failure is the alert mechanism (not a bug). The task is designed to surface open issues so they get investigated. It will keep failing on every monitoring run until all exceptions are resolved (`resolved_at` set) or the root cause is fixed.
+
+**What to do when it fails:** Check the task log summary, investigate the exception types reported, and either fix the root cause or mark them as resolved if they are known/accepted.
+
+**Status:** ✅ Working as designed
+
+---
+
+## Issue 14 — REACTIVATED_ORDER_MISSING_ECS: 1,566,871 exceptions on QA · **High / Needs Investigation**
+
+**Detected:** First monitoring run 2026-02-28. QA only (not verified on PROD).
+
+**Symptom:**
+1,566,871 orders found in `mart_uti` (updated in last 24h) with no matching row in `mart_ecs`.
+
+**Likely root cause (QA artefact):**
+`mart_ecs` extraction is `add_time`-based — it only captures **new orders** created after the watermark. Orders that were already active before the QA pipeline started in Feb 2026 (and whose `add_time` predates the initial watermark) were never extracted into `ecs_order_info_raw`. So `mart_uti` has them (they are still actively updated), but `mart_ecs` has no row for them. This is a known limitation of bootstrapping the pipeline mid-stream without a historical backfill.
+
+**Is it also on PROD?**
+Unknown — PROD pipeline started earlier and has a longer watermark history. Need to run the same query on PROD:
+```sql
+SELECT COUNT(DISTINCT uti.order_id)
+FROM settlement_ods.mart_uni_tracking_info uti
+LEFT JOIN settlement_ods.mart_ecs_order_info ecs ON uti.order_id = ecs.order_id
+WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - 86400
+  AND ecs.order_id IS NULL;
+```
+
+**Options to fix:**
+- **A (backfill):** Run a one-time historical extraction of `ecs_order_info` from the beginning of time to populate missing rows. This is the clean fix.
+- **B (accept):** If PROD doesn't have this gap, the QA gap is an artefact of the test setup. Accept on QA, verify PROD is clean.
+- **C (suppress in monitoring):** Add a lookback floor to Test 3 — only flag orders whose `add_time` is within the pipeline's known start date (Feb 2026). Orders older than pipeline start are expected to be missing from mart_ecs on QA.
+
+**Status:** ☐ Open — investigate on PROD first before deciding fix approach
+
+---
+
+## Issue 15 — UTI_UTS_TIME_MISMATCH: 328,067 exceptions on QA · **Medium / Needs Investigation**
+
+**Detected:** First monitoring run 2026-02-28. QA only (not verified on PROD).
+
+**Symptom:**
+328,067 orders (updated in last 24h) where `mart_uti.update_time ≠ MAX(mart_uts.pathTime)`.
+
+**Possible root causes:**
+
+1. **Expected behaviour (most likely):** `update_time` in `uni_tracking_info` and `pathTime` in `uni_tracking_spath` come from different upstream systems and naturally diverge. An order's tracking status can be updated (`update_time` advances) without a new spath scan event (`pathTime` unchanged). The check may be too strict.
+
+2. **Extraction lag between uti and uts:** uti and uts are extracted in parallel each cycle. If one finishes and dbt runs before the other completes (shouldn't happen — `validate_extractions` guards this), uts pathTime could lag behind uti update_time.
+
+3. **Genuine drift on QA:** QA data quality may differ from PROD if the tables were populated at different times during testing.
+
+**What to check on PROD:**
+```sql
+SELECT COUNT(DISTINCT uti.order_id)
+FROM settlement_ods.mart_uni_tracking_info uti
+JOIN settlement_ods.mart_uni_tracking_spath uts ON uti.order_id = uts.order_id
+WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - 86400
+GROUP BY uti.order_id, uti.update_time
+HAVING uti.update_time <> MAX(uts.pathTime);
+```
+
+**Decision needed:** Is `update_time = MAX(pathTime)` a valid invariant for this business? If not, the check should be relaxed (e.g., flag only when `|update_time - MAX(pathTime)| > N minutes`).
+
+**Status:** ☐ Open — verify on PROD, decide if check is too strict
+
+---
+
+## Issue 16 — ORDER_MISSING_SPATH: 11 orders on QA · **Medium / Genuine data gap**
+
+**Detected:** First monitoring run 2026-02-28.
+
+**Symptom:**
+11 orders found in `mart_uti` (updated in last 24h) with no spath events in `mart_uts` or any `hist_uni_tracking_spath_*` table.
+
+**Root causes to investigate:**
+1. **Very new orders:** Orders created and immediately updated within the same 15-min cycle may not have had a spath event generated yet by the upstream system. Expected to resolve on the next monitoring run.
+2. **Genuine extraction gap:** uts extraction failed for a cycle while uti succeeded — the order got into mart_uti but no spath events were extracted. Check `order_tracking_exceptions` for `EXTRACTION_LAG_UTS` events around the same time.
+3. **Upstream system gap:** Some orders genuinely never get spath events (e.g., cancelled before first scan). Acceptable if rare and consistent.
+
+**To investigate:**
+```sql
+-- Find the 11 orders
+SELECT uti.order_id, uti.update_time,
+       TO_TIMESTAMP(uti.update_time) AS update_ts
+FROM settlement_ods.mart_uni_tracking_info uti
+LEFT JOIN settlement_ods.mart_uni_tracking_spath uts ON uts.order_id = uti.order_id
+WHERE uti.update_time > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint - 86400
+  AND uts.order_id IS NULL;
+```
+Then check if these order_ids appear in any hist_uts table or in the MySQL source.
+
+**Status:** ☐ Open — investigate the 11 specific orders
+
+---
+
 ## Summary
 
 | # | Issue | Severity | Status |
@@ -310,3 +413,7 @@ near-zero cost since ECS is write-once and new order_ids aren't in the mart yet.
 | 10 | stg_ecs comment says "merge" | Cosmetic | ☐ Open |
 | 11 | Monitoring docstring says 2am | Cosmetic | ☐ Open |
 | 12 | mart_ecs incremental_predicates defeats DISTKEY | High / Performance | ✅ Fixed |
+| 13 | check_unresolved_exceptions fails by design | Info | ✅ Working as designed |
+| 14 | REACTIVATED_ORDER_MISSING_ECS: 1.5M on QA | High | ☐ Open — verify on PROD |
+| 15 | UTI_UTS_TIME_MISMATCH: 328K on QA | Medium | ☐ Open — verify on PROD, check if too strict |
+| 16 | ORDER_MISSING_SPATH: 11 orders on QA | Medium | ☐ Open — investigate 11 orders |

@@ -497,6 +497,7 @@ def check_unresolved_exceptions(**context):
         'REACTIVATED_ORDER_MISSING_ECS',
         'ARCHIVE_ROUTING_GAP',
         'ARCHIVE_ROUTING_GAP_UTS',
+        'ARCHIVE_ROUTING_GAP_ECS',
     )
     placeholders = ','.join(['%s'] * len(DQ_EXCEPTION_TYPES))
     cur.execute(
