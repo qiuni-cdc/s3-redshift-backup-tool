@@ -75,6 +75,12 @@ class _Tee:
 
 load_dotenv()
 
+# Windows cp1252 can't print box-drawing / Unicode chars — force UTF-8
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Table definitions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,7 +157,7 @@ def open_ssh_tunnel(bastion_host: str, remote_host: str, remote_port: int) -> SS
         remote_bind_address=(remote_host, remote_port),
     )
     tunnel.start()
-    print(f"  Tunnel open: localhost:{tunnel.local_bind_port} → {remote_host}:{remote_port}")
+    print(f"  Tunnel open: localhost:{tunnel.local_bind_port} -> {remote_host}:{remote_port}")
     return tunnel
 
 
@@ -163,16 +169,18 @@ def open_redshift_tunnel(env_cfg: dict) -> SSHTunnelForwarder:
         remote_bind_address=(env_cfg["host"], env_cfg["port"]),
     )
     tunnel.start()
-    print(f"  Tunnel open: localhost:{tunnel.local_bind_port} → {env_cfg['host']}:{env_cfg['port']}")
+    print(f"  Tunnel open: localhost:{tunnel.local_bind_port} -> {env_cfg['host']}:{env_cfg['port']}")
     return tunnel
 
 
 def connect_mysql(tunnel: SSHTunnelForwarder):
+    # DB_PASSWORD is a fallback; the PROD RO connection uses DB_US_PROD_RO_PASSWORD
+    password = os.getenv("DB_US_PROD_RO_PASSWORD") or os.getenv("DB_PASSWORD")
     return mysql.connector.connect(
         host="127.0.0.1",
         port=tunnel.local_bind_port,
         user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
+        password=password,
         database=MYSQL_CONFIG["database"],
         connection_timeout=60,
     )
@@ -429,7 +437,7 @@ def run_self_checks(rs_conn, rs_cfg, pipeline_start_ts=None):
     cur = rs_conn.cursor()
 
     # ── 1. Duplicate PKs ──────────────────────────────────────────────────────
-    # Redshift stores all identifiers in lowercase — traceSeq → traceseq, pathTime → pathtime
+    # Redshift stores all identifiers in lowercase — traceSeq -> traceseq, pathTime -> pathtime
     dup_checks = [
         ("mart_uni_tracking_info", "order_id"),
         ("mart_ecs_order_info",    "order_id"),
@@ -731,7 +739,7 @@ def main():
         day       = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         from_unix = int(day.timestamp())
         to_unix   = from_unix + 86399
-        print(f"Mode:       single day {args.date}  ({from_unix} → {to_unix} UTC)")
+        print(f"Mode:       single day {args.date}  ({from_unix} -> {to_unix} UTC)")
     elif last_minutes:
         print(f"Mode:       last {last_minutes} minutes  (per-table, anchored at mart MAX)")
     else:
@@ -795,7 +803,7 @@ def main():
                 lm_to   = max_t
                 lm_from_dt = datetime.fromtimestamp(lm_from, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                 lm_to_dt   = datetime.fromtimestamp(lm_to,   tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                print(f"  Window: {lm_from_dt} → {lm_to_dt} UTC  ({lm_from} → {lm_to})")
+                print(f"  Window: {lm_from_dt} -> {lm_to_dt} UTC  ({lm_from} -> {lm_to})")
                 result = compare_one_table(
                     mysql_conn, rs_conn, rs_cfg, tbl_key,
                     lm_from, lm_to, cols,
@@ -808,7 +816,7 @@ def main():
                 )
                 min_dt = datetime.fromtimestamp(min_t, tz=timezone.utc).strftime("%Y-%m-%d")
                 max_dt = datetime.fromtimestamp(max_t, tz=timezone.utc).strftime("%Y-%m-%d")
-                print(f"  Mart range: {min_dt} → {max_dt}  ({min_t} → {max_t})")
+                print(f"  Mart range: {min_dt} -> {max_dt}  ({min_t} -> {max_t})")
 
                 agg = {
                     "mysql_rows": 0, "rs_rows": 0, "common_cols": len(cols),
@@ -824,7 +832,7 @@ def main():
                     chunk_num += 1
                     cs = datetime.fromtimestamp(chunk_start, tz=timezone.utc).strftime("%Y-%m-%d")
                     ce = datetime.fromtimestamp(chunk_end,   tz=timezone.utc).strftime("%Y-%m-%d")
-                    print(f"  Chunk {chunk_num}: {cs} → {ce}", end="  ")
+                    print(f"  Chunk {chunk_num}: {cs} -> {ce}", end="  ")
                     chunk_result = compare_one_table(
                         mysql_conn, rs_conn, rs_cfg, tbl_key,
                         chunk_start, chunk_end, cols,
