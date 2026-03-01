@@ -284,6 +284,35 @@ def fetch_redshift(conn, schema: str, table: str, date_col: str,
 # Comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _norm(v) -> str:
+    """
+    Normalize a scalar for cross-system comparison.
+
+    MySQL vs Redshift type differences that cause false positives:
+      - Booleans: MySQL TINYINT(1) → Python int 0/1 ("0"/"1")
+                  Redshift BOOLEAN → Python bool False/True ("False"/"True")
+                  Fix: bool → "0"/"1" before stringifying.
+      - NULLs:    pandas reads MySQL NULL as float('nan') → str gives "nan"
+                  psycopg2 returns Python None → str gives "None"
+                  Fix: both → "" (empty string sentinel for NULL).
+    """
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    return str(v)
+
+
+def _norm_series(s: pd.Series) -> pd.Series:
+    """Vectorized _norm for a pandas Series."""
+    return s.map(_norm)
+
+
 def compare_dataframes(mysql_df: pd.DataFrame, rs_df: pd.DataFrame,
                        pk: list, cols: list) -> dict:
     pk_lower = [c.lower() for c in pk]
@@ -314,7 +343,7 @@ def compare_dataframes(mysql_df: pd.DataFrame, rs_df: pd.DataFrame,
             for c in compare_cols:
                 cm, cr = f"{c}_m", f"{c}_r"
                 if cm in merged.columns and cr in merged.columns:
-                    any_diff |= merged[cm].astype(str) != merged[cr].astype(str)
+                    any_diff |= _norm_series(merged[cm]) != _norm_series(merged[cr])
 
             total_value_mismatches = int(any_diff.sum())
 
@@ -322,11 +351,11 @@ def compare_dataframes(mysql_df: pd.DataFrame, rs_df: pd.DataFrame,
                 diff_cols = [
                     c for c in compare_cols
                     if f"{c}_m" in merged.columns
-                    and str(row[f"{c}_m"]) != str(row[f"{c}_r"])
+                    and _norm(row[f"{c}_m"]) != _norm(row[f"{c}_r"])
                 ]
                 pk_val = tuple(str(row[k]) for k in pk_lower)
                 values = {
-                    c: {"mysql": str(row[f"{c}_m"]), "rs": str(row[f"{c}_r"])}
+                    c: {"mysql": _norm(row[f"{c}_m"]), "rs": _norm(row[f"{c}_r"])}
                     for c in diff_cols
                 }
                 sample_mismatches.append({"pk": pk_val, "diff_cols": diff_cols, "values": values})
