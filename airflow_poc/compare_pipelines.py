@@ -16,14 +16,14 @@ Usage:
     # Quick spot-check: last 30 minutes of data (fast, good for smoke-testing)
     python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --last-minutes 30
 
-    # Full validation: all 3 tables + self-consistency checks
-    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --pipeline-start 2026-02-01
+    # Full validation: all 3 tables + self-consistency checks, save to log
+    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --pipeline-start 2026-02-01 --log compare_results.log
 
     # One table only
     python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --table uti
 
-    # Export mismatch sample to CSV
-    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --output mismatches.csv
+    # Export mismatch sample to CSV (machine-readable) + log to file (human-readable)
+    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --output mismatches.csv --log compare_results.log
 
     # Single day spot-check (no self-consistency checks)
     python airflow_poc/compare_pipelines.py --date 2026-02-01 --env qa --no-rs-tunnel
@@ -54,6 +54,24 @@ import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
 from sshtunnel import SSHTunnelForwarder
+
+
+class _Tee:
+    """Write stdout to both the terminal and a log file simultaneously."""
+    def __init__(self, log_path: str):
+        self._terminal = sys.stdout
+        self._file = open(log_path, "w", encoding="utf-8", buffering=1)
+
+    def write(self, msg):
+        self._terminal.write(msg)
+        self._file.write(msg)
+
+    def flush(self):
+        self._terminal.flush()
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
 
 load_dotenv()
 
@@ -299,7 +317,11 @@ def compare_dataframes(mysql_df: pd.DataFrame, rs_df: pd.DataFrame,
                     and str(row[f"{c}_m"]) != str(row[f"{c}_r"])
                 ]
                 pk_val = tuple(str(row[k]) for k in pk_lower)
-                sample_mismatches.append({"pk": pk_val, "diff_cols": diff_cols})
+                values = {
+                    c: {"mysql": str(row[f"{c}_m"]), "rs": str(row[f"{c}_r"])}
+                    for c in diff_cols
+                }
+                sample_mismatches.append({"pk": pk_val, "diff_cols": diff_cols, "values": values})
 
     return {
         "mysql_rows":        len(mysql_df),
@@ -350,7 +372,9 @@ def print_report(table_key: str, result: dict):
     if result["sample_mismatches"]:
         print("\n  Sample mismatches (first 5):")
         for mm in result["sample_mismatches"]:
-            print(f"    PK={mm['pk']}  diff cols: {mm['diff_cols']}")
+            print(f"    PK={mm['pk']}")
+            for col, vals in mm.get("values", {}).items():
+                print(f"      {col:<30s}  MySQL={vals['mysql']!r:<40s}  RS={vals['rs']!r}")
 
     if extra_is_timing:
         print(
@@ -670,7 +694,17 @@ def main():
                         help="Pipeline go-live date. Used to annotate the ECS cold-start "
                              "gap (orders created before this date are expected to be "
                              "absent from mart_ecs). Omit if unknown.")
+    parser.add_argument("--log", metavar="FILE", default=None,
+                        help="Tee all output to FILE in addition to the terminal. "
+                             "If omitted, output goes to stdout only.")
     args = parser.parse_args()
+
+    # Tee stdout to log file if requested
+    tee = None
+    if args.log:
+        tee = _Tee(args.log)
+        sys.stdout = tee
+        print(f"Logging output to: {args.log}")
 
     if args.date and args.last_minutes:
         print("Error: --date and --last-minutes are mutually exclusive.")
@@ -835,6 +869,10 @@ def main():
         if rs_tunnel:
             rs_tunnel.stop()
         print("\nConnections closed.")
+        if tee:
+            sys.stdout = tee._terminal
+            tee.close()
+            print(f"Log saved to: {args.log}")
 
 
 if __name__ == "__main__":
