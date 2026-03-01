@@ -13,6 +13,9 @@ Tables compared:
   uts  │ kuaisong.uni_tracking_spath     ↔  settlement_ods.mart_uni_tracking_spath
 
 Usage:
+    # Quick spot-check: last 30 minutes of data (fast, good for smoke-testing)
+    python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --last-minutes 30
+
     # Full validation: all 3 tables + self-consistency checks
     python airflow_poc/compare_pipelines.py --env qa --no-rs-tunnel --pipeline-start 2026-02-01
 
@@ -659,11 +662,19 @@ def main():
                         help="Skip Redshift SSH tunnel (use when running inside VPC)")
     parser.add_argument("--chunk-days", type=int, default=30,
                         help="Chunk size in days for full-range mode (default: 30)")
+    parser.add_argument("--last-minutes", type=int, default=None, metavar="N",
+                        help="Compare only the last N minutes of data in each mart table "
+                             "(uses mart MAX timestamp as anchor). Useful for quick spot-checks. "
+                             "Mutually exclusive with --date.")
     parser.add_argument("--pipeline-start", metavar="YYYY-MM-DD", default=None,
                         help="Pipeline go-live date. Used to annotate the ECS cold-start "
                              "gap (orders created before this date are expected to be "
                              "absent from mart_ecs). Omit if unknown.")
     args = parser.parse_args()
+
+    if args.date and args.last_minutes:
+        print("Error: --date and --last-minutes are mutually exclusive.")
+        sys.exit(1)
 
     pipeline_start_ts = None
     if args.pipeline_start:
@@ -680,12 +691,15 @@ def main():
     tables = [args.table] if args.table else ["ecs", "uti", "uts"]
     rs_cfg = REDSHIFT_ENVS[args.env]
 
-    single_day = args.date is not None
+    single_day   = args.date is not None
+    last_minutes = args.last_minutes  # int or None
     if single_day:
         day       = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         from_unix = int(day.timestamp())
         to_unix   = from_unix + 86399
         print(f"Mode:       single day {args.date}  ({from_unix} → {to_unix} UTC)")
+    elif last_minutes:
+        print(f"Mode:       last {last_minutes} minutes  (per-table, anchored at mart MAX)")
     else:
         print(f"Mode:       full mart range  (chunk={args.chunk_days} days)")
 
@@ -738,6 +752,21 @@ def main():
                     from_unix, to_unix, cols,
                 )
                 print()
+            elif last_minutes:
+                # ── Last-N-minutes mode: anchor at mart MAX, go back N mins ──
+                _, max_t = get_mart_date_range(
+                    rs_conn, rs_cfg["schema"], cfg["redshift_table"], cfg["date_col"]
+                )
+                lm_from = max_t - last_minutes * 60
+                lm_to   = max_t
+                lm_from_dt = datetime.fromtimestamp(lm_from, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                lm_to_dt   = datetime.fromtimestamp(lm_to,   tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  Window: {lm_from_dt} → {lm_to_dt} UTC  ({lm_from} → {lm_to})")
+                result = compare_one_table(
+                    mysql_conn, rs_conn, rs_cfg, tbl_key,
+                    lm_from, lm_to, cols,
+                )
+                print()
             else:
                 # ── Full-range mode: auto-detect mart window, chunk ──────────
                 min_t, max_t = get_mart_date_range(
@@ -785,7 +814,7 @@ def main():
         if args.output:
             export_csv(all_results, args.output)
 
-        # ── Self-consistency checks (full-range mode only — needs full mart state) ──
+        # ── Self-consistency checks (skipped for single-day spot-checks only) ──
         self_checks = []
         if not single_day:
             print(f"\n{'='*50}")
