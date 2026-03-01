@@ -241,7 +241,12 @@ AND order_id NOT IN (
 )
 ```
 
-**Status:** ☐ Open
+Also fixed (same session): safety check steps (_ph3 in mart_uti, _ph2 in mart_uts) used
+`NOT EXISTS` correlated subqueries — unsupported in Redshift `INSERT...SELECT`. Both converted
+to `LEFT JOIN` anti-pattern (same fix as Issue 6 archive guard). This is a time-bomb: the
+safety checks only fire when data first ages out (~Aug 2026), so this would have failed silently.
+
+**Status:** ✅ Fixed — `mart_uni_tracking_info.sql` (_ph3 → LEFT JOIN, _ph4 + NULL guard) and `mart_uni_tracking_spath.sql` (_ph2 → LEFT JOIN, _ph3 + NULL guard). Fixed 2026-03-01.
 
 ---
 
@@ -406,10 +411,10 @@ Then check if these order_ids appear in any hist_uts table or in the MySQL sourc
 | 3 | HIST_UTS_TABLES hardcoded in monitoring | Low | ✅ Fixed |
 | 4 | VACUUM SORT runs unconditionally | Low | ☐ Blocked (DBA) |
 | 5 | ECS field change gap | Low | ☐ Watch |
-| 6 | mart_uts archive NOT IN guard too broad | High | ☐ Open |
-| 7 | mart_ecs missing safety check before trim | High | ☐ Open |
+| 6 | mart_uts archive NOT IN guard too broad | High | ✅ Fixed |
+| 7 | mart_ecs missing safety check before trim | High | ✅ Fixed |
 | 8 | 2026_h1 hist period not defined | High (Aug 2026 deadline) | ☐ Open |
-| 9 | NOT IN with NULL risk in trim steps | Medium | ☐ Open |
+| 9 | NOT IN NULL trap + NOT EXISTS correlated subqueries | Medium | ✅ Fixed |
 | 10 | stg_ecs comment says "merge" | Cosmetic | ☐ Open |
 | 11 | Monitoring docstring says 2am | Cosmetic | ☐ Open |
 | 12 | mart_ecs incremental_predicates defeats DISTKEY | High / Performance | ✅ Fixed |

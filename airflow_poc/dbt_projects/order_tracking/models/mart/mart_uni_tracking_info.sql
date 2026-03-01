@@ -41,12 +41,20 @@
 {# STEP 3: Safety check — catch rows aged out but not matched by any period.
    Logged to exceptions and excluded from trim (step 4) — no silent data loss.
    Any ARCHIVE_ROUTING_GAP alert = a missing period in post_hooks (config error).
-   Fix: add the missing period INSERT block and mark the exception as resolved. #}
-{%- set _ph3 = "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP', CURRENT_TIMESTAMP, 'update_time outside all defined hist_uti periods — excluded from trim' FROM {{ this }} m WHERE m.update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 WHERE order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE order_id = m.order_id AND exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)" -%}
+   Fix: add the missing period INSERT block and mark the exception as resolved.
+   Uses LEFT JOIN anti-pattern (NOT EXISTS with outer alias = correlated subquery,
+   unsupported in Redshift INSERT...SELECT). Two LEFT JOINs:
+     h  = hist guard  — skip if already archived (order_id in hist)
+     ex = dedup guard — skip if exception already open (idempotent on retry).
+   ADD a NOT (update_time BETWEEN ...) block for each new period added in step 2b.
+   Update the h JOIN table name when adding new hist_uti periods. #}
+{%- set _ph3 = "INSERT INTO {{ var('mart_schema') }}.order_tracking_exceptions (order_id, exception_type, detected_at, notes) SELECT DISTINCT m.order_id, 'ARCHIVE_ROUTING_GAP', CURRENT_TIMESTAMP, 'update_time outside all defined hist_uti periods — excluded from trim' FROM {{ this }} m LEFT JOIN {{ var('mart_schema') }}.hist_uni_tracking_info_2025_h2 h ON h.order_id = m.order_id LEFT JOIN {{ var('mart_schema') }}.order_tracking_exceptions ex ON ex.order_id = m.order_id AND ex.exception_type = 'ARCHIVE_ROUTING_GAP' AND ex.resolved_at IS NULL WHERE m.update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND h.order_id IS NULL AND ex.order_id IS NULL" -%}
 
 {# STEP 4: Trim aged-out rows from active mart.
-   Excludes rows with open ARCHIVE_ROUTING_GAP exceptions — never trim an unarchived row. #}
-{%- set _ph4 = "DELETE FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL)" -%}
+   Excludes rows with open ARCHIVE_ROUTING_GAP exceptions — never trim an unarchived row.
+   NULL guard on NOT IN subquery: prevents NOT IN NULL trap (if any exception row has a NULL
+   order_id, NOT IN returns UNKNOWN for all rows — trim silently skips everything). #}
+{%- set _ph4 = "DELETE FROM {{ this }} WHERE update_time < (SELECT COALESCE(MAX(update_time), 0) - 15552000 FROM {{ this }}) AND order_id NOT IN (SELECT order_id FROM {{ var('mart_schema') }}.order_tracking_exceptions WHERE exception_type = 'ARCHIVE_ROUTING_GAP' AND resolved_at IS NULL AND order_id IS NOT NULL)" -%}
 
 {{
     config(
