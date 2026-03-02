@@ -98,11 +98,12 @@ class CDCSecurityError(Exception):
 
 class CDCStrategyType(Enum):
     """Supported CDC strategy types"""
-    TIMESTAMP_ONLY = "timestamp_only"      # v1.0.0 compatibility 
+    TIMESTAMP_ONLY = "timestamp_only"      # v1.0.0 compatibility
     HYBRID = "hybrid"                      # timestamp + ID (most robust)
     ID_ONLY = "id_only"                    # append-only tables
     FULL_SYNC = "full_sync"                # complete refresh
     CUSTOM_SQL = "custom_sql"              # user-defined queries
+    JOIN_DRIVEN = "join_driven"            # driven by another table's CDC column
 
 
 @dataclass
@@ -115,9 +116,13 @@ class CDCConfig:
     custom_query: Optional[str] = None
     batch_size: int = 50000
     timestamp_format: Optional[str] = None  # "datetime", "unix", "auto"
-    additional_where: Optional[str] = None  # NEW: Additional WHERE clause snippet
+    additional_where: Optional[str] = None  # Additional WHERE clause snippet
+    # join_driven strategy fields
+    join_table: Optional[str] = None   # Reference table to join (e.g. "kuaisong.uni_tracking_info")
+    join_column: Optional[str] = None  # CDC column from the join table (e.g. "update_time")
+    join_key: Optional[str] = None     # Join key column in both tables (default: "order_id")
     metadata: Optional[Dict[str, Any]] = None
-    
+
     def __post_init__(self):
         """Validate CDC configuration"""
         if self.strategy == CDCStrategyType.TIMESTAMP_ONLY and not self.timestamp_column:
@@ -128,6 +133,8 @@ class CDCConfig:
             raise ValueError("id_only strategy requires id_column")
         if self.strategy == CDCStrategyType.CUSTOM_SQL and not self.custom_query:
             raise ValueError("custom_sql strategy requires custom_query")
+        if self.strategy == CDCStrategyType.JOIN_DRIVEN and not (self.join_table and self.join_column):
+            raise ValueError("join_driven strategy requires join_table and join_column")
 
 
 @dataclass 
@@ -353,12 +360,15 @@ class TimestampOnlyCDCStrategy(CDCStrategy):
             should_convert_unix = isinstance(raw_timestamp, (int, float))
         
         if should_convert_unix and raw_timestamp is not None and isinstance(raw_timestamp, (int, float)):
-            # Convert UNIX timestamp to datetime string
+            # Subtract 1s before storing: next cycle queries WHERE ts > (T-1) which is
+            # equivalent to >= T, catching rows committed at the exact watermark second
+            # after our query completed (boundary-second rows are never permanently missed).
+            adjusted_ts = int(raw_timestamp) - 1
             try:
                 from datetime import datetime
-                dt = datetime.fromtimestamp(raw_timestamp)
+                dt = datetime.fromtimestamp(adjusted_ts)
                 processed_timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
-                logger.debug(f"Converted UNIX timestamp {raw_timestamp} to {processed_timestamp} (format: {self.config.timestamp_format})")
+                logger.debug(f"Converted UNIX timestamp {raw_timestamp} (adj -1s -> {adjusted_ts}) to {processed_timestamp} (format: {self.config.timestamp_format})")
             except (ValueError, OSError) as e:
                 logger.warning(f"Failed to convert UNIX timestamp {raw_timestamp}: {e}")
                 # Keep raw value if conversion fails
@@ -520,15 +530,28 @@ class HybridCDCStrategy(CDCStrategy):
         """Extract watermark data from hybrid processing"""
         if not rows:
             return WatermarkData(strategy_used=self.strategy_name)
-        
+
         # Get last row's timestamp and ID
         last_row = rows[-1]
         timestamp_col = self.config.timestamp_column
         id_col = self.config.id_column
-        
+
         last_timestamp = last_row.get(timestamp_col)
         last_id = last_row.get(id_col)
-        
+
+        # Subtract 1s so next cycle reads >= T instead of > T,
+        # catching rows committed at the watermark second after our query ran.
+        if last_timestamp is not None:
+            if isinstance(last_timestamp, (int, float)):
+                last_timestamp = int(last_timestamp) - 1
+            elif isinstance(last_timestamp, str):
+                try:
+                    from datetime import datetime as _dt, timedelta
+                    clean = last_timestamp.replace('T', ' ').split('.')[0].split('+')[0].rstrip('Z').strip()
+                    last_timestamp = (_dt.strptime(clean, '%Y-%m-%d %H:%M:%S') - timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    pass  # Keep original if parse fails
+
         return WatermarkData(
             last_timestamp=last_timestamp,
             last_id=last_id,
@@ -952,15 +975,173 @@ class CustomSQLStrategy(CDCStrategy):
         return True
 
 
+class JoinDrivenCDCStrategy(CDCStrategy):
+    """
+    Join-driven CDC strategy for tables that lack their own advancing CDC column.
+
+    Use case — ecs_order_info:
+      add_time is set once at order creation and never changes.  A time-based
+      watermark on add_time only captures NEW orders, leaving a cold-start gap
+      for all orders created before the pipeline started.
+
+    Solution: drive ECS extraction via uni_tracking_info.update_time (which
+    advances continuously for every active order).  Any order that is actively
+    tracked will cycle through a UTI batch, and its ECS row will be extracted
+    in that same cycle.  No cold-start gap, no one-time backfill needed.
+
+    Query pattern:
+        SELECT e.*, u.{join_column} AS __cdc_join_ts
+        FROM {table} e
+        INNER JOIN {join_table} u ON u.{join_key} = e.{join_key}
+        WHERE u.{join_column} > {watermark}
+          AND u.{join_column} < {end_time}
+        ORDER BY u.{join_column}, e.{join_key}
+        LIMIT {limit}
+
+    Watermark: tracks join_column (e.g. update_time from uni_tracking_info).
+    The __cdc_join_ts internal column is stripped from every row IN-PLACE inside
+    extract_watermark_data(), which is called before S3 upload — no extra column
+    lands in the raw Redshift table.
+
+    First run (no watermark): extracts the oldest 100K active orders ordered by
+    update_time, then paginates forward on subsequent cycles until all active
+    orders are covered.  After that, steady-state is ~100K rows/cycle.
+    """
+
+    _INTERNAL_COL = '__cdc_join_ts'
+
+    def build_query(
+        self,
+        table_name: str,
+        watermark: Dict[str, Any],
+        limit: int,
+        table_schema: Optional[Dict[str, str]] = None,
+        end_time: Optional[str] = None,
+    ) -> str:
+        join_table  = self.config.join_table
+        join_column = self.config.join_column
+        join_key    = self.config.join_key or 'order_id'
+
+        # Security: validate every identifier that goes into the SQL
+        for name in [table_name, join_table, join_column, join_key]:
+            if not _validate_sql_identifier(name):
+                raise CDCSecurityError(f"Invalid SQL identifier: {name!r}")
+        if not isinstance(limit, int) or limit <= 0:
+            raise CDCSecurityError(f"Invalid limit: {limit}")
+
+        last_timestamp = watermark.get('last_mysql_data_timestamp')
+
+        # ── Lower bound (watermark) ───────────────────────────────────────────
+        where_parts = []
+        if last_timestamp:
+            ts_str = str(last_timestamp).strip()
+            if any(c in ts_str for c in ['-', 'T', '/', ' ']):
+                # Datetime string — convert to unix epoch
+                try:
+                    from datetime import datetime as _dt
+                    clean = ts_str.replace('T', ' ').split('.')[0].split('+')[0].rstrip('Z').strip()
+                    lower_unix = int(_dt.strptime(clean, '%Y-%m-%d %H:%M:%S').timestamp())
+                    where_parts.append(f"u.{join_column} > {lower_unix}")
+                    logger.info(f"JoinDriven lower bound: {ts_str!r} → unix {lower_unix}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse lower bound {ts_str!r}: {e}. Using sanitised string.")
+                    where_parts.append(f"u.{join_column} > {_sanitize_sql_value(last_timestamp)}")
+            else:
+                # Already numeric
+                where_parts.append(f"u.{join_column} > {_sanitize_sql_value(last_timestamp)}")
+
+        # ── Upper bound (end_time / 5-min buffer) ────────────────────────────
+        if end_time:
+            try:
+                from datetime import datetime as _dt
+                clean_end = end_time.replace('T', ' ').split('.')[0].split('+')[0]
+                end_unix  = int(_dt.strptime(clean_end, '%Y-%m-%d %H:%M:%S').timestamp())
+                where_parts.append(f"u.{join_column} < {end_unix}")
+                logger.info(f"JoinDriven upper bound: {end_time!r} → unix {end_unix}")
+            except Exception as e:
+                logger.warning(f"Failed to apply end_time upper bound: {e}. Query will run without it.")
+
+        where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        query = (
+            f"SELECT e.*, u.{join_column} AS {self._INTERNAL_COL}\n"
+            f"FROM {table_name} e\n"
+            f"INNER JOIN {join_table} u ON u.{join_key} = e.{join_key}\n"
+            f"{where_clause}\n"
+            f"ORDER BY u.{join_column}, e.{join_key}\n"
+            f"LIMIT {limit}"
+        ).strip()
+
+        logger.info(
+            f"JoinDriven CDC query built",
+            extra={
+                "table": table_name,
+                "join_table": join_table,
+                "join_column": join_column,
+                "last_timestamp": last_timestamp,
+                "end_time": end_time,
+                "limit": limit,
+                "complete_query": query,
+            },
+        )
+        print(f"[CDC DEBUG] JoinDriven query for {table_name}:\n{query}")
+        return query
+
+    def extract_watermark_data(self, rows: List[Dict[str, Any]]) -> WatermarkData:
+        """
+        Extract watermark from the __cdc_join_ts internal column and strip it
+        from every row IN-PLACE.
+
+        This is called inside _get_next_chunk() with the same list reference
+        that is later passed to the S3 uploader.  Mutating here means the
+        internal column never reaches the raw Redshift table.
+        """
+        if not rows:
+            return WatermarkData(strategy_used=self.strategy_name)
+
+        raw_ts = rows[-1].get(self._INTERNAL_COL)
+
+        # Strip the internal column from all rows before they reach S3
+        for row in rows:
+            row.pop(self._INTERNAL_COL, None)
+
+        # Subtract 1s then convert unix int → datetime string for watermark storage.
+        # Next cycle queries WHERE join_col > (T-1) which is equivalent to >= T,
+        # catching rows committed at the watermark second after our query ran.
+        processed_ts = raw_ts
+        if raw_ts is not None and isinstance(raw_ts, (int, float)):
+            try:
+                from datetime import datetime
+                adjusted_ts = int(raw_ts) - 1
+                processed_ts = datetime.fromtimestamp(adjusted_ts).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass  # Keep raw value if conversion fails
+
+        return WatermarkData(
+            last_timestamp=processed_ts,
+            row_count=len(rows),
+            strategy_used=self.strategy_name,
+            additional_data={'join_column': self.config.join_column},
+        )
+
+    def validate_table_schema(self, table_schema: Dict[str, str]) -> bool:
+        join_key = self.config.join_key or 'order_id'
+        if join_key not in table_schema:
+            logger.error(f"Table missing join key column: {join_key!r}")
+            return False
+        return True
+
+
 class CDCStrategyFactory:
     """Factory for creating CDC strategy instances"""
-    
+
     _strategies = {
         CDCStrategyType.TIMESTAMP_ONLY: TimestampOnlyCDCStrategy,
         CDCStrategyType.HYBRID: HybridCDCStrategy,
         CDCStrategyType.ID_ONLY: IdOnlyCDCStrategy,
         CDCStrategyType.FULL_SYNC: FullSyncStrategy,
         CDCStrategyType.CUSTOM_SQL: CustomSQLStrategy,
+        CDCStrategyType.JOIN_DRIVEN: JoinDrivenCDCStrategy,
     }
     
     @classmethod
