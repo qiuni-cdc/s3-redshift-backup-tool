@@ -83,6 +83,57 @@ def _send_dq_alert(context):
 
 log = logging.getLogger(__name__)
 
+
+# ============================================================================
+# ALERTING HELPERS
+# ============================================================================
+
+def _send_pipeline_alert(subject, body):
+    """Send SMTP alert for pipeline issues. Failure is logged but never blocks the pipeline."""
+    import smtplib
+    from email.mime.text import MIMEText
+
+    host     = os.environ.get('ALERT_SMTP_HOST',     'smtp.office365.com')
+    port     = int(os.environ.get('ALERT_SMTP_PORT', '587'))
+    user     = os.environ.get('ALERT_SMTP_USER',     'jasleen.tung@uniuni.com')
+    password = os.environ.get('ALERT_SMTP_PASSWORD', '')
+    to       = os.environ.get('ALERT_EMAIL_TO',      'jasleen.tung@uniuni.com')
+
+    msg            = MIMEText(body, 'plain')
+    msg['Subject'] = subject
+    msg['From']    = user
+    msg['To']      = to
+
+    try:
+        server = smtplib.SMTP(host, port, timeout=10)
+        server.ehlo()
+        server.starttls()
+        server.login(user, password)
+        server.sendmail(user, [to], msg.as_string())
+        server.quit()
+        log.info("Pipeline alert email sent to %s", to)
+    except Exception as e:
+        log.warning("Failed to send pipeline alert email: %s", e)
+
+
+def _on_task_failure(context):
+    """on_failure_callback — fires when any task fails after all retries."""
+    ti = context['task_instance']
+    exception = context.get('exception', 'unknown')
+    subject = f"[FAILED] order_tracking_monitoring — {ti.task_id} failed"
+    body = "\n".join([
+        f"Pipeline: order_tracking_daily_monitoring",
+        f"Task:     {ti.task_id}",
+        f"Run:      {ti.run_id}",
+        f"Attempt:  {ti.try_number} of {ti.max_tries + 1}",
+        f"Start:    {ti.start_date}",
+        f"Error:    {exception}",
+        "",
+        "Check Airflow UI or task logs for details.",
+    ])
+    _send_pipeline_alert(subject, body)
+
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -127,10 +178,11 @@ default_args = {
     'owner': 'data-team',
     'depends_on_past': False,
     'start_date': datetime(2026, 2, 25),
-    'email_on_failure': False,  # Airflow SMTP not configured — alerts raised by check_unresolved_exceptions
+    'email_on_failure': False,  # Airflow SMTP not configured — alerts handled by custom smtplib
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
     'execution_timeout': timedelta(minutes=30),
+    'on_failure_callback': _on_task_failure,
 }
 
 dag = DAG(
@@ -140,6 +192,7 @@ dag = DAG(
     schedule_interval='0 3 * * *',  # 3am UTC daily, 1h after vacuum
     max_active_runs=1,
     catchup=False,
+    dagrun_timeout=timedelta(minutes=60),
     tags=['order-tracking', 'monitoring', 'dq']
 )
 

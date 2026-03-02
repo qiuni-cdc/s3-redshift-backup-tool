@@ -117,6 +117,56 @@ TABLES = {
 }
 
 # ============================================================================
+# ALERTING HELPERS
+# ============================================================================
+
+def _send_pipeline_alert(subject, body):
+    """Send SMTP alert for pipeline issues. Failure is logged but never blocks the pipeline."""
+    import smtplib
+    from email.mime.text import MIMEText
+
+    host     = os.environ.get('ALERT_SMTP_HOST',     'smtp.office365.com')
+    port     = int(os.environ.get('ALERT_SMTP_PORT', '587'))
+    user     = os.environ.get('ALERT_SMTP_USER',     'jasleen.tung@uniuni.com')
+    password = os.environ.get('ALERT_SMTP_PASSWORD', '')
+    to       = os.environ.get('ALERT_EMAIL_TO',      'jasleen.tung@uniuni.com')
+
+    msg            = MIMEText(body, 'plain')
+    msg['Subject'] = subject
+    msg['From']    = user
+    msg['To']      = to
+
+    try:
+        server = smtplib.SMTP(host, port, timeout=10)
+        server.ehlo()
+        server.starttls()
+        server.login(user, password)
+        server.sendmail(user, [to], msg.as_string())
+        server.quit()
+        print(f"Alert email sent → {to}")
+    except Exception as e:
+        print(f"WARNING: Alert email failed ({e}) — pipeline continues")
+
+
+def _on_task_failure(context):
+    """on_failure_callback — fires when any task fails after all retries."""
+    ti = context['task_instance']
+    exception = context.get('exception', 'unknown')
+    subject = f"[FAILED] order_tracking — {ti.task_id} failed"
+    body = "\n".join([
+        f"Pipeline: order_tracking_hybrid_dbt_sync",
+        f"Task:     {ti.task_id}",
+        f"Run:      {ti.run_id}",
+        f"Attempt:  {ti.try_number} of {ti.max_tries + 1}",
+        f"Start:    {ti.start_date}",
+        f"Error:    {exception}",
+        "",
+        "Check Airflow UI or task logs for details.",
+    ])
+    _send_pipeline_alert(subject, body)
+
+
+# ============================================================================
 # DAG DEFINITION
 # ============================================================================
 
@@ -124,10 +174,11 @@ default_args = {
     'owner': 'data-team',
     'depends_on_past': False,
     'start_date': datetime(2025, 1, 7),
-    'email_on_failure': False,  # Airflow SMTP not configured — alerts handled by custom smtplib in check_extraction_lag
+    'email_on_failure': False,  # Airflow SMTP not configured — alerts handled by custom smtplib
     'retries': 2,
     'retry_delay': timedelta(minutes=3),
     'execution_timeout': timedelta(minutes=60),
+    'on_failure_callback': _on_task_failure,
 }
 
 dag = DAG(
@@ -137,6 +188,7 @@ dag = DAG(
     schedule_interval='*/15 * * * *',  # Run every 15 minutes
     max_active_runs=1,
     catchup=False,
+    dagrun_timeout=timedelta(minutes=30),
     tags=['order-tracking', 'hybrid', 'dbt', 'production']
 )
 
@@ -456,34 +508,6 @@ trim_raw = PythonOperator(
 # Lag = CURRENT_TIMESTAMP - MAX(ts) in each raw table (Redshift-only, no MySQL needed).
 # uti/uts: WARN=20min, ERROR=30min  (high-frequency, tight SLA)
 # ecs:     WARN=60min, ERROR=120min (write-once add_time, quiet periods are legitimate)
-def _send_lag_alert(subject, body):
-    """Send SMTP alert for extraction lag. Failure is logged but never blocks the pipeline."""
-    import smtplib
-    from email.mime.text import MIMEText
-
-    host     = os.environ.get('ALERT_SMTP_HOST',     'smtp.office365.com')
-    port     = int(os.environ.get('ALERT_SMTP_PORT', '587'))
-    user     = os.environ.get('ALERT_SMTP_USER',     'jasleen.tung@uniuni.com')
-    password = os.environ.get('ALERT_SMTP_PASSWORD', '')
-    to       = os.environ.get('ALERT_EMAIL_TO',      'jasleen.tung@uniuni.com')
-
-    msg            = MIMEText(body, 'plain')
-    msg['Subject'] = subject
-    msg['From']    = user
-    msg['To']      = to
-
-    try:
-        server = smtplib.SMTP(host, port, timeout=10)
-        server.ehlo()
-        server.starttls()
-        server.login(user, password)
-        server.sendmail(user, [to], msg.as_string())
-        server.quit()
-        print(f"Alert email sent → {to}")
-    except Exception as e:
-        print(f"WARNING: Alert email failed ({e}) — pipeline continues")
-
-
 def check_extraction_lag(**context):
     """
     Check extraction freshness: lag = CURRENT_TIMESTAMP - MAX(ts) in Redshift raw.
@@ -589,7 +613,7 @@ def check_extraction_lag(**context):
             lines.append(f"  {key}: lag={lag_min:.1f}min  raw_max={r['raw_max']}")
         lines += ["", "dbt is running — pipeline will self-heal as extractions catch up."]
 
-        _send_lag_alert(subject, "\n".join(lines))
+        _send_pipeline_alert(subject, "\n".join(lines))
 
     # Alert-only — never block dbt. Blocking dbt on lag makes recovery slower:
     # raw data is already in the table; running dbt advances the mart.
@@ -904,7 +928,7 @@ dbt_test = BashOperator(
     echo "[$(date -u +%H:%M:%S)] Tests complete"
 ''' + DBT_CLEANUP_TUNNEL,
     env=dbt_env_vars,
-    execution_timeout=timedelta(minutes=5),
+    execution_timeout=timedelta(minutes=10),
     dag=dag
 )
 
