@@ -289,12 +289,18 @@ def _norm(v) -> str:
     Normalize a scalar for cross-system comparison.
 
     MySQL vs Redshift type differences that cause false positives:
-      - Booleans: MySQL TINYINT(1) → Python int 0/1 ("0"/"1")
-                  Redshift BOOLEAN → Python bool False/True ("False"/"True")
-                  Fix: bool → "0"/"1" before stringifying.
-      - NULLs:    pandas reads MySQL NULL as float('nan') → str gives "nan"
-                  psycopg2 returns Python None → str gives "None"
-                  Fix: both → "" (empty string sentinel for NULL).
+      - Booleans:  MySQL TINYINT(1) → Python int 0/1
+                   Redshift BOOLEAN → Python bool False/True
+                   Fix: bool → "0"/"1".
+      - NULLs:     pandas reads MySQL NULL as float('nan'); psycopg2 returns None.
+                   Fix: both → "".
+      - Floats:    MySQL FLOAT (32-bit) is displayed rounded (e.g. "12.2") but
+                   Redshift shows the exact float32 bits ("12.1999998092651").
+                   MySQL DOUBLE and Redshift DOUBLE PRECISION use different driver
+                   precision when converting to string (17 vs 15 sig figs).
+                   Fix: round all float-like values to 6 decimal places — sufficient
+                   for coordinates (11cm accuracy) and distances, eliminates driver
+                   representation noise without masking real differences.
     """
     if v is None:
         return ""
@@ -305,7 +311,20 @@ def _norm(v) -> str:
         pass
     if isinstance(v, bool):
         return "1" if v else "0"
-    return str(v)
+    if isinstance(v, float):
+        # 6 significant figures: scale-independent, handles both float32 artifacts
+        # (19.200001 → "19.2") and float64 driver representation differences
+        # (36.190029678130855 vs 36.1900296781309 → both "36.19"). Real differences
+        # of >1ppm are still caught (e.g. 7177.8 vs 7178.0 → "7177.8" vs "7178.0").
+        return f"{v:.6g}"
+    # Try to parse string values that look like decimals (e.g. Decimal from psycopg2)
+    s = str(v)
+    if '.' in s:
+        try:
+            return f"{float(s):.6g}"
+        except (ValueError, OverflowError):
+            pass
+    return s
 
 
 def _norm_series(s: pd.Series) -> pd.Series:

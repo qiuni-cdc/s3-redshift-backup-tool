@@ -267,8 +267,11 @@ class FlexibleSchemaManager:
             return pa.int16()  # Use int16 instead of int8 for better range
         
         elif data_type in ['float', 'real']:
-            return pa.float32()
-        
+            # Promote to float64: Python reads MySQL FLOAT as a 64-bit Python float anyway.
+            # Storing as float32 in Parquet gives 32-bit precision artifacts in Redshift
+            # (e.g. 12.2 becomes 12.1999998092651). float64 avoids this with no downside.
+            return pa.float64()
+
         elif data_type == 'double':
             return pa.float64()
         
@@ -637,8 +640,8 @@ class FlexibleSchemaManager:
             'tinyint': pa.int8(),
             'decimal': pa.decimal128(10, 2),
             'numeric': pa.decimal128(10, 2),
-            'float': pa.float32(),
-            'real': pa.float32(),
+            'float': pa.float64(),   # promoted — see _map_mysql_to_pyarrow comment
+            'real': pa.float64(),
             'double': pa.float64(),
             'datetime': pa.timestamp('us'),
             'timestamp': pa.timestamp('us'),
