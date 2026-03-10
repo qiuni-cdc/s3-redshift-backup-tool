@@ -389,14 +389,7 @@ def sync_table(table_config, **context):
         print(f"Source rows: {source_count:,}")
         src_cur.close()
 
-        # --- Truncate target ---
-        print(f"Truncating {full_target} ...")
-        tgt_cur = tgt_conn.cursor()
-        tgt_cur.execute(f"TRUNCATE TABLE {full_target}")
-        tgt_conn.commit()
-        tgt_cur.close()
-
-        # --- Read source data with server-side cursor ---
+        # --- Read source data ---
         if shared_cols:
             select_cols = ", ".join(f"`{c}`" for c in shared_cols)
             select_sql = f"SELECT {select_cols} FROM {full_source}"
@@ -407,10 +400,10 @@ def sync_table(table_config, **context):
         src_cur = src_conn.cursor(dictionary=True)
         src_cur.execute(select_sql)
 
-        # Build INSERT statement from first row
+        # Read all source rows into batches
         columns = None
-        total_inserted = 0
-        batch = []
+        all_batches = []
+        current_batch = []
 
         for row in src_cur:
             if columns is None:
@@ -419,28 +412,35 @@ def sync_table(table_config, **context):
                 col_names = ", ".join(f"`{c}`" for c in columns)
                 insert_sql = f"INSERT INTO {full_target} ({col_names}) VALUES ({placeholders})"
 
-            batch.append(tuple(row.values()))
+            current_batch.append(tuple(row.values()))
 
-            if len(batch) >= batch_size:
-                tgt_cur = tgt_conn.cursor()
-                tgt_cur.executemany(insert_sql, batch)
-                tgt_conn.commit()
-                total_inserted += len(batch)
-                tgt_cur.close()
-                batch = []
+            if len(current_batch) >= batch_size:
+                all_batches.append(current_batch)
+                current_batch = []
 
-                if total_inserted % 100000 == 0:
-                    print(f"  ... {total_inserted:,} rows inserted")
-
-        # Insert remaining rows
-        if batch:
-            tgt_cur = tgt_conn.cursor()
-            tgt_cur.executemany(insert_sql, batch)
-            tgt_conn.commit()
-            total_inserted += len(batch)
-            tgt_cur.close()
+        if current_batch:
+            all_batches.append(current_batch)
 
         src_cur.close()
+
+        # --- DELETE + INSERT in transaction ---
+        # If INSERT fails, DELETE is rolled back and old data is preserved
+        print(f"Deleting old data from {full_target} ...")
+        tgt_cur = tgt_conn.cursor()
+        tgt_cur.execute(f"DELETE FROM {full_target}")
+        deleted = tgt_cur.rowcount
+        print(f"  Deleted {deleted:,} rows")
+
+        total_inserted = 0
+        for batch in all_batches:
+            tgt_cur.executemany(insert_sql, batch)
+            total_inserted += len(batch)
+
+            if total_inserted % 100000 == 0:
+                print(f"  ... {total_inserted:,} rows inserted")
+
+        tgt_conn.commit()
+        tgt_cur.close()
 
         # --- Verify target count ---
         tgt_cur = tgt_conn.cursor()
