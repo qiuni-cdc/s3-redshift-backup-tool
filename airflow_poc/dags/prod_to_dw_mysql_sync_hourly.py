@@ -17,7 +17,7 @@ Tables synced:
   6. kuaisong.ecs_staff                (~158K rows)
   7. kuaisong.uni_prealert_info        (~284K rows)
 
-Connection: Direct pymysql with env vars from .env
+Connection: mysql-connector-python with env vars from .env
   Source (PROD): DB_PROD_HOST / DB_PROD_PORT / DB_US_PROD_RO_PASSWORD
   Target (DW):   DB_DW_WRITE_HOST / DB_DW_WRITE_PORT / DB_DW_WRITE_PASSWORD
 
@@ -35,7 +35,7 @@ import time
 import socket
 import smtplib
 from email.mime.text import MIMEText
-import pymysql
+import mysql.connector
 
 # ============================================================================
 # CONFIGURATION
@@ -173,19 +173,29 @@ def _get_connections(env):
         src_host, src_port = prod_host, prod_port
         tgt_host, tgt_port = dw_host, dw_port
 
-    src_conn = pymysql.connect(
+    # MTU/SSL fix: compress + ssl_disabled + use_pure prevents
+    # "Lost connection" errors through SSH tunnels
+    conn_base = dict(
+        compress=True,
+        ssl_disabled=True,
+        use_pure=True,
+        charset="utf8mb4",
+        connection_timeout=30,
+    )
+
+    src_conn = mysql.connector.connect(
         host=src_host, port=src_port,
         user=env.get("DB_USER", "jasleentung"),
         password=env.get("DB_US_PROD_RO_PASSWORD", ""),
-        charset="utf8mb4", connect_timeout=30, read_timeout=300,
+        **conn_base,
     )
 
-    tgt_conn = pymysql.connect(
+    tgt_conn = mysql.connector.connect(
         host=tgt_host, port=tgt_port,
         user=env.get("DB_USER", "jasleentung"),
         password=env.get("DB_DW_WRITE_PASSWORD", ""),
-        charset="utf8mb4", connect_timeout=30, read_timeout=300,
         autocommit=False,
+        **conn_base,
     )
 
     return src_conn, tgt_conn
@@ -394,7 +404,7 @@ def sync_table(table_config, **context):
             select_sql = f"SELECT * FROM {full_source}"
 
         print(f"Reading from {full_source} ...")
-        src_cur = src_conn.cursor(pymysql.cursors.SSDictCursor)
+        src_cur = src_conn.cursor(dictionary=True)
         src_cur.execute(select_sql)
 
         # Build INSERT statement from first row
