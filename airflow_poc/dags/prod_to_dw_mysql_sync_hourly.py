@@ -43,9 +43,9 @@ import mysql.connector
 
 TABLES = [
     {"source_schema": "kuaisong",        "source_table": "uni_pattern_config",   "target_table": "uni_pattern_config",   "batch_size": 5000},
-    {"source_schema": "kuaisong",        "source_table": "uni_warehouses",       "target_table": "uni_warehouses",       "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "uni_warehouses",       "target_table": "parcel_tool_warehouses", "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "uni_customer",         "target_table": "uni_customer",         "batch_size": 5000},
-    {"source_schema": "kuaisong",        "source_table": "uni_zipcodes",         "target_table": "uni_zipcodes",         "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "uni_zipcodes",         "target_table": "parcel_tool_zipcodes",  "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "uni_mawb_box",         "target_table": "uni_mawb_box",         "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "ecs_staff",            "target_table": "ecs_staff",            "batch_size": 10000},
     {"source_schema": "kuaisong",        "source_table": "uni_prealert_info",    "target_table": "uni_prealert_info",    "batch_size": 10000},
@@ -389,30 +389,24 @@ def sync_table(table_config, **context):
         print(f"Source rows: {source_count:,}")
         src_cur.close()
 
-        # --- Read source data ---
-        if shared_cols:
-            select_cols = ", ".join(f"`{c}`" for c in shared_cols)
-            select_sql = f"SELECT {select_cols} FROM {full_source}"
-        else:
-            select_sql = f"SELECT * FROM {full_source}"
-
+        # --- Read source data (always SELECT * to avoid cursor bugs) ---
         print(f"Reading from {full_source} ...")
         src_cur = src_conn.cursor(dictionary=True)
-        src_cur.execute(select_sql)
+        src_cur.execute(f"SELECT * FROM {full_source}")
 
-        # Read all source rows into batches
+        # Read all source rows into batches, filtering to shared_cols if needed
         columns = None
         all_batches = []
         current_batch = []
 
         for row in src_cur:
             if columns is None:
-                columns = list(row.keys())
+                columns = shared_cols if shared_cols else list(row.keys())
                 placeholders = ", ".join(["%s"] * len(columns))
                 col_names = ", ".join(f"`{c}`" for c in columns)
                 insert_sql = f"INSERT INTO {full_target} ({col_names}) VALUES ({placeholders})"
 
-            current_batch.append(tuple(row.values()))
+            current_batch.append(tuple(row[c] for c in columns))
 
             if len(current_batch) >= batch_size:
                 all_batches.append(current_batch)
