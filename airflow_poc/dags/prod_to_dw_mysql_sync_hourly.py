@@ -1,7 +1,7 @@
 """
 PROD → DW MySQL Hourly Full Sync (Phase 1: Small/Medium Tables)
 ================================================================
-Replicates 8 reference/operational tables from US PROD MySQL to
+Replicates 7 reference/operational tables from US PROD MySQL to
 US DW MySQL (uniods schema). Full sync (TRUNCATE + INSERT) every hour.
 
 Phase 2 (large tables — order_details, uni_prealert_order,
@@ -13,10 +13,9 @@ Tables synced:
   2. kuaisong.uni_warehouses           (~76 rows)
   3. kuaisong.uni_customer             (~3K rows)
   4. kuaisong.uni_zipcodes             (~10K rows)
-  5. kuaisong_report.US_invoice_zone_full (~23K rows)
-  6. kuaisong.uni_mawb_box             (~31K rows)
-  7. kuaisong.ecs_staff                (~158K rows)
-  8. kuaisong.uni_prealert_info        (~284K rows)
+  5. kuaisong.uni_mawb_box             (~31K rows)
+  6. kuaisong.ecs_staff                (~158K rows)
+  7. kuaisong.uni_prealert_info        (~284K rows)
 
 Connection: Direct pymysql with env vars from .env
   Source (PROD): DB_PROD_HOST / DB_PROD_PORT / DB_US_PROD_RO_PASSWORD
@@ -47,7 +46,6 @@ TABLES = [
     {"source_schema": "kuaisong",        "source_table": "uni_warehouses",       "target_table": "uni_warehouses",       "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "uni_customer",         "target_table": "uni_customer",         "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "uni_zipcodes",         "target_table": "uni_zipcodes",         "batch_size": 5000},
-    {"source_schema": "kuaisong_report", "source_table": "US_invoice_zone_full", "target_table": "US_invoice_zone_full", "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "uni_mawb_box",         "target_table": "uni_mawb_box",         "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "ecs_staff",            "target_table": "ecs_staff",            "batch_size": 10000},
     {"source_schema": "kuaisong",        "source_table": "uni_prealert_info",    "target_table": "uni_prealert_info",    "batch_size": 10000},
