@@ -221,10 +221,10 @@ def backfill(table_name):
             sys.exit(1)
 
         col_indices = [all_col_names.index(c) for c in shared_cols]
-        placeholders = ", ".join(["%s"] * len(shared_cols))
         col_names_str = ", ".join(f"`{c}`" for c in shared_cols)
-        insert_sql = f"INSERT IGNORE INTO {full_target} ({col_names_str}) VALUES ({placeholders})"
-        print(f"Syncing {len(shared_cols)} columns")
+        row_placeholder = "(" + ", ".join(["%s"] * len(shared_cols)) + ")"
+        SUB_BATCH = 2000  # rows per multi-row INSERT statement
+        print(f"Syncing {len(shared_cols)} columns (sub-batch {SUB_BATCH:,})")
 
         # --- Read current watermark ---
         tgt_cur = tgt_conn.cursor()
@@ -282,7 +282,14 @@ def backfill(table_name):
             for attempt in range(5):
                 try:
                     tgt_cur = tgt_conn.cursor()
-                    tgt_cur.executemany(insert_sql, batch)
+
+                    # Multi-row INSERT IGNORE in sub-batches
+                    for i in range(0, len(batch), SUB_BATCH):
+                        sub = batch[i:i + SUB_BATCH]
+                        values_str = ", ".join([row_placeholder] * len(sub))
+                        stmt = f"INSERT IGNORE INTO {full_target} ({col_names_str}) VALUES {values_str}"
+                        flat_params = [v for row in sub for v in row]
+                        tgt_cur.execute(stmt, flat_params)
 
                     # Update watermark
                     tgt_cur.execute(
