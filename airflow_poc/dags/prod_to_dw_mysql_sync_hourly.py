@@ -230,15 +230,15 @@ def _send_alert(subject, body):
 # ============================================================================
 
 def _get_column_defs(conn, schema, table):
-    """Get ordered list of (col_name, col_type) from INFORMATION_SCHEMA."""
+    """Get ordered list of (col_name, col_type, extra) from INFORMATION_SCHEMA."""
     cur = conn.cursor()
     cur.execute("""
-        SELECT COLUMN_NAME, COLUMN_TYPE
+        SELECT COLUMN_NAME, COLUMN_TYPE, EXTRA
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
         ORDER BY ORDINAL_POSITION
     """, (schema, table))
-    cols = [(row[0], row[1]) for row in cur.fetchall()]
+    cols = [(row[0], row[1], row[2] if len(row) > 2 else "") for row in cur.fetchall()]
     cur.close()
     return cols
 
@@ -290,8 +290,8 @@ def _validate_schema(src_conn, tgt_conn, table_config):
         mismatches.append(f"Columns in target but not source: {extra_in_target}")
 
     # Check column types for shared columns
-    src_dict = dict(src_cols)
-    tgt_dict = dict(tgt_cols)
+    src_dict = {c[0]: c[1] for c in src_cols}
+    tgt_dict = {c[0]: c[1] for c in tgt_cols}
     for col_name in src_set & tgt_set:
         if src_dict[col_name] != tgt_dict[col_name]:
             mismatches.append(
@@ -368,17 +368,25 @@ def sync_table(table_config, **context):
             )
             return
 
-        # Determine which columns to sync
+        # Determine which columns to sync (exclude generated/virtual columns)
+        tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
+        generated_cols = {c[0] for c in tgt_cols if "GENERATED" in (c[2] or "").upper() or "VIRTUAL" in (c[2] or "").upper()}
+        if generated_cols:
+            print(f"  Excluding generated columns: {generated_cols}")
+
         if schema_result == "mismatch":
             # Only sync columns that exist in BOTH source and target
             src_cols = _get_column_defs(src_conn, src_schema, src_table)
-            tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
             src_names = set(c[0] for c in src_cols)
-            tgt_names = set(c[0] for c in tgt_cols)
+            tgt_names = set(c[0] for c in tgt_cols) - generated_cols
             shared_cols = [c[0] for c in src_cols if c[0] in tgt_names]
             print(f"  Syncing {len(shared_cols)} shared columns (of {len(src_cols)} source, {len(tgt_cols)} target)")
         else:
-            shared_cols = None  # Use all columns (SELECT *)
+            # All columns match, but still exclude generated columns
+            if generated_cols:
+                shared_cols = [c[0] for c in tgt_cols if c[0] not in generated_cols]
+            else:
+                shared_cols = None  # Use all columns (SELECT *)
 
         # --- Read source row count ---
         src_cur = src_conn.cursor()
