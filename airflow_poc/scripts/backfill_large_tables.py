@@ -208,7 +208,7 @@ def backfill(table_name):
             print(f"Excluding generated columns: {generated_cols}")
 
         # Get all source column names for SELECT *
-        src_cur = src_conn.cursor()
+        src_cur = src_conn.cursor(buffered=True)
         src_cur.execute(f"SELECT * FROM {full_source} LIMIT 0")
         all_col_names = [desc[0] for desc in src_cur.description]
         src_cur.close()
