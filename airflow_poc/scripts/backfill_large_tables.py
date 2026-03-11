@@ -276,22 +276,33 @@ def backfill(table_name):
 
             # Build batch with column filtering
             batch = [tuple(row[i] for i in col_indices) for row in rows]
-
-            # Insert
-            tgt_cur = tgt_conn.cursor()
-            tgt_cur.executemany(insert_sql, batch)
-
-            # Update watermark (use max id from this chunk)
             chunk_last_id = rows[-1][all_col_names.index("id")]
-            tgt_cur.execute(
-                f"INSERT INTO {WATERMARK_TABLE} (table_name, last_id, last_batch_rows, last_sync_at) "
-                f"VALUES (%s, %s, %s, NOW()) "
-                f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), last_batch_rows=VALUES(last_batch_rows), last_sync_at=NOW()",
-                (tgt_table, chunk_last_id, len(batch)),
-            )
 
-            tgt_conn.commit()
-            tgt_cur.close()
+            # Insert with retry for transient errors (lock timeout, deadlock)
+            for attempt in range(5):
+                try:
+                    tgt_cur = tgt_conn.cursor()
+                    tgt_cur.executemany(insert_sql, batch)
+
+                    # Update watermark
+                    tgt_cur.execute(
+                        f"INSERT INTO {WATERMARK_TABLE} (table_name, last_id, last_batch_rows, last_sync_at) "
+                        f"VALUES (%s, %s, %s, NOW()) "
+                        f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), last_batch_rows=VALUES(last_batch_rows), last_sync_at=NOW()",
+                        (tgt_table, chunk_last_id, len(batch)),
+                    )
+
+                    tgt_conn.commit()
+                    tgt_cur.close()
+                    break
+                except mysql.connector.errors.DatabaseError as e:
+                    tgt_conn.rollback()
+                    if attempt < 4 and ("1205" in str(e) or "1213" in str(e)):
+                        wait = (attempt + 1) * 10
+                        print(f"    Retry {attempt+1}/5 after lock error, waiting {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        raise
 
             last_id = chunk_last_id
             total_inserted += len(batch)
