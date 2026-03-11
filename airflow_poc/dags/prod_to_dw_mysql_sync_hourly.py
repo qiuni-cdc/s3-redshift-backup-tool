@@ -173,10 +173,8 @@ def _get_connections(env):
         src_host, src_port = prod_host, prod_port
         tgt_host, tgt_port = dw_host, dw_port
 
-    # MTU/SSL fix: compress + ssl_disabled + use_pure prevents
-    # "Lost connection" errors through SSH tunnels
+    # ssl_disabled prevents "Lost connection" errors through SSH tunnels
     conn_base = dict(
-        compress=True,
         ssl_disabled=True,
         use_pure=True,
         charset="utf8mb4",
@@ -389,21 +387,13 @@ def sync_table(table_config, **context):
         print(f"Source rows: {source_count:,}")
         src_cur.close()
 
-        # --- Read source data (raw cursor to bypass buggy row_to_python) ---
+        # --- Read source data ---
         print(f"Reading from {full_source} ...")
-        src_cur = src_conn.cursor(raw=True)
+        src_cur = src_conn.cursor()
         src_cur.execute(f"SELECT * FROM {full_source}")
         all_col_names = [desc[0] for desc in src_cur.description]
-        raw_rows = src_cur.fetchall()
+        all_rows = src_cur.fetchall()
         src_cur.close()
-
-        # Decode raw bytes to Python strings (raw cursor returns bytearray/bytes)
-        def _decode_val(v):
-            if isinstance(v, (bytearray, bytes)):
-                return v.decode("utf-8", errors="replace")
-            return v
-
-        all_rows = [tuple(_decode_val(v) for v in row) for row in raw_rows]
         print(f"  Fetched {len(all_rows):,} rows, {len(all_col_names)} columns")
 
         # Determine which columns to insert and build batches
