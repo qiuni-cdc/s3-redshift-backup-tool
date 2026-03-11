@@ -1,14 +1,9 @@
 """
-PROD → DW MySQL Hourly Full Sync (Phase 1: Small/Medium Tables)
+PROD → DW MySQL Hourly Sync
 ================================================================
-Replicates 7 reference/operational tables from US PROD MySQL to
-US DW MySQL (uniods schema). Full sync (TRUNCATE + INSERT) every hour.
+Replicates tables from US PROD MySQL (kuaisong) to US DW MySQL (uniods).
 
-Phase 2 (large tables — order_details, uni_prealert_order,
-uni_tracking_addon_spath) will use incremental CDC and is not
-included here.
-
-Tables synced:
+Phase 1 — Full Sync (DELETE + INSERT every hour):
   1. kuaisong.uni_pattern_config       (~57 rows)
   2. kuaisong.uni_warehouses           (~76 rows)
   3. kuaisong.uni_customer             (~3K rows)
@@ -17,13 +12,20 @@ Tables synced:
   6. kuaisong.ecs_staff                (~158K rows)
   7. kuaisong.uni_prealert_info        (~284K rows)
 
+Phase 2 — Incremental CDC (append-only, watermark on auto-increment id):
+  8. kuaisong.uni_tracking_addon_spath (~14.7M rows)
+  9. kuaisong.uni_prealert_order       (~34.6M rows)
+ 10. kuaisong.order_details            (~140M rows)
+
+Watermarks stored in uniods.sync_watermarks table.
+Initial backfill via separate script (backfill_large_tables.py).
+
 Connection: mysql-connector-python with env vars from .env
   Source (PROD): DB_PROD_HOST / DB_PROD_PORT / DB_US_PROD_RO_PASSWORD
   Target (DW):   DB_DW_WRITE_HOST / DB_DW_WRITE_PORT / DB_DW_WRITE_PASSWORD
 
 SSH Tunnels (QA only):
   Set USE_SSH_TUNNEL=true in .env to enable.
-  Tunnels via SSH_BASTION_HOST using SSH_BASTION_USER + SSH_BASTION_KEY_PATH.
   On PROD server, set USE_SSH_TUNNEL=false (direct access).
 """
 from airflow import DAG
@@ -50,6 +52,14 @@ TABLES = [
     {"source_schema": "kuaisong",        "source_table": "ecs_staff",            "target_table": "ecs_staff",            "batch_size": 10000},
     {"source_schema": "kuaisong",        "source_table": "uni_prealert_info",    "target_table": "uni_prealert_info",    "batch_size": 10000},
 ]
+
+INCREMENTAL_TABLES = [
+    {"source_schema": "kuaisong", "source_table": "uni_tracking_addon_spath", "target_table": "uni_tracking_addon_spath", "batch_size": 10000},
+    {"source_schema": "kuaisong", "source_table": "uni_prealert_order",      "target_table": "uni_prealert_order",      "batch_size": 10000},
+    {"source_schema": "kuaisong", "source_table": "order_details",           "target_table": "order_details",           "batch_size": 10000},
+]
+
+WATERMARK_TABLE = "uniods.sync_watermarks"
 
 TARGET_SCHEMA = "uniods"
 
@@ -498,22 +508,206 @@ def sync_table(table_config, **context):
 
 
 # ============================================================================
+# INCREMENTAL SYNC FUNCTION
+# ============================================================================
+
+def sync_table_incremental(table_config, **context):
+    """Incremental sync: fetch rows WHERE id > last_watermark, append to target."""
+    src_schema = table_config["source_schema"]
+    src_table = table_config["source_table"]
+    tgt_table = table_config["target_table"]
+    batch_size = table_config["batch_size"]
+
+    full_source = f"{src_schema}.{src_table}"
+    full_target = f"{TARGET_SCHEMA}.{tgt_table}"
+
+    print(f"\n{'='*70}")
+    print(f"INCREMENTAL SYNC: {full_source} -> {full_target}")
+    print(f"{'='*70}")
+
+    env = _load_env()
+    src_conn = None
+    tgt_conn = None
+
+    try:
+        print("Connecting to source (PROD) and target (DW) ...")
+        src_conn, tgt_conn = _get_connections(env)
+
+        # --- Schema validation ---
+        schema_result = _validate_schema(src_conn, tgt_conn, table_config)
+
+        if schema_result == "missing":
+            context["task_instance"].xcom_push(
+                key=f"incr_{src_table}",
+                value={"source": full_source, "target": full_target,
+                       "status": "skipped", "error": "Target table does not exist"},
+            )
+            return
+
+        # --- Read watermark ---
+        tgt_cur = tgt_conn.cursor()
+        tgt_cur.execute(
+            f"SELECT last_id FROM {WATERMARK_TABLE} WHERE table_name = %s",
+            (tgt_table,),
+        )
+        row = tgt_cur.fetchone()
+        last_id = row[0] if row else 0
+        tgt_cur.close()
+        print(f"Watermark: last_id = {last_id:,}")
+
+        # --- Get source max id ---
+        src_cur = src_conn.cursor()
+        src_cur.execute(f"SELECT MAX(id) FROM {full_source}")
+        max_id = src_cur.fetchone()[0] or 0
+        src_cur.close()
+        print(f"Source MAX(id) = {max_id:,}")
+
+        if max_id <= last_id:
+            print("No new data — skipping")
+            context["task_instance"].xcom_push(
+                key=f"incr_{src_table}",
+                value={"source": full_source, "target": full_target,
+                       "status": "success", "inserted": 0,
+                       "last_id": last_id, "max_id": max_id},
+            )
+            return
+
+        # --- Determine columns (exclude generated) ---
+        tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
+        generated_cols = {c[0] for c in tgt_cols
+                         if "GENERATED" in (c[2] or "").upper()
+                         or "VIRTUAL" in (c[2] or "").upper()}
+        if generated_cols:
+            print(f"  Excluding generated columns: {generated_cols}")
+
+        if schema_result == "mismatch":
+            src_cols = _get_column_defs(src_conn, src_schema, src_table)
+            src_names = set(c[0] for c in src_cols)
+            tgt_names = set(c[0] for c in tgt_cols) - generated_cols
+            shared_cols = [c[0] for c in src_cols if c[0] in tgt_names]
+            print(f"  Syncing {len(shared_cols)} shared columns")
+        else:
+            if generated_cols:
+                shared_cols = [c[0] for c in tgt_cols if c[0] not in generated_cols]
+            else:
+                shared_cols = None
+
+        # --- Fetch new rows ---
+        new_rows = max_id - last_id
+        print(f"Fetching {new_rows:,} new rows (id {last_id+1:,} to {max_id:,}) ...")
+        src_cur = src_conn.cursor()
+        src_cur.execute(
+            f"SELECT * FROM {full_source} WHERE id > %s AND id <= %s ORDER BY id",
+            (last_id, max_id),
+        )
+        all_col_names = [desc[0] for desc in src_cur.description]
+        all_rows = src_cur.fetchall()
+        src_cur.close()
+        print(f"  Fetched {len(all_rows):,} rows")
+
+        if not all_rows:
+            print("No rows returned — skipping")
+            context["task_instance"].xcom_push(
+                key=f"incr_{src_table}",
+                value={"source": full_source, "target": full_target,
+                       "status": "success", "inserted": 0,
+                       "last_id": last_id, "max_id": max_id},
+            )
+            return
+
+        # --- Build batches ---
+        if shared_cols:
+            col_indices = [all_col_names.index(c) for c in shared_cols]
+            columns = shared_cols
+        else:
+            col_indices = list(range(len(all_col_names)))
+            columns = all_col_names
+
+        placeholders = ", ".join(["%s"] * len(columns))
+        col_names_str = ", ".join(f"`{c}`" for c in columns)
+        insert_sql = f"INSERT INTO {full_target} ({col_names_str}) VALUES ({placeholders})"
+
+        all_batches = []
+        current_batch = []
+        for row_data in all_rows:
+            current_batch.append(tuple(row_data[i] for i in col_indices))
+            if len(current_batch) >= batch_size:
+                all_batches.append(current_batch)
+                current_batch = []
+        if current_batch:
+            all_batches.append(current_batch)
+
+        # --- INSERT (append only — no DELETE) ---
+        tgt_cur = tgt_conn.cursor()
+        total_inserted = 0
+        for batch in all_batches:
+            tgt_cur.executemany(insert_sql, batch)
+            total_inserted += len(batch)
+            if total_inserted % 100000 == 0:
+                print(f"  ... {total_inserted:,} rows inserted")
+
+        # --- Update watermark ---
+        new_last_id = max_id
+        tgt_cur.execute(
+            f"INSERT INTO {WATERMARK_TABLE} (table_name, last_id, last_batch_rows, last_sync_at) "
+            f"VALUES (%s, %s, %s, NOW()) "
+            f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), last_batch_rows=VALUES(last_batch_rows), last_sync_at=NOW()",
+            (tgt_table, new_last_id, total_inserted),
+        )
+
+        tgt_conn.commit()
+        tgt_cur.close()
+
+        print(f"Sync complete: {total_inserted:,} rows inserted, watermark -> {new_last_id:,}")
+
+        context["task_instance"].xcom_push(
+            key=f"incr_{src_table}",
+            value={"source": full_source, "target": full_target,
+                   "status": "success", "inserted": total_inserted,
+                   "last_id": new_last_id, "max_id": max_id,
+                   "schema": schema_result},
+        )
+
+    except Exception as e:
+        print(f"ERROR syncing {full_source}: {e}")
+        import traceback
+        traceback.print_exc()
+
+        context["task_instance"].xcom_push(
+            key=f"incr_{src_table}",
+            value={"source": full_source, "target": full_target,
+                   "status": "failed", "error": str(e)},
+        )
+        raise
+
+    finally:
+        if src_conn:
+            src_conn.close()
+        if tgt_conn:
+            tgt_conn.close()
+
+    print(f"{'='*70}\n")
+
+
+# ============================================================================
 # SUMMARY FUNCTION
 # ============================================================================
 
 def print_summary(**context):
-    """Print summary of all table syncs."""
+    """Print summary of all table syncs (full + incremental)."""
     print("\n" + "=" * 70)
     print("PROD -> DW MYSQL SYNC - HOURLY SUMMARY")
     print("=" * 70)
     print(f"Execution: {context['ds']} {context.get('ts', '')}")
-    print("-" * 70)
 
     total_rows = 0
     success = 0
     failed = 0
     skipped = 0
 
+    # --- Full-sync tables ---
+    print("-" * 70)
+    print("FULL SYNC (DELETE + INSERT):")
     for table in TABLES:
         src_table = table["source_table"]
         result = context["task_instance"].xcom_pull(
@@ -526,7 +720,7 @@ def print_summary(**context):
             match = "OK" if src_cnt == tgt_cnt else "MISMATCH"
             schema_tag = ""
             if result.get("schema") == "mismatch":
-                schema_tag = " [schema mismatch — shared cols only]"
+                schema_tag = " [schema mismatch]"
             print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [{match}]{schema_tag}")
             total_rows += tgt_cnt
             success += 1
@@ -540,9 +734,35 @@ def print_summary(**context):
             print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
             failed += 1
 
+    # --- Incremental tables ---
+    print("-" * 70)
+    print("INCREMENTAL SYNC (append via watermark):")
+    for table in INCREMENTAL_TABLES:
+        src_table = table["source_table"]
+        result = context["task_instance"].xcom_pull(
+            task_ids=f"incr_{src_table}",
+            key=f"incr_{src_table}",
+        )
+        if result and result.get("status") == "success":
+            inserted = result.get("inserted", 0)
+            last_id = result.get("last_id", 0)
+            max_id = result.get("max_id", 0)
+            print(f"  {result['source']:<45} -> +{inserted:>10,} rows  (watermark: {last_id:,})")
+            total_rows += inserted
+            success += 1
+        elif result and result.get("status") == "skipped":
+            print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
+            skipped += 1
+        elif result:
+            print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
+            failed += 1
+        else:
+            print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
+            failed += 1
+
     print("-" * 70)
     print(f"Tables: {success} success, {failed} failed, {skipped} skipped")
-    print(f"Total rows synced: {total_rows:,}")
+    print(f"Total rows synced this run: {total_rows:,}")
     print("=" * 70 + "\n")
 
     context["task_instance"].xcom_push(
@@ -576,11 +796,11 @@ default_args = {
 dag = DAG(
     "prod_to_dw_mysql_sync_hourly",
     default_args=default_args,
-    description="Hourly full sync of reference tables from PROD MySQL to DW MySQL (uniods)",
+    description="Hourly sync of reference tables (full) and large tables (incremental) from PROD to DW MySQL",
     schedule_interval="0 * * * *",
     max_active_runs=1,
     catchup=False,
-    tags=["mysql-sync", "prod-to-dw", "full-sync", "hourly"],
+    tags=["mysql-sync", "prod-to-dw", "hourly"],
 )
 
 # ============================================================================
@@ -602,9 +822,30 @@ for table in TABLES:
     )
     sync_tasks.append(task)
 
-# Chain tasks sequentially
+# Chain full-sync tasks sequentially
 for i in range(1, len(sync_tasks)):
     sync_tasks[i - 1] >> sync_tasks[i]
+
+# --- Incremental sync tasks ---
+incr_tasks = []
+
+for table in INCREMENTAL_TABLES:
+    def _make_incr_callable(tbl):
+        def _run(**ctx):
+            return sync_table_incremental(tbl, **ctx)
+        return _run
+
+    task = PythonOperator(
+        task_id=f"incr_{table['source_table']}",
+        python_callable=_make_incr_callable(table),
+        dag=dag,
+    )
+    incr_tasks.append(task)
+
+# Chain: full-sync -> incremental (sequential)
+sync_tasks[-1] >> incr_tasks[0]
+for i in range(1, len(incr_tasks)):
+    incr_tasks[i - 1] >> incr_tasks[i]
 
 # Summary runs after all syncs
 summary_task = PythonOperator(
@@ -614,4 +855,4 @@ summary_task = PythonOperator(
     dag=dag,
 )
 
-sync_tasks[-1] >> summary_task
+incr_tasks[-1] >> summary_task
