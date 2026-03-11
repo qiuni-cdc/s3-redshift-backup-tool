@@ -223,7 +223,7 @@ def backfill(table_name):
         col_indices = [all_col_names.index(c) for c in shared_cols]
         placeholders = ", ".join(["%s"] * len(shared_cols))
         col_names_str = ", ".join(f"`{c}`" for c in shared_cols)
-        insert_sql = f"INSERT INTO {full_target} ({col_names_str}) VALUES ({placeholders})"
+        insert_sql = f"INSERT IGNORE INTO {full_target} ({col_names_str}) VALUES ({placeholders})"
         print(f"Syncing {len(shared_cols)} columns")
 
         # --- Read current watermark ---
