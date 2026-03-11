@@ -389,33 +389,36 @@ def sync_table(table_config, **context):
         print(f"Source rows: {source_count:,}")
         src_cur.close()
 
-        # --- Read source data (always SELECT * to avoid cursor bugs) ---
+        # --- Read source data (plain cursor + fetchall to avoid row_to_python bugs) ---
         print(f"Reading from {full_source} ...")
-        src_cur = src_conn.cursor(dictionary=True)
+        src_cur = src_conn.cursor()
         src_cur.execute(f"SELECT * FROM {full_source}")
+        all_col_names = [desc[0] for desc in src_cur.description]
+        all_rows = src_cur.fetchall()
+        src_cur.close()
+        print(f"  Fetched {len(all_rows):,} rows, {len(all_col_names)} columns")
 
-        # Read all source rows into batches, filtering to shared_cols if needed
-        columns = None
+        # Determine which columns to insert and build batches
+        if shared_cols:
+            col_indices = [all_col_names.index(c) for c in shared_cols]
+            columns = shared_cols
+        else:
+            col_indices = list(range(len(all_col_names)))
+            columns = all_col_names
+
+        placeholders = ", ".join(["%s"] * len(columns))
+        col_names = ", ".join(f"`{c}`" for c in columns)
+        insert_sql = f"INSERT INTO {full_target} ({col_names}) VALUES ({placeholders})"
+
         all_batches = []
         current_batch = []
-
-        for row in src_cur:
-            if columns is None:
-                columns = shared_cols if shared_cols else list(row.keys())
-                placeholders = ", ".join(["%s"] * len(columns))
-                col_names = ", ".join(f"`{c}`" for c in columns)
-                insert_sql = f"INSERT INTO {full_target} ({col_names}) VALUES ({placeholders})"
-
-            current_batch.append(tuple(row[c] for c in columns))
-
+        for row in all_rows:
+            current_batch.append(tuple(row[i] for i in col_indices))
             if len(current_batch) >= batch_size:
                 all_batches.append(current_batch)
                 current_batch = []
-
         if current_batch:
             all_batches.append(current_batch)
-
-        src_cur.close()
 
         # --- DELETE + INSERT in transaction ---
         # If INSERT fails, DELETE is rolled back and old data is preserved
