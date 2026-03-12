@@ -592,73 +592,85 @@ def sync_table_incremental(table_config, **context):
             else:
                 shared_cols = None
 
-        # --- Fetch new rows ---
-        new_rows = max_id - last_id
-        print(f"Fetching {new_rows:,} new rows (id {last_id+1:,} to {max_id:,}) ...")
-        src_cur = src_conn.cursor()
-        src_cur.execute(
-            f"SELECT * FROM {full_source} WHERE id > %s AND id <= %s ORDER BY id",
-            (last_id, max_id),
-        )
-        all_col_names = [desc[0] for desc in src_cur.description]
-        all_rows = src_cur.fetchall()
-        src_cur.close()
-        print(f"  Fetched {len(all_rows):,} rows")
-
-        if not all_rows:
-            print("No rows returned — skipping")
-            context["task_instance"].xcom_push(
-                key=f"incr_{src_table}",
-                value={"source": full_source, "target": full_target,
-                       "status": "success", "inserted": 0,
-                       "last_id": last_id, "max_id": max_id},
-            )
-            return
-
-        # --- Build batches ---
+        # --- Determine columns for INSERT ---
         if shared_cols:
+            # Get source column names to map indices
+            src_cur = src_conn.cursor(buffered=True)
+            src_cur.execute(f"SELECT * FROM {full_source} LIMIT 0")
+            all_col_names = [desc[0] for desc in src_cur.description]
+            src_cur.close()
             col_indices = [all_col_names.index(c) for c in shared_cols]
             columns = shared_cols
         else:
+            src_cur = src_conn.cursor(buffered=True)
+            src_cur.execute(f"SELECT * FROM {full_source} LIMIT 0")
+            all_col_names = [desc[0] for desc in src_cur.description]
+            src_cur.close()
             col_indices = list(range(len(all_col_names)))
             columns = all_col_names
 
-        placeholders = ", ".join(["%s"] * len(columns))
         col_names_str = ", ".join(f"`{c}`" for c in columns)
-        insert_sql = f"INSERT INTO {full_target} ({col_names_str}) VALUES ({placeholders})"
+        row_placeholder = "(" + ", ".join(["%s"] * len(columns)) + ")"
+        SUB_BATCH = 2000  # rows per multi-row INSERT statement
 
-        all_batches = []
-        current_batch = []
-        for row_data in all_rows:
-            current_batch.append(tuple(row_data[i] for i in col_indices))
-            if len(current_batch) >= batch_size:
-                all_batches.append(current_batch)
-                current_batch = []
-        if current_batch:
-            all_batches.append(current_batch)
+        # --- Chunked fetch + insert loop ---
+        CHUNK_SIZE = 50000
+        new_rows = max_id - last_id
+        print(f"New rows: {new_rows:,} (id {last_id+1:,} to {max_id:,}), chunk={CHUNK_SIZE:,}")
 
-        # --- INSERT (append only — no DELETE) ---
-        tgt_cur = tgt_conn.cursor()
         total_inserted = 0
-        for batch in all_batches:
-            tgt_cur.executemany(insert_sql, batch)
+        chunk_num = 0
+        current_id = last_id
+        start_time = time.time()
+
+        while current_id < max_id:
+            chunk_num += 1
+
+            # Fetch chunk from source
+            src_cur = src_conn.cursor()
+            src_cur.execute(
+                f"SELECT * FROM {full_source} WHERE id > %s ORDER BY id LIMIT %s",
+                (current_id, CHUNK_SIZE),
+            )
+            rows = src_cur.fetchall()
+            src_cur.close()
+
+            if not rows:
+                break
+
+            # Build filtered batch
+            batch = [tuple(row[i] for i in col_indices) for row in rows]
+            chunk_last_id = rows[-1][all_col_names.index("id")]
+
+            # Multi-row INSERT IGNORE in sub-batches
+            tgt_cur = tgt_conn.cursor()
+            for i in range(0, len(batch), SUB_BATCH):
+                sub = batch[i:i + SUB_BATCH]
+                values_str = ", ".join([row_placeholder] * len(sub))
+                stmt = f"INSERT IGNORE INTO {full_target} ({col_names_str}) VALUES {values_str}"
+                flat_params = [v for row in sub for v in row]
+                tgt_cur.execute(stmt, flat_params)
+
+            # Update watermark
+            tgt_cur.execute(
+                f"INSERT INTO {WATERMARK_TABLE} (table_name, last_id, last_batch_rows, last_sync_at) "
+                f"VALUES (%s, %s, %s, NOW()) "
+                f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), last_batch_rows=VALUES(last_batch_rows), last_sync_at=NOW()",
+                (tgt_table, chunk_last_id, len(batch)),
+            )
+
+            tgt_conn.commit()
+            tgt_cur.close()
+
+            current_id = chunk_last_id
             total_inserted += len(batch)
-            if total_inserted % 100000 == 0:
-                print(f"  ... {total_inserted:,} rows inserted")
+            elapsed = time.time() - start_time
+            rate = total_inserted / elapsed if elapsed > 0 else 0
+            print(f"  Chunk {chunk_num}: +{len(batch):,} rows | id={current_id:,} | {total_inserted:,} total | {rate:,.0f} rows/s")
 
-        # --- Update watermark ---
-        new_last_id = max_id
-        tgt_cur.execute(
-            f"INSERT INTO {WATERMARK_TABLE} (table_name, last_id, last_batch_rows, last_sync_at) "
-            f"VALUES (%s, %s, %s, NOW()) "
-            f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), last_batch_rows=VALUES(last_batch_rows), last_sync_at=NOW()",
-            (tgt_table, new_last_id, total_inserted),
-        )
-
-        tgt_conn.commit()
-        tgt_cur.close()
-
-        print(f"Sync complete: {total_inserted:,} rows inserted, watermark -> {new_last_id:,}")
+        new_last_id = current_id
+        elapsed = time.time() - start_time
+        print(f"Sync complete: {total_inserted:,} rows in {elapsed:.0f}s, watermark -> {new_last_id:,}")
 
         context["task_instance"].xcom_push(
             key=f"incr_{src_table}",
