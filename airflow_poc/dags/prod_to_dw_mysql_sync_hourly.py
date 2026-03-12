@@ -3,7 +3,7 @@ PROD → DW MySQL Hourly Sync
 ================================================================
 Replicates tables from US PROD MySQL (kuaisong) to US DW MySQL (uniods).
 
-Phase 1 — Full Sync (DELETE + INSERT every hour):
+Phase 1 — Full Sync (DELETE + INSERT every hour, all 7 run in parallel):
   1. kuaisong.uni_pattern_config       (~57 rows)
   2. kuaisong.uni_warehouses           (~76 rows)
   3. kuaisong.uni_customer             (~3K rows)
@@ -11,6 +11,7 @@ Phase 1 — Full Sync (DELETE + INSERT every hour):
   5. kuaisong.uni_mawb_box             (~31K rows)
   6. kuaisong.ecs_staff                (~158K rows)
   7. kuaisong.uni_prealert_info        (~284K rows)
+  8. driver_app.uni_common_dict        (~116 rows)
 
 Phase 2 — Incremental CDC (append-only, watermark on auto-increment id):
   8. kuaisong.uni_tracking_addon_spath (~14.7M rows)
@@ -51,6 +52,7 @@ TABLES = [
     {"source_schema": "kuaisong",        "source_table": "uni_mawb_box",         "target_table": "uni_mawb_box",         "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "ecs_staff",            "target_table": "ecs_staff",            "batch_size": 10000},
     {"source_schema": "kuaisong",        "source_table": "uni_prealert_info",    "target_table": "uni_prealert_info",    "batch_size": 10000},
+    {"source_schema": "driver_app",     "source_table": "uni_common_dict",      "target_table": "uni_common_dict",      "batch_size": 5000},
 ]
 
 INCREMENTAL_TABLES = [
@@ -816,7 +818,7 @@ dag = DAG(
 )
 
 # ============================================================================
-# TASK GENERATION — sequential chain
+# TASK GENERATION — parallel full-sync, then sequential incremental
 # ============================================================================
 
 sync_tasks = []
@@ -834,11 +836,9 @@ for table in TABLES:
     )
     sync_tasks.append(task)
 
-# Chain full-sync tasks sequentially
-for i in range(1, len(sync_tasks)):
-    sync_tasks[i - 1] >> sync_tasks[i]
+# No chaining between full-sync tasks — they run in parallel
 
-# --- Incremental sync tasks ---
+# --- Incremental sync tasks (sequential, after all full-sync complete) ---
 incr_tasks = []
 
 for table in INCREMENTAL_TABLES:
@@ -854,8 +854,11 @@ for table in INCREMENTAL_TABLES:
     )
     incr_tasks.append(task)
 
-# Chain: full-sync -> incremental (sequential)
-sync_tasks[-1] >> incr_tasks[0]
+# All full-sync tasks must complete before first incremental task starts
+for sync_task in sync_tasks:
+    sync_task >> incr_tasks[0]
+
+# Chain incremental tasks sequentially
 for i in range(1, len(incr_tasks)):
     incr_tasks[i - 1] >> incr_tasks[i]
 
