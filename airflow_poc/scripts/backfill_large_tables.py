@@ -199,6 +199,12 @@ def backfill(table_name):
     src_conn, tgt_conn = _get_connections(env)
 
     try:
+        # Set longer lock wait timeout and commit any implicit transactions
+        tgt_cur = tgt_conn.cursor()
+        tgt_cur.execute("SET innodb_lock_wait_timeout = 300")
+        tgt_cur.close()
+        tgt_conn.commit()
+
         # --- Determine columns (exclude generated) ---
         tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
         generated_cols = {c[0] for c in tgt_cols
@@ -251,6 +257,9 @@ def backfill(table_name):
         remaining = max_id - last_id
         print(f"Rows to backfill: ~{remaining:,} (id {last_id+1:,} to {max_id:,})")
         print("-" * 70)
+
+        # Clear any pending read transactions before INSERT loop
+        tgt_conn.commit()
 
         # --- Chunked backfill loop ---
         total_inserted = 0
