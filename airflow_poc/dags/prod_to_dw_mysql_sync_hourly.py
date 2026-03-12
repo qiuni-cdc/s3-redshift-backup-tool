@@ -336,6 +336,47 @@ def _validate_schema(src_conn, tgt_conn, table_config):
     return "match"
 
 
+def _recreate_target_table(src_conn, tgt_conn, table_config):
+    """Drop and recreate target table to match source schema.
+    Only safe for full-sync tables (DELETE + INSERT).
+    """
+    import re
+
+    src_schema = table_config["source_schema"]
+    src_table = table_config["source_table"]
+    tgt_table = table_config["target_table"]
+    full_source = f"{src_schema}.{src_table}"
+    full_target = f"{TARGET_SCHEMA}.{tgt_table}"
+
+    # Get source CREATE TABLE DDL
+    src_cur = src_conn.cursor()
+    src_cur.execute(f"SHOW CREATE TABLE {full_source}")
+    create_ddl = src_cur.fetchone()[1]
+    src_cur.close()
+
+    # Rewrite: replace source table name with fully qualified target
+    # SHOW CREATE TABLE returns: CREATE TABLE `table_name` (...)
+    create_ddl = re.sub(
+        r'CREATE TABLE `?' + re.escape(src_table) + r'`?',
+        f'CREATE TABLE `{TARGET_SCHEMA}`.`{tgt_table}`',
+        create_ddl,
+        count=1,
+    )
+
+    # Drop existing target
+    tgt_cur = tgt_conn.cursor()
+    print(f"  Dropping {full_target} ...")
+    tgt_cur.execute(f"DROP TABLE IF EXISTS `{TARGET_SCHEMA}`.`{tgt_table}`")
+
+    # Create new target from source DDL
+    print(f"  Creating {full_target} from source schema ...")
+    tgt_cur.execute(create_ddl)
+    tgt_conn.commit()
+    tgt_cur.close()
+
+    print(f"  Target table recreated successfully")
+
+
 # ============================================================================
 # SYNC FUNCTION
 # ============================================================================
@@ -363,42 +404,30 @@ def sync_table(table_config, **context):
         print("Connecting to source (PROD) and target (DW) ...")
         src_conn, tgt_conn = _get_connections(env)
 
-        # --- Schema validation (alert on mismatch, continue with existing) ---
+        # --- Schema validation (auto-recreate on mismatch/missing) ---
         schema_result = _validate_schema(src_conn, tgt_conn, table_config)
 
-        # Skip sync if target table doesn't exist
-        if schema_result == "missing":
-            context["task_instance"].xcom_push(
-                key=f"sync_{src_table}",
-                value={
-                    "source": full_source,
-                    "target": full_target,
-                    "schema": schema_result,
-                    "status": "skipped",
-                    "error": "Target table does not exist",
-                },
+        if schema_result in ("missing", "mismatch"):
+            reason = schema_result
+            print(f"  Auto-recreating target table ({reason}) ...")
+            _recreate_target_table(src_conn, tgt_conn, table_config)
+            schema_result = "recreated"
+            _send_alert(
+                f"[PROD->DW Sync] Target table recreated: {full_target}",
+                f"The target table {full_target} was automatically recreated "
+                f"to match the source schema (was: {reason}).\n\n"
+                f"Source: {full_source}\nTarget: {full_target}\n\n"
+                f"The sync will continue with the new schema.",
             )
-            return
 
         # Determine which columns to sync (exclude generated/virtual columns)
         tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
         generated_cols = {c[0] for c in tgt_cols if "GENERATED" in (c[2] or "").upper() or "VIRTUAL" in (c[2] or "").upper()}
         if generated_cols:
             print(f"  Excluding generated columns: {generated_cols}")
-
-        if schema_result == "mismatch":
-            # Only sync columns that exist in BOTH source and target
-            src_cols = _get_column_defs(src_conn, src_schema, src_table)
-            src_names = set(c[0] for c in src_cols)
-            tgt_names = set(c[0] for c in tgt_cols) - generated_cols
-            shared_cols = [c[0] for c in src_cols if c[0] in tgt_names]
-            print(f"  Syncing {len(shared_cols)} shared columns (of {len(src_cols)} source, {len(tgt_cols)} target)")
+            shared_cols = [c[0] for c in tgt_cols if c[0] not in generated_cols]
         else:
-            # All columns match, but still exclude generated columns
-            if generated_cols:
-                shared_cols = [c[0] for c in tgt_cols if c[0] not in generated_cols]
-            else:
-                shared_cols = None  # Use all columns (SELECT *)
+            shared_cols = None  # Use all columns (SELECT *)
 
         # --- Read source row count ---
         src_cur = src_conn.cursor()
@@ -733,7 +762,9 @@ def print_summary(**context):
             tgt_cnt = result["target_count"]
             match = "OK" if src_cnt == tgt_cnt else "MISMATCH"
             schema_tag = ""
-            if result.get("schema") == "mismatch":
+            if result.get("schema") == "recreated":
+                schema_tag = " [schema recreated]"
+            elif result.get("schema") == "mismatch":
                 schema_tag = " [schema mismatch]"
             print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [{match}]{schema_tag}")
             total_rows += tgt_cnt
