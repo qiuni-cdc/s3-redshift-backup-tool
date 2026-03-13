@@ -116,8 +116,8 @@ def _start_ssh_tunnel(env, name, remote_host, remote_port):
         return _ssh_tunnels[name]._local_port
 
     local_port = _find_free_port()
-    bastion_host = env.get("SSH_BASTION_HOST", "35.83.114.196")
-    bastion_user = env.get("SSH_BASTION_USER", "jasleentung")
+    bastion_host = env.get("SSH_BASTION_HOST", "")
+    bastion_user = env.get("SSH_BASTION_USER", "")
     key_path = env.get("SSH_BASTION_KEY_PATH", "")
 
     cmd = [
@@ -195,14 +195,14 @@ def _get_connections(env):
 
     src_conn = mysql.connector.connect(
         host=src_host, port=src_port,
-        user=env.get("DB_USER", "jasleentung"),
+        user=env["DB_USER"],
         password=env.get("DB_US_PROD_RO_PASSWORD", ""),
         **conn_base,
     )
 
     tgt_conn = mysql.connector.connect(
         host=tgt_host, port=tgt_port,
-        user=env.get("DB_USER", "jasleentung"),
+        user=env["DB_USER"],
         password=env.get("DB_DW_WRITE_PASSWORD", ""),
         autocommit=False,
         **conn_base,
@@ -260,7 +260,7 @@ def _validate_schema(src_conn, tgt_conn, table_config, send_alert=True):
     If mismatch: send alert email and continue with existing target schema.
     If target missing: skip (table must be created manually).
     Set send_alert=False to suppress emails (caller handles notification).
-    Returns: 'match', 'mismatch', or 'missing'.
+    Returns: ('match'|'mismatch'|'missing', detail_string).
     """
     src_schema = table_config["source_schema"]
     src_table = table_config["source_table"]
@@ -286,7 +286,7 @@ def _validate_schema(src_conn, tgt_conn, table_config, send_alert=True):
                 f"Source table {full_source} has {len(src_cols)} columns.\n\n"
                 f"Action required: Create the table manually in {TARGET_SCHEMA} schema."
             )
-        return "missing"
+        return "missing", "Target table does not exist"
 
     # Compare column names and types
     mismatches = []
@@ -333,10 +333,10 @@ def _validate_schema(src_conn, tgt_conn, table_config, send_alert=True):
                 f"Only columns present in BOTH source and target will be synced.\n\n"
                 f"Action required: Review and update the target table DDL if needed."
             )
-        return "mismatch"
+        return "mismatch", detail
 
     print(f"  Schema OK ({len(src_cols)} columns match)")
-    return "match"
+    return "match", ""
 
 
 def _recreate_target_table(src_conn, tgt_conn, table_config):
@@ -409,7 +409,7 @@ def sync_table(table_config, **context):
 
         # --- Schema validation (auto-recreate on mismatch/missing) ---
         # send_alert=False: full-sync handles its own notification after recreate
-        schema_result = _validate_schema(src_conn, tgt_conn, table_config, send_alert=False)
+        schema_result, schema_detail = _validate_schema(src_conn, tgt_conn, table_config, send_alert=False)
 
         if schema_result in ("missing", "mismatch"):
             reason = schema_result
@@ -421,6 +421,7 @@ def sync_table(table_config, **context):
                 f"The target table {full_target} was automatically recreated "
                 f"to match the source schema (was: {reason}).\n\n"
                 f"Source: {full_source}\nTarget: {full_target}\n\n"
+                f"Reason:\n{schema_detail}\n\n"
                 f"The sync will continue with the new schema.",
             )
 
@@ -569,7 +570,7 @@ def sync_table_incremental(table_config, **context):
         src_conn, tgt_conn = _get_connections(env)
 
         # --- Schema validation ---
-        schema_result = _validate_schema(src_conn, tgt_conn, table_config)
+        schema_result, _schema_detail = _validate_schema(src_conn, tgt_conn, table_config)
 
         if schema_result == "missing":
             context["task_instance"].xcom_push(

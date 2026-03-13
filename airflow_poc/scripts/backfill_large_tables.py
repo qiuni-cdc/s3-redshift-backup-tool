@@ -31,6 +31,7 @@ import mysql.connector
 # ============================================================================
 
 TABLES = {
+    "uni_prealert_info":       {"source_schema": "kuaisong", "source_table": "uni_prealert_info",       "target_table": "uni_prealert_info"},
     "uni_tracking_addon_spath": {"source_schema": "kuaisong", "source_table": "uni_tracking_addon_spath", "target_table": "uni_tracking_addon_spath"},
     "uni_prealert_order":      {"source_schema": "kuaisong", "source_table": "uni_prealert_order",      "target_table": "uni_prealert_order"},
     "order_details":           {"source_schema": "kuaisong", "source_table": "order_details",           "target_table": "order_details"},
@@ -82,8 +83,8 @@ def _start_ssh_tunnel(env, name, remote_host, remote_port):
         return _ssh_tunnels[name]._local_port
 
     local_port = _find_free_port()
-    bastion_host = env.get("SSH_BASTION_HOST", "35.83.114.196")
-    bastion_user = env.get("SSH_BASTION_USER", "jasleentung")
+    bastion_host = env.get("SSH_BASTION_HOST", "")
+    bastion_user = env.get("SSH_BASTION_USER", "")
     key_path = env.get("SSH_BASTION_KEY_PATH", "")
 
     cmd = [
@@ -145,14 +146,14 @@ def _get_connections(env):
 
     src_conn = mysql.connector.connect(
         host=src_host, port=src_port,
-        user=env.get("DB_USER", "jasleentung"),
+        user=env["DB_USER"],
         password=env.get("DB_US_PROD_RO_PASSWORD", ""),
         **conn_base,
     )
 
     tgt_conn = mysql.connector.connect(
         host=tgt_host, port=tgt_port,
-        user=env.get("DB_USER", "jasleentung"),
+        user=env["DB_USER"],
         password=env.get("DB_DW_WRITE_PASSWORD", ""),
         autocommit=False,
         **conn_base,
