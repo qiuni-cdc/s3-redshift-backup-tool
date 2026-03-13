@@ -255,10 +255,11 @@ def _get_column_defs(conn, schema, table):
     return cols
 
 
-def _validate_schema(src_conn, tgt_conn, table_config):
+def _validate_schema(src_conn, tgt_conn, table_config, send_alert=True):
     """Compare source vs target schema.
     If mismatch: send alert email and continue with existing target schema.
     If target missing: skip (table must be created manually).
+    Set send_alert=False to suppress emails (caller handles notification).
     Returns: 'match', 'mismatch', or 'missing'.
     """
     src_schema = table_config["source_schema"]
@@ -277,13 +278,14 @@ def _validate_schema(src_conn, tgt_conn, table_config):
 
     # Target table doesn't exist
     if not tgt_cols:
-        print(f"  WARNING: Target table {full_target} does not exist — skipping sync")
-        _send_alert(
-            f"[PROD->DW Sync] Target table missing: {full_target}",
-            f"The target table {full_target} does not exist in DW.\n"
-            f"Source table {full_source} has {len(src_cols)} columns.\n\n"
-            f"Action required: Create the table manually in {TARGET_SCHEMA} schema."
-        )
+        print(f"  WARNING: Target table {full_target} does not exist")
+        if send_alert:
+            _send_alert(
+                f"[PROD->DW Sync] Target table missing: {full_target}",
+                f"The target table {full_target} does not exist in DW.\n"
+                f"Source table {full_source} has {len(src_cols)} columns.\n\n"
+                f"Action required: Create the table manually in {TARGET_SCHEMA} schema."
+            )
         return "missing"
 
     # Compare column names and types
@@ -316,20 +318,21 @@ def _validate_schema(src_conn, tgt_conn, table_config):
 
     if mismatches:
         detail = "\n".join(f"  - {m}" for m in mismatches)
-        print(f"  Schema MISMATCH detected — alerting and continuing with existing target:")
+        print(f"  Schema MISMATCH detected:")
         for m in mismatches:
             print(f"    {m}")
 
-        _send_alert(
-            f"[PROD->DW Sync] Schema mismatch: {full_source} vs {full_target}",
-            f"Schema mismatch detected during hourly sync.\n\n"
-            f"Source: {full_source} ({len(src_cols)} columns)\n"
-            f"Target: {full_target} ({len(tgt_cols)} columns)\n\n"
-            f"Differences:\n{detail}\n\n"
-            f"The sync will continue using the existing target schema.\n"
-            f"Only columns present in BOTH source and target will be synced.\n\n"
-            f"Action required: Review and update the target table DDL if needed."
-        )
+        if send_alert:
+            _send_alert(
+                f"[PROD->DW Sync] Schema mismatch: {full_source} vs {full_target}",
+                f"Schema mismatch detected during hourly sync.\n\n"
+                f"Source: {full_source} ({len(src_cols)} columns)\n"
+                f"Target: {full_target} ({len(tgt_cols)} columns)\n\n"
+                f"Differences:\n{detail}\n\n"
+                f"The sync will continue using the existing target schema.\n"
+                f"Only columns present in BOTH source and target will be synced.\n\n"
+                f"Action required: Review and update the target table DDL if needed."
+            )
         return "mismatch"
 
     print(f"  Schema OK ({len(src_cols)} columns match)")
@@ -405,7 +408,8 @@ def sync_table(table_config, **context):
         src_conn, tgt_conn = _get_connections(env)
 
         # --- Schema validation (auto-recreate on mismatch/missing) ---
-        schema_result = _validate_schema(src_conn, tgt_conn, table_config)
+        # send_alert=False: full-sync handles its own notification after recreate
+        schema_result = _validate_schema(src_conn, tgt_conn, table_config, send_alert=False)
 
         if schema_result in ("missing", "mismatch"):
             reason = schema_result
