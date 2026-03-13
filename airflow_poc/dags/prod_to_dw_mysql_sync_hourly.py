@@ -4,19 +4,19 @@ PROD → DW MySQL Hourly Sync
 Replicates tables from US PROD MySQL (kuaisong) to US DW MySQL (uniods).
 
 Phase 1 — Full Sync (DELETE + INSERT every hour, all 7 run in parallel):
-  1. kuaisong.uni_pattern_config       (~57 rows)
+  1. kuaisong.uni_pattern_config       (~68 rows)
   2. kuaisong.uni_warehouses           (~76 rows)
   3. kuaisong.uni_customer             (~3K rows)
   4. kuaisong.uni_zipcodes             (~10K rows)
   5. kuaisong.uni_mawb_box             (~31K rows)
   6. kuaisong.ecs_staff                (~158K rows)
-  7. kuaisong.uni_prealert_info        (~284K rows)
-  8. driver_app.uni_common_dict        (~116 rows)
+  7. driver_app.uni_common_dict        (~116 rows)
 
 Phase 2 — Incremental CDC (append-only, watermark on auto-increment id):
-  8. kuaisong.uni_tracking_addon_spath (~14.7M rows)
-  9. kuaisong.uni_prealert_order       (~34.6M rows)
- 10. kuaisong.order_details            (~140M rows)
+  8. kuaisong.uni_prealert_info        (~325K rows)
+  9. kuaisong.uni_tracking_addon_spath (~14.7M rows)
+ 10. kuaisong.uni_prealert_order       (~34.6M rows)
+ 11. kuaisong.order_details            (~140M rows)
 
 Watermarks stored in uniods.sync_watermarks table.
 Initial backfill via separate script (backfill_large_tables.py).
@@ -51,11 +51,11 @@ TABLES = [
     {"source_schema": "kuaisong",        "source_table": "uni_zipcodes",         "target_table": "parcel_tool_zipcodes",  "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "uni_mawb_box",         "target_table": "uni_mawb_box",         "batch_size": 5000},
     {"source_schema": "kuaisong",        "source_table": "ecs_staff",            "target_table": "ecs_staff",            "batch_size": 10000},
-    {"source_schema": "kuaisong",        "source_table": "uni_prealert_info",    "target_table": "uni_prealert_info",    "batch_size": 10000},
     {"source_schema": "driver_app",     "source_table": "uni_common_dict",      "target_table": "uni_common_dict",      "batch_size": 5000},
 ]
 
 INCREMENTAL_TABLES = [
+    {"source_schema": "kuaisong", "source_table": "uni_prealert_info",       "target_table": "uni_prealert_info",       "batch_size": 10000},
     {"source_schema": "kuaisong", "source_table": "uni_tracking_addon_spath", "target_table": "uni_tracking_addon_spath", "batch_size": 10000},
     {"source_schema": "kuaisong", "source_table": "uni_prealert_order",      "target_table": "uni_prealert_order",      "batch_size": 10000},
     {"source_schema": "kuaisong", "source_table": "order_details",           "target_table": "order_details",           "batch_size": 10000},
