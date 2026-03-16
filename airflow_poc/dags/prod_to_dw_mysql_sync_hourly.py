@@ -15,8 +15,7 @@ Phase 1 — Full Sync (DELETE + INSERT every hour, all 7 run in parallel):
 Phase 2 — Incremental CDC (append-only, watermark on auto-increment id):
   8. kuaisong.uni_prealert_info        (~325K rows)
   9. kuaisong.uni_tracking_addon_spath (~14.7M rows)
- 10. kuaisong.uni_prealert_order       (~34.6M rows)
- 11. kuaisong.order_details            (~140M rows)
+ 10. kuaisong.order_details            (~140M rows)
 
 Watermarks stored in uniods.sync_watermarks table.
 Initial backfill via separate script (backfill_large_tables.py).
@@ -57,7 +56,6 @@ TABLES = [
 INCREMENTAL_TABLES = [
     {"source_schema": "kuaisong", "source_table": "uni_prealert_info",       "target_table": "uni_prealert_info",       "batch_size": 10000},
     {"source_schema": "kuaisong", "source_table": "uni_tracking_addon_spath", "target_table": "uni_tracking_addon_spath", "batch_size": 10000},
-    {"source_schema": "kuaisong", "source_table": "uni_prealert_order",      "target_table": "uni_prealert_order",      "batch_size": 10000},
     {"source_schema": "kuaisong", "source_table": "order_details",           "target_table": "order_details",           "batch_size": 10000},
 ]
 
@@ -501,6 +499,22 @@ def sync_table(table_config, **context):
         print(f"Target rows: {target_count:,} ({match})")
         print(f"Sync complete: {total_inserted:,} rows inserted")
 
+        # Determine status based on row count match
+        if source_count != target_count:
+            sync_status = "count_mismatch"
+            print(f"WARNING: Row count mismatch! Source={source_count:,}, Target={target_count:,}")
+            _send_alert(
+                f"[PROD->DW Sync] Row count mismatch: {full_target}",
+                f"Row count mismatch after full sync.\n\n"
+                f"Source: {full_source} = {source_count:,} rows\n"
+                f"Target: {full_target} = {target_count:,} rows\n"
+                f"Difference: {abs(source_count - target_count):,} rows\n\n"
+                f"This may indicate a race condition with live writes or a sync issue.\n"
+                f"Action required: Investigate and verify data integrity.",
+            )
+        else:
+            sync_status = "success"
+
         # Push metrics to XCom
         context["task_instance"].xcom_push(
             key=f"sync_{src_table}",
@@ -511,12 +525,9 @@ def sync_table(table_config, **context):
                 "target_count": target_count,
                 "inserted": total_inserted,
                 "schema": schema_result,
-                "status": "success",
+                "status": sync_status,
             },
         )
-
-        if source_count != target_count:
-            print(f"WARNING: Row count mismatch! Source={source_count:,}, Target={target_count:,}")
 
     except Exception as e:
         print(f"ERROR syncing {full_source}: {e}")
@@ -708,10 +719,14 @@ def sync_table_incremental(table_config, **context):
         elapsed = time.time() - start_time
         print(f"Sync complete: {total_inserted:,} rows in {elapsed:.0f}s, watermark -> {new_last_id:,}")
 
+        incr_status = "partial_sync" if schema_result == "mismatch" else "success"
+        if incr_status == "partial_sync":
+            print(f"  NOTE: Synced shared columns only due to schema mismatch")
+
         context["task_instance"].xcom_push(
             key=f"incr_{src_table}",
             value={"source": full_source, "target": full_target,
-                   "status": "success", "inserted": total_inserted,
+                   "status": incr_status, "inserted": total_inserted,
                    "last_id": new_last_id, "max_id": max_id,
                    "schema": schema_result},
         )
@@ -743,90 +758,102 @@ def sync_table_incremental(table_config, **context):
 
 def print_summary(**context):
     """Print summary of all table syncs (full + incremental)."""
-    print("\n" + "=" * 70)
-    print("PROD -> DW MYSQL SYNC - HOURLY SUMMARY")
-    print("=" * 70)
-    print(f"Execution: {context['ds']} {context.get('ts', '')}")
+    try:
+        print("\n" + "=" * 70)
+        print("PROD -> DW MYSQL SYNC - HOURLY SUMMARY")
+        print("=" * 70)
+        print(f"Execution: {context['ds']} {context.get('ts', '')}")
 
-    total_rows = 0
-    success = 0
-    failed = 0
-    skipped = 0
+        total_rows = 0
+        success = 0
+        failed = 0
+        skipped = 0
+        warnings = 0
 
-    # --- Full-sync tables ---
-    print("-" * 70)
-    print("FULL SYNC (DELETE + INSERT):")
-    for table in TABLES:
-        src_table = table["source_table"]
-        result = context["task_instance"].xcom_pull(
-            task_ids=f"sync_{src_table}",
-            key=f"sync_{src_table}",
+        # --- Full-sync tables ---
+        print("-" * 70)
+        print("FULL SYNC (DELETE + INSERT):")
+        for table in TABLES:
+            src_table = table["source_table"]
+            result = context["task_instance"].xcom_pull(
+                task_ids=f"sync_{src_table}",
+                key=f"sync_{src_table}",
+            )
+            status = result.get("status", "") if result else ""
+            if status in ("success", "count_mismatch"):
+                src_cnt = result["source_count"]
+                tgt_cnt = result["target_count"]
+                match = "OK" if src_cnt == tgt_cnt else "COUNT MISMATCH"
+                schema_tag = ""
+                if result.get("schema") == "recreated":
+                    schema_tag = " [schema recreated]"
+                elif result.get("schema") == "mismatch":
+                    schema_tag = " [schema mismatch]"
+                print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [{match}]{schema_tag}")
+                total_rows += tgt_cnt
+                if status == "count_mismatch":
+                    warnings += 1
+                else:
+                    success += 1
+            elif status == "skipped":
+                print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
+                skipped += 1
+            elif result:
+                print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
+                failed += 1
+            else:
+                print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
+                failed += 1
+
+        # --- Incremental tables ---
+        print("-" * 70)
+        print("INCREMENTAL SYNC (append via watermark):")
+        for table in INCREMENTAL_TABLES:
+            src_table = table["source_table"]
+            result = context["task_instance"].xcom_pull(
+                task_ids=f"incr_{src_table}",
+                key=f"incr_{src_table}",
+            )
+            status = result.get("status", "") if result else ""
+            if status in ("success", "partial_sync"):
+                inserted = result.get("inserted", 0)
+                last_id = result.get("last_id", 0)
+                max_id = result.get("max_id", 0)
+                tag = " [PARTIAL - schema mismatch]" if status == "partial_sync" else ""
+                print(f"  {result['source']:<45} -> +{inserted:>10,} rows  (watermark: {last_id:,}){tag}")
+                total_rows += inserted
+                if status == "partial_sync":
+                    warnings += 1
+                else:
+                    success += 1
+            elif status == "skipped":
+                print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
+                skipped += 1
+            elif result:
+                print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
+                failed += 1
+            else:
+                print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
+                failed += 1
+
+        print("-" * 70)
+        print(f"Tables: {success} success, {warnings} warnings, {failed} failed, {skipped} skipped")
+        print(f"Total rows synced this run: {total_rows:,}")
+        print("=" * 70 + "\n")
+
+        context["task_instance"].xcom_push(
+            key="summary",
+            value={
+                "success": success,
+                "warnings": warnings,
+                "failed": failed,
+                "skipped": skipped,
+                "total_rows": total_rows,
+            },
         )
-        if result and result.get("status") == "success":
-            src_cnt = result["source_count"]
-            tgt_cnt = result["target_count"]
-            match = "OK" if src_cnt == tgt_cnt else "MISMATCH"
-            schema_tag = ""
-            if result.get("schema") == "recreated":
-                schema_tag = " [schema recreated]"
-            elif result.get("schema") == "mismatch":
-                schema_tag = " [schema mismatch]"
-            print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [{match}]{schema_tag}")
-            total_rows += tgt_cnt
-            success += 1
-        elif result and result.get("status") == "skipped":
-            print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
-            skipped += 1
-        elif result:
-            print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
-            failed += 1
-        else:
-            print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
-            failed += 1
-
-    # --- Incremental tables ---
-    print("-" * 70)
-    print("INCREMENTAL SYNC (append via watermark):")
-    for table in INCREMENTAL_TABLES:
-        src_table = table["source_table"]
-        result = context["task_instance"].xcom_pull(
-            task_ids=f"incr_{src_table}",
-            key=f"incr_{src_table}",
-        )
-        if result and result.get("status") == "success":
-            inserted = result.get("inserted", 0)
-            last_id = result.get("last_id", 0)
-            max_id = result.get("max_id", 0)
-            print(f"  {result['source']:<45} -> +{inserted:>10,} rows  (watermark: {last_id:,})")
-            total_rows += inserted
-            success += 1
-        elif result and result.get("status") == "skipped":
-            print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
-            skipped += 1
-        elif result:
-            print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
-            failed += 1
-        else:
-            print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
-            failed += 1
-
-    print("-" * 70)
-    print(f"Tables: {success} success, {failed} failed, {skipped} skipped")
-    print(f"Total rows synced this run: {total_rows:,}")
-    print("=" * 70 + "\n")
-
-    context["task_instance"].xcom_push(
-        key="summary",
-        value={
-            "success": success,
-            "failed": failed,
-            "skipped": skipped,
-            "total_rows": total_rows,
-        },
-    )
-
-    # Clean up SSH tunnels if any
-    _stop_all_tunnels()
+    finally:
+        # Always clean up SSH tunnels, even if summary logic fails
+        _stop_all_tunnels()
 
 
 # ============================================================================
