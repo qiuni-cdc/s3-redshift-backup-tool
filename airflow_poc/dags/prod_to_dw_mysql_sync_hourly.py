@@ -753,6 +753,58 @@ def sync_table_incremental(table_config, **context):
 
 
 # ============================================================================
+# QUALITY GATE — blocks downstream if any sync is not clean
+# ============================================================================
+
+def quality_gate(**context):
+    """Check all sync results. Fail this task if any table has a non-clean status.
+
+    This prevents downstream pipelines (dbt, customer exports) from running
+    on incomplete or inconsistent data.
+    """
+    issues = []
+
+    for table in TABLES:
+        src_table = table["source_table"]
+        result = context["task_instance"].xcom_pull(
+            task_ids=f"sync_{src_table}",
+            key=f"sync_{src_table}",
+        )
+        status = result.get("status", "no_result") if result else "no_result"
+        if status != "success":
+            issues.append(f"full_sync/{src_table}: {status}")
+
+    for table in INCREMENTAL_TABLES:
+        src_table = table["source_table"]
+        result = context["task_instance"].xcom_pull(
+            task_ids=f"incr_{src_table}",
+            key=f"incr_{src_table}",
+        )
+        status = result.get("status", "no_result") if result else "no_result"
+        if status != "success":
+            issues.append(f"incremental/{src_table}: {status}")
+
+    context["task_instance"].xcom_push(
+        key="quality_gate",
+        value={"passed": len(issues) == 0, "issues": issues},
+    )
+
+    if issues:
+        msg = "\n".join(f"  - {i}" for i in issues)
+        print(f"QUALITY GATE FAILED — {len(issues)} issue(s):\n{msg}")
+        _send_alert(
+            f"[PROD->DW Sync] Quality gate FAILED — {len(issues)} issue(s)",
+            f"The quality gate blocked downstream pipelines.\n\n"
+            f"Issues:\n{msg}\n\n"
+            f"Downstream tasks (dbt, customer exports) will NOT run.\n"
+            f"Action required: Investigate and re-trigger the DAG after fixing.",
+        )
+        raise RuntimeError(f"Quality gate failed: {len(issues)} issue(s)")
+
+    print("QUALITY GATE PASSED — all tables synced cleanly")
+
+
+# ============================================================================
 # SUMMARY FUNCTION
 # ============================================================================
 
@@ -925,7 +977,14 @@ for sync_task in sync_tasks:
 for i in range(1, len(incr_tasks)):
     incr_tasks[i - 1] >> incr_tasks[i]
 
-# Summary runs after all syncs
+# Quality gate — blocks downstream if any sync is not clean
+gate_task = PythonOperator(
+    task_id="quality_gate",
+    python_callable=quality_gate,
+    dag=dag,
+)
+
+# Summary runs after all syncs (even if gate fails)
 summary_task = PythonOperator(
     task_id="print_summary",
     python_callable=print_summary,
@@ -933,4 +992,4 @@ summary_task = PythonOperator(
     dag=dag,
 )
 
-incr_tasks[-1] >> summary_task
+incr_tasks[-1] >> gate_task >> summary_task
