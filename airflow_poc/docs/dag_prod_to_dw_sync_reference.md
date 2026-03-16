@@ -12,7 +12,7 @@ Skills/reference file for the PROD-to-DW MySQL sync DAG. Use this as the single 
 | Schedule | Every hour (`0 * * * *`) |
 | Source | PROD MySQL (`kuaisong`, `driver_app` schemas) |
 | Target | DW MySQL (`uniods` schema) |
-| Tables | 7 full-sync + 4 incremental = 11 total |
+| Tables | 7 full-sync + 3 incremental = 10 total |
 | Watermarks | `uniods.sync_watermarks` table |
 | DAG file | `airflow_poc/dags/prod_to_dw_mysql_sync_hourly.py` |
 | Backfill script | `airflow_poc/scripts/backfill_large_tables.py` |
@@ -33,13 +33,12 @@ Skills/reference file for the PROD-to-DW MySQL sync DAG. Use this as the single 
 | `kuaisong.ecs_staff` | `uniods.ecs_staff` | ~158K | |
 | `driver_app.uni_common_dict` | `uniods.uni_common_dict` | ~116 | Different source schema |
 
-### Incremental Sync (4 tables — INSERT IGNORE via ID watermark, sequential)
+### Incremental Sync (3 tables — INSERT IGNORE via ID watermark, sequential)
 
 | Source | Target | Rows | ID column |
 |---|---|---|---|
 | `kuaisong.uni_prealert_info` | `uniods.uni_prealert_info` | ~325K+ | `id` (auto-increment) |
 | `kuaisong.uni_tracking_addon_spath` | `uniods.uni_tracking_addon_spath` | ~15M | `id` |
-| `kuaisong.uni_prealert_order` | `uniods.uni_prealert_order` | ~29M | `id` |
 | `kuaisong.order_details` | `uniods.order_details` | ~180M | `id` |
 
 ### Task Execution Flow
@@ -60,13 +59,13 @@ Skills/reference file for the PROD-to-DW MySQL sync DAG. Use this as the single 
          incr_uni_tracking_addon_spath
                     │
                     ▼
-         incr_uni_prealert_order
-                    │
-                    ▼
          incr_order_details
                     │
                     ▼
-              print_summary
+         quality_gate                   (blocks downstream if any sync is not clean)
+                    │
+                    ▼
+         print_summary                  (runs always via trigger_rule=all_done)
 ```
 
 ---
@@ -85,13 +84,28 @@ Skills/reference file for the PROD-to-DW MySQL sync DAG. Use this as the single 
 - Requires `etl-admin-service` user with CREATE/DROP grants on `uniods.*`
 
 ### Incremental Sync — Alert Only
-- On mismatch: sends alert email, syncs only shared columns
+- On mismatch: sends alert email, syncs only shared columns, pushes `status: "partial_sync"` to XCom
 - On missing: sends alert email, skips sync
 - Does NOT auto-recreate (would lose watermark position)
 
+### Quality Gate
+- Runs after all sync tasks, before `print_summary`
+- Checks XCom status of every full-sync and incremental task
+- **Passes** only if all statuses are `"success"`
+- **Fails** (raises `RuntimeError`) on: `count_mismatch`, `partial_sync`, `failed`, `skipped`, `no_result`
+- Sends email alert listing all issues when gate fails
+- Blocks downstream tasks (future: dbt, customer pipeline)
+- `print_summary` still runs regardless (`trigger_rule=all_done`)
+
+### Row Count Verification (Full-Sync)
+- After DELETE + INSERT, compares source vs target row count
+- On mismatch: pushes `status: "count_mismatch"` to XCom (instead of `"success"`)
+- Sends email alert with both counts and difference
+- Quality gate will block downstream on this status
+
 ### Email Alerts
 - SMTP via Office 365 (`smtp.office365.com:587`)
-- Sent on: schema recreate (full-sync), schema mismatch (incremental), errors
+- Sent on: schema recreate (full-sync), schema mismatch (incremental), row count mismatch (full-sync), quality gate failure, errors
 - Config: `ALERT_SMTP_*` and `SYNC_ALERT_EMAILS` env vars
 - Fails silently if SMTP not configured (no crash)
 
@@ -272,7 +286,7 @@ DB_DW_WRITE_HOST=mgmt-coc.rds-proxy.db.analysis.uniuni.com.internal
 | SSH bastion | `35.82.216.244` | Not needed |
 | SSH key mount | `/keys/jasleentung.pem` | Not needed |
 | Docker image | `apache/airflow:2.8.1` + pip install | `uniuni-airflow:2.9.0` (custom, pre-built) |
-| dbt | 1.9.0b2 (beta, no dbt-mysql) | 1.7.4 (stable, dbt-mysql + dbt-redshift) |
+| dbt | 1.9.0b2 (beta, no dbt-mysql) | 1.8.0 (stable, dbt-redshift only — dbt-mysql removed) |
 | Airflow location | Inside git repo (`airflow_poc/`) | Independent (`/home/ubuntu/airflow/`) |
 | Deployment | Manual `scp` | `deploy_prod.sh` (git pull + rsync) |
 | Email alerts | `jasleen.tung@uniuni.com` | `etl@uniuni.com` + `jasleen.tung@uniuni.com` |
@@ -315,7 +329,6 @@ For initial load of large incremental tables. The hourly DAG handles ongoing inc
 |---|---|
 | `uni_prealert_info` | ~30 min |
 | `uni_tracking_addon_spath` | ~1-2 hours |
-| `uni_prealert_order` | ~2-3 hours |
 | `order_details` | ~5-7 hours |
 
 **Note**: `uni_prealert_info` was added to the backfill script after being moved from full-sync to incremental.
@@ -385,5 +398,7 @@ PROD MySQL grants needed:
 
 Emails sent on:
 - Full-sync: target table auto-recreated (with mismatch reason)
+- Full-sync: row count mismatch after sync (source != target)
 - Incremental: schema mismatch or missing target (alert)
+- Quality gate: any sync task not clean (lists all issues)
 - Errors: connection failures, sync errors
