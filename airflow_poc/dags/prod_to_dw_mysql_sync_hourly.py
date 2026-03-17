@@ -499,23 +499,24 @@ def sync_table(table_config, **context):
         print(f"Target rows: {target_count:,} ({match})")
         print(f"Sync complete: {total_inserted:,} rows inserted")
 
-        # Determine status based on row count match
+        # Fail hard on count mismatch — Airflow will retry (retries=1, 5 min delay).
+        # If retry also fails, task status is "failed", quality gate blocks downstream.
         if source_count != target_count:
-            sync_status = "count_mismatch"
-            print(f"WARNING: Row count mismatch! Source={source_count:,}, Target={target_count:,}")
             _send_alert(
                 f"[PROD->DW Sync] Row count mismatch: {full_target}",
                 f"Row count mismatch after full sync.\n\n"
                 f"Source: {full_source} = {source_count:,} rows\n"
                 f"Target: {full_target} = {target_count:,} rows\n"
                 f"Difference: {abs(source_count - target_count):,} rows\n\n"
-                f"This may indicate a race condition with live writes or a sync issue.\n"
-                f"Action required: Investigate and verify data integrity.",
+                f"The task will retry automatically. If retry also fails, "
+                f"the quality gate will block downstream pipelines.",
             )
-        else:
-            sync_status = "success"
+            raise RuntimeError(
+                f"Row count mismatch: source={source_count:,}, target={target_count:,} "
+                f"(diff={abs(source_count - target_count):,})"
+            )
 
-        # Push metrics to XCom
+        # Push metrics to XCom (only reached on success)
         context["task_instance"].xcom_push(
             key=f"sync_{src_table}",
             value={
@@ -525,7 +526,7 @@ def sync_table(table_config, **context):
                 "target_count": target_count,
                 "inserted": total_inserted,
                 "schema": schema_result,
-                "status": sync_status,
+                "status": "success",
             },
         )
 
@@ -832,21 +833,14 @@ def print_summary(**context):
                 key=f"sync_{src_table}",
             )
             status = result.get("status", "") if result else ""
-            if status in ("success", "count_mismatch"):
-                src_cnt = result["source_count"]
+            if status == "success":
                 tgt_cnt = result["target_count"]
-                match = "OK" if src_cnt == tgt_cnt else "COUNT MISMATCH"
                 schema_tag = ""
                 if result.get("schema") == "recreated":
                     schema_tag = " [schema recreated]"
-                elif result.get("schema") == "mismatch":
-                    schema_tag = " [schema mismatch]"
-                print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [{match}]{schema_tag}")
+                print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [OK]{schema_tag}")
                 total_rows += tgt_cnt
-                if status == "count_mismatch":
-                    warnings += 1
-                else:
-                    success += 1
+                success += 1
             elif status == "skipped":
                 print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
                 skipped += 1
@@ -854,7 +848,7 @@ def print_summary(**context):
                 print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
                 failed += 1
             else:
-                print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
+                print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT (task may have failed)")
                 failed += 1
 
         # --- Incremental tables ---
