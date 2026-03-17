@@ -432,21 +432,15 @@ def sync_table(table_config, **context):
         else:
             shared_cols = None  # Use all columns (SELECT *)
 
-        # --- Read source row count ---
-        src_cur = src_conn.cursor()
-        src_cur.execute(f"SELECT COUNT(*) FROM {full_source}")
-        source_count = src_cur.fetchone()[0]
-        print(f"Source rows: {source_count:,}")
-        src_cur.close()
-
-        # --- Read source data ---
+        # --- Read source data (use len(rows) as source_count to avoid race condition) ---
         print(f"Reading from {full_source} ...")
         src_cur = src_conn.cursor()
         src_cur.execute(f"SELECT * FROM {full_source}")
         all_col_names = [desc[0] for desc in src_cur.description]
         all_rows = src_cur.fetchall()
         src_cur.close()
-        print(f"  Fetched {len(all_rows):,} rows, {len(all_col_names)} columns")
+        source_count = len(all_rows)
+        print(f"  Fetched {source_count:,} rows, {len(all_col_names)} columns")
 
         # Determine which columns to insert and build batches
         if shared_cols:
