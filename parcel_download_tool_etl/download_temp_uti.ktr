@@ -449,6 +449,7 @@
     <data_tablespace/>
     <index_tablespace/>
     <attributes>
+      <!-- Commented out cursor fetch mode; using streaming (STREAM_RESULTS=Y) instead
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
         <attribute>500</attribute>
@@ -457,6 +458,7 @@
         <code>EXTRA_OPTION_MYSQL.useCursorFetch</code>
         <attribute>true</attribute>
       </attribute>
+      -->
       <attribute>
         <code>FORCE_IDENTIFIERS_TO_LOWERCASE</code>
         <attribute>N</attribute>
@@ -516,7 +518,7 @@
     <data_tablespace/>
     <index_tablespace/>
     <attributes>
-      <!-- useCursorFetch + defaultFetchSize: server-side cursor, 500 rows per batch. Replaced by STREAM_RESULTS=Y below.
+      <!-- Commented out cursor fetch mode; using streaming (STREAM_RESULTS=Y) instead
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
         <attribute>500</attribute>
@@ -600,7 +602,6 @@
     uw2.id AS `gateway_Warehouse`,
     case when char_length(uti.zip) > 16 then null else uti.zip end AS `dest_zip`,
     uizf.`Zone` AS `ZONE`,
-	COALESCE(JSON_UNQUOTE(JSON_EXTRACT(upo.data, '$.weight')), 0) AS `Manifest_Weight`,
 	COALESCE(uti.total_weight, 0) AS `Scaled_Weight`,
 	uti.weight_uom as weight_uom,
 	CASE 
@@ -673,9 +674,6 @@ FROM
 JOIN 
     kuaisong.ecs_order_info eoi
     ON uti.order_id = eoi.order_id
-LEFT JOIN 
-    kuaisong.uni_prealert_order upo 
-    ON upo.tno = eoi.extra_order_sn
 LEFT JOIN kuaisong.uni_tracking_spath time_199
     ON uti.order_id = time_199.order_id
    AND time_199.code = 199
@@ -998,29 +996,6 @@ WHERE uti.state >= 190
         <origin>table_input_temp_uti</origin>
         <comments>ZONE</comments>
         <conversion_Mask>####0;-####0</conversion_Mask>
-        <decimal_symbol>.</decimal_symbol>
-        <grouping_symbol>,</grouping_symbol>
-        <currency_symbol/>
-        <trim_type>none</trim_type>
-        <case_insensitive>N</case_insensitive>
-        <collator_disabled>Y</collator_disabled>
-        <collator_strength>0</collator_strength>
-        <sort_descending>N</sort_descending>
-        <output_padding>N</output_padding>
-        <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en_CA</date_format_locale>
-        <date_format_timezone>America/New_York</date_format_timezone>
-        <lenient_string_to_number>N</lenient_string_to_number>
-      </value-meta>
-      <value-meta>
-        <type>String</type>
-        <storagetype>normal</storagetype>
-        <name>Manifest_Weight</name>
-        <length>536870911</length>
-        <precision>-1</precision>
-        <origin>table_input_temp_uti</origin>
-        <comments>Manifest_Weight</comments>
-        <conversion_Mask/>
         <decimal_symbol>.</decimal_symbol>
         <grouping_symbol>,</grouping_symbol>
         <currency_symbol/>
@@ -2260,10 +2235,6 @@ WHERE uti.state >= 190
       <field>
         <column_name>ZONE</column_name>
         <stream_name>ZONE</stream_name>
-      </field>
-      <field>
-        <column_name>Manifest_Weight</column_name>
-        <stream_name>Manifest_Weight</stream_name>
       </field>
       <field>
         <column_name>Scaled_Weight</column_name>

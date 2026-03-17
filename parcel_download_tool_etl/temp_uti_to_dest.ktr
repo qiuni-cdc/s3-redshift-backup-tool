@@ -449,6 +449,7 @@
     <data_tablespace/>
     <index_tablespace/>
     <attributes>
+      <!-- Commented out cursor fetch mode; using streaming (STREAM_RESULTS=Y) instead
       <attribute>
         <code>EXTRA_OPTION_MYSQL.defaultFetchSize</code>
         <attribute>500</attribute>
@@ -457,6 +458,7 @@
         <code>EXTRA_OPTION_MYSQL.useCursorFetch</code>
         <attribute>true</attribute>
       </attribute>
+      -->
       <attribute>
         <code>FORCE_IDENTIFIERS_TO_LOWERCASE</code>
         <attribute>N</attribute>
@@ -532,7 +534,6 @@
     ANY_VALUE(dpdtt.gateway_Warehouse) AS gateway_Warehouse,
     ANY_VALUE(dpdtt.dest_zip) AS dest_zip,
     ANY_VALUE(dpdtt.ZONE) AS ZONE,
-    ANY_VALUE(dpdtt.Manifest_Weight) AS Manifest_Weight,
     ANY_VALUE(dpdtt.Scaled_Weight) AS Scaled_Weight,
     ANY_VALUE(dpdtt.weight_uom) AS weight_uom,
     ANY_VALUE(dpdtt.Dim_Weight_KGS) AS Dim_Weight_KGS,
@@ -800,29 +801,6 @@ GROUP BY dpdtt.order_id;
         <origin>Table_input_dest</origin>
         <comments>ZONE</comments>
         <conversion_Mask/>
-        <decimal_symbol>.</decimal_symbol>
-        <grouping_symbol>,</grouping_symbol>
-        <currency_symbol/>
-        <trim_type>none</trim_type>
-        <case_insensitive>N</case_insensitive>
-        <collator_disabled>Y</collator_disabled>
-        <collator_strength>0</collator_strength>
-        <sort_descending>N</sort_descending>
-        <output_padding>N</output_padding>
-        <date_format_lenient>N</date_format_lenient>
-        <date_format_locale>en_CA</date_format_locale>
-        <date_format_timezone>America/New_York</date_format_timezone>
-        <lenient_string_to_number>N</lenient_string_to_number>
-      </value-meta>
-      <value-meta>
-        <type>Number</type>
-        <storagetype>normal</storagetype>
-        <name>Manifest_Weight</name>
-        <length>10</length>
-        <precision>3</precision>
-        <origin>Table_input_dest</origin>
-        <comments>Manifest_Weight</comments>
-        <conversion_Mask>####0.0#########;-####0.0#########</conversion_Mask>
         <decimal_symbol>.</decimal_symbol>
         <grouping_symbol>,</grouping_symbol>
         <currency_symbol/>
@@ -2043,10 +2021,6 @@ GROUP BY dpdtt.order_id;
       <field>
         <column_name>ZONE</column_name>
         <stream_name>ZONE</stream_name>
-      </field>
-      <field>
-        <column_name>Manifest_Weight</column_name>
-        <stream_name>Manifest_Weight</stream_name>
       </field>
       <field>
         <column_name>Scaled_Weight</column_name>

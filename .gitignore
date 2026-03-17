@@ -77,4 +77,7 @@ Add_columns.md
 
 # Process files
 nohup.out
-kettle_*shell
+kettle_*shell 
+
+# Airflow POC files
+airflow_poc/*.md
