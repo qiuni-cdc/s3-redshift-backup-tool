@@ -132,6 +132,12 @@ Examples:
         help='Hours offset string for download script (e.g., "-2" for 2 hours ago, "-1" for 1 hour ago). Default: -1'
     )
 
+    parser.add_argument(
+        '--rerun',
+        action='store_true',
+        help='Rerun mode: removes the 50m timeout on download_tool.sh for anomalous hours'
+    )
+
     return parser.parse_args()
 
 
@@ -507,7 +513,7 @@ def refresh_materialized_view(target_connection: str) -> bool:
         return False
 
 
-def execute_download_script(download_dir="parcel_download_tool_etl", start_datetime=None, hours_offset=None):
+def execute_download_script(download_dir="parcel_download_tool_etl", start_datetime=None, hours_offset=None, rerun=False):
     """
     Execute download_tool.sh script from the specified directory with parameters
 
@@ -515,32 +521,33 @@ def execute_download_script(download_dir="parcel_download_tool_etl", start_datet
         download_dir: Directory containing download_tool.sh script
         start_datetime: Start datetime string (e.g., "2024-08-14 10:00:00")
         hours_offset: Hours offset string (e.g., "-2")
+        rerun: If True, passes --rerun to download_tool.sh to skip the 50m timeout
 
     Returns:
         tuple: (success: bool, stdout: str, stderr: str)
     """
 
     logger.info(f"🔄 Starting download script execution from {download_dir}")
-    logger.info(f"   Parameters: start_datetime='{start_datetime}', hours_offset='{hours_offset}'")
+    logger.info(f"   Parameters: start_datetime='{start_datetime}', hours_offset='{hours_offset}', rerun={rerun}")
 
-    # Check if directory exists
     if not Path(download_dir).exists():
         logger.error(f"❌ Directory {download_dir} not found")
         return False, "", f"Directory {download_dir} not found"
-    # Check if download_tool.sh exists
-    download_script = Path(download_dir) / "download_tool.sh"
-    if not download_script.exists():
+    if not (Path(download_dir) / "download_tool.sh").exists():
         logger.error(f"❌ download_tool.sh not found in {download_dir}")
         return False, "", f"download_tool.sh not found in {download_dir}"
 
+    cmd = ["./download_tool.sh", start_datetime, hours_offset]
+    if rerun:
+        cmd.append("--rerun")
+
     try:
-        # Execute download script with parameters
         result = subprocess.run(
-            ["./download_tool.sh", start_datetime, hours_offset],
+            cmd,
             cwd=download_dir,
             capture_output=True,
             text=True,
-            timeout=2400  # 40 minute timeout
+            timeout=None if rerun else 2400
         )
 
         if result.returncode == 0:
@@ -895,7 +902,7 @@ def main():
     if not args.sync_only:
         logger.info("📥 Phase 1: Executing download script")
         download_success, download_stdout, download_stderr = execute_download_script(
-            DOWNLOAD_DIR, args.date, args.hours
+            DOWNLOAD_DIR, args.date, args.hours, rerun=args.rerun
         )
 
         if not download_success:

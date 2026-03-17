@@ -97,11 +97,11 @@ while [ $HOURS_PROCESSED -lt $TOTAL_HOURS ]; do
     echo "Log: $LOG_FILE"
     echo "----------------------------------------"
 
-    # Run sync for this window with dynamic hours
     python parcel_download_and_sync.py \
         -d "$WINDOW_END_FMT" \
         --hours "-$WINDOW_HOURS" \
         --pipeline "$PIPELINE" \
+        --rerun \
         > "$LOG_FILE" 2>&1
     EXIT_CODE=$?
 

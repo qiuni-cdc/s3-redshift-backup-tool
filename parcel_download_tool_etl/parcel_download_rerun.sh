@@ -79,11 +79,11 @@ while [ $CURRENT -lt $END ]; do
     echo "Log: $LOG_FILE"
     echo "----------------------------------------"
 
-    # Run sync for this 1-hour window
     python parcel_download_and_sync.py \
         -d "$WINDOW_END_FMT" \
         --hours "-1" \
         --pipeline "$PIPELINE" \
+        --rerun \
         > "$LOG_FILE" 2>&1
     EXIT_CODE=$?
 
