@@ -54,6 +54,9 @@ source "$PROJECT_ROOT/s3_backup_venv/bin/activate" || {
 CURRENT=$(date -d "$START_TIME" +%s)
 END=$(date -d "$END_TIME" +%s)
 
+# Align END to hour boundary to prevent partial-hour extra run (e.g. "23:00:01" should not trigger an extra chunk)
+END=$(( (END / 3600) * 3600 ))
+
 # Calculate total hours
 TOTAL_HOURS=$(( (END - CURRENT) / 3600 ))
 if [ $TOTAL_HOURS -le 0 ]; then

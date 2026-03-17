@@ -61,6 +61,9 @@ fi
 
 CURRENT_HOUR=1
 
+# Align END to hour boundary to prevent partial-hour extra run (e.g. "23:00:01" should not trigger an extra hour)
+END=$(( (END / 3600) * 3600 ))
+
 echo "Total hours to process: $TOTAL_HOURS"
 echo ""
 
