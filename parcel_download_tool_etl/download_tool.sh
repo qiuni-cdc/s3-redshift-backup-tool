@@ -5,17 +5,20 @@
 # Example: ./download_tool.sh "2024-08-14 10:00:00" "-2"
 
 if [ -d "/home/ubuntu/data-integration" ]; then
-    cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl  
+    cd /home/ubuntu/etl/etl_dw/s3-redshift-backup-tool/parcel_download_tool_etl
     KITCHEN_PATH="/home/ubuntu/data-integration/kitchen.sh"
 else
-    cd ~/s3-redshift-backup-tool/parcel_download_tool_etl 
+    cd ~/s3-redshift-backup-tool/parcel_download_tool_etl
     KITCHEN_PATH="/home/tianzi/data-integration/kitchen.sh"
-fi 
+fi
 
 BEG_DATETIME=$1
 HOURS=$2
 
 echo "Running ETL with datetime: $BEG_DATETIME, hours: $HOURS"
+
+# Kill all child processes of this script on exit (covers timeout, SIGTERM, SIGINT, errors)
+trap 'pkill -P $$; kill -- -$$ 2>/dev/null; exit' EXIT TERM INT
 
 # Create logs directory in current working directory (relative path)
 mkdir -p ./logs && \
@@ -32,4 +35,3 @@ else
     echo "ETL failed - check log file"
     exit 1
 fi
-
