@@ -1,0 +1,989 @@
+"""
+PROD → DW MySQL Hourly Sync
+================================================================
+Replicates tables from US PROD MySQL (kuaisong) to US DW MySQL (uniods).
+
+Phase 1 — Full Sync (DELETE + INSERT every hour, all 7 run in parallel):
+  1. kuaisong.uni_pattern_config       (~68 rows)
+  2. kuaisong.uni_warehouses           (~76 rows)
+  3. kuaisong.uni_customer             (~3K rows)
+  4. kuaisong.uni_zipcodes             (~10K rows)
+  5. kuaisong.uni_mawb_box             (~31K rows)
+  6. kuaisong.ecs_staff                (~158K rows)
+  7. driver_app.uni_common_dict        (~116 rows)
+
+Phase 2 — Incremental CDC (append-only, watermark on auto-increment id):
+  8. kuaisong.uni_prealert_info        (~325K rows)
+  9. kuaisong.uni_tracking_addon_spath (~14.7M rows)
+ 10. kuaisong.order_details            (~140M rows)
+
+Watermarks stored in uniods.sync_watermarks table.
+Initial backfill via separate script (backfill_large_tables.py).
+
+Connection: mysql-connector-python with env vars from .env
+  Source (PROD): DB_PROD_HOST / DB_PROD_PORT / DB_US_PROD_RO_PASSWORD
+  Target (DW):   DB_DW_WRITE_HOST / DB_DW_WRITE_PORT / DB_DW_WRITE_PASSWORD
+
+SSH Tunnels (QA only):
+  Set USE_SSH_TUNNEL=true in .env to enable.
+  On PROD server, set USE_SSH_TUNNEL=false (direct access).
+"""
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+import os
+import subprocess
+import time
+import socket
+import smtplib
+from email.mime.text import MIMEText
+import mysql.connector
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+TABLES = [
+    {"source_schema": "kuaisong",        "source_table": "uni_pattern_config",   "target_table": "uni_pattern_config",   "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "uni_warehouses",       "target_table": "parcel_tool_warehouses", "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "uni_customer",         "target_table": "uni_customer",         "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "uni_zipcodes",         "target_table": "parcel_tool_zipcodes",  "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "uni_mawb_box",         "target_table": "uni_mawb_box",         "batch_size": 5000},
+    {"source_schema": "kuaisong",        "source_table": "ecs_staff",            "target_table": "ecs_staff",            "batch_size": 10000},
+    {"source_schema": "driver_app",     "source_table": "uni_common_dict",      "target_table": "uni_common_dict",      "batch_size": 5000},
+]
+
+INCREMENTAL_TABLES = [
+    {"source_schema": "kuaisong", "source_table": "uni_prealert_info",       "target_table": "uni_prealert_info",       "batch_size": 10000},
+    {"source_schema": "kuaisong", "source_table": "uni_tracking_addon_spath", "target_table": "uni_tracking_addon_spath", "batch_size": 10000},
+    {"source_schema": "kuaisong", "source_table": "order_details",           "target_table": "order_details",           "batch_size": 10000},
+]
+
+WATERMARK_TABLE = "uniods.sync_watermarks"
+
+TARGET_SCHEMA = "uniods"
+
+SYNC_TOOL_PATH = "/home/ubuntu/etl/etl_dw/s3-redshift-backup-tool"
+
+# Email alert config — set these in .env
+ALERT_RECIPIENTS = os.environ.get("SYNC_ALERT_EMAILS", "").split(",")
+ALERT_SMTP_HOST = os.environ.get("ALERT_SMTP_HOST", "smtp.office365.com")
+ALERT_SMTP_PORT = int(os.environ.get("ALERT_SMTP_PORT", "587"))
+ALERT_SMTP_USER = os.environ.get("ALERT_SMTP_USER", "")
+ALERT_SMTP_PASSWORD = os.environ.get("ALERT_SMTP_PASSWORD", "")
+
+# SSH tunnel subprocess handles (module-level so they persist across tasks)
+_ssh_tunnels = {}
+
+
+def _load_env():
+    """Load environment variables from .env file."""
+    env_vars = {}
+    env_file = os.path.join(SYNC_TOOL_PATH, ".env")
+    if os.path.exists(env_file):
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    env_vars[key] = value.strip('"').strip("'")
+    # os.environ takes precedence (docker-compose env vars)
+    for key in ["DB_USER", "DB_US_PROD_RO_PASSWORD",
+                "DB_PROD_HOST", "DB_PROD_PORT",
+                "DB_DW_WRITE_HOST", "DB_DW_WRITE_PORT", "DB_DW_WRITE_PASSWORD",
+                "USE_SSH_TUNNEL", "SSH_BASTION_HOST", "SSH_BASTION_USER",
+                "SSH_BASTION_KEY_PATH"]:
+        if key in os.environ:
+            env_vars[key] = os.environ[key]
+    return env_vars
+
+
+def _find_free_port():
+    """Find a free local port for SSH tunnel."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _start_ssh_tunnel(env, name, remote_host, remote_port):
+    """Start an SSH tunnel via bastion and return the local port.
+    Uses native subprocess ssh (matches existing connection_registry pattern).
+    """
+    if name in _ssh_tunnels and _ssh_tunnels[name].poll() is None:
+        # Tunnel already running
+        return _ssh_tunnels[name]._local_port
+
+    local_port = _find_free_port()
+    bastion_host = env.get("SSH_BASTION_HOST", "")
+    bastion_user = env.get("SSH_BASTION_USER", "")
+    key_path = env.get("SSH_BASTION_KEY_PATH", "")
+
+    cmd = [
+        "ssh", "-N", "-L",
+        f"{local_port}:{remote_host}:{remote_port}",
+        f"{bastion_user}@{bastion_host}",
+        "-i", key_path,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "ConnectTimeout=15",
+    ]
+
+    print(f"  Starting SSH tunnel [{name}]: localhost:{local_port} -> {remote_host}:{remote_port} via {bastion_host}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc._local_port = local_port
+
+    # Wait for tunnel to be ready
+    for attempt in range(15):
+        time.sleep(1)
+        if proc.poll() is not None:
+            stderr = proc.stderr.read().decode()
+            raise RuntimeError(f"SSH tunnel [{name}] failed to start: {stderr}")
+        try:
+            with socket.create_connection(("127.0.0.1", local_port), timeout=2):
+                print(f"  SSH tunnel [{name}] ready on port {local_port}")
+                _ssh_tunnels[name] = proc
+                return local_port
+        except (ConnectionRefusedError, OSError):
+            continue
+
+    proc.kill()
+    raise RuntimeError(f"SSH tunnel [{name}] timed out after 15s")
+
+
+def _stop_all_tunnels():
+    """Stop all SSH tunnel subprocesses."""
+    for name, proc in _ssh_tunnels.items():
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+            print(f"  SSH tunnel [{name}] stopped")
+    _ssh_tunnels.clear()
+
+
+def _get_connections(env):
+    """Return (source_conn, target_conn) with optional SSH tunnels.
+    On QA: tunnels through bastion to reach PROD and DW.
+    On PROD server: direct connections (no tunnels).
+    """
+    use_tunnel = env.get("USE_SSH_TUNNEL", "false").lower() == "true"
+
+    prod_host = env.get("DB_PROD_HOST", "us-west-2.ro.db.uniuni.com.internal")
+    prod_port = int(env.get("DB_PROD_PORT", "3306"))
+    dw_host = env.get("DB_DW_WRITE_HOST", "")
+    dw_port = int(env.get("DB_DW_WRITE_PORT", "3306"))
+
+    if use_tunnel:
+        print("  SSH tunnel mode enabled")
+        prod_local_port = _start_ssh_tunnel(env, "prod", prod_host, prod_port)
+        dw_local_port = _start_ssh_tunnel(env, "dw", dw_host, dw_port)
+        src_host, src_port = "127.0.0.1", prod_local_port
+        tgt_host, tgt_port = "127.0.0.1", dw_local_port
+    else:
+        src_host, src_port = prod_host, prod_port
+        tgt_host, tgt_port = dw_host, dw_port
+
+    # ssl_disabled prevents "Lost connection" errors through SSH tunnels
+    conn_base = dict(
+        ssl_disabled=True,
+        use_pure=True,
+        charset="utf8mb4",
+        connection_timeout=30,
+    )
+
+    src_conn = mysql.connector.connect(
+        host=src_host, port=src_port,
+        user=env["DB_USER"],
+        password=env.get("DB_US_PROD_RO_PASSWORD", ""),
+        **conn_base,
+    )
+
+    tgt_conn = mysql.connector.connect(
+        host=tgt_host, port=tgt_port,
+        user=env["DB_USER"],
+        password=env.get("DB_DW_WRITE_PASSWORD", ""),
+        autocommit=False,
+        **conn_base,
+    )
+
+    return src_conn, tgt_conn
+
+
+# ============================================================================
+# EMAIL ALERT
+# ============================================================================
+
+def _send_alert(subject, body):
+    """Send email alert. Fails silently if SMTP not configured."""
+    recipients = [r.strip() for r in ALERT_RECIPIENTS if r.strip()]
+    if not recipients or not ALERT_SMTP_USER:
+        print(f"  [Alert not sent — SMTP not configured] {subject}")
+        return
+
+    msg = MIMEText(body, "plain")
+    msg["Subject"] = subject
+    msg["From"] = ALERT_SMTP_USER
+    msg["To"] = ", ".join(recipients)
+
+    try:
+        with smtplib.SMTP(ALERT_SMTP_HOST, ALERT_SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(ALERT_SMTP_USER, ALERT_SMTP_PASSWORD)
+            server.sendmail(ALERT_SMTP_USER, recipients, msg.as_string())
+        print(f"  Alert email sent: {subject}")
+    except Exception as e:
+        print(f"  WARNING: Failed to send alert email: {e}")
+
+
+# ============================================================================
+# SCHEMA VALIDATION
+# ============================================================================
+
+def _get_column_defs(conn, schema, table):
+    """Get ordered list of (col_name, col_type, extra) from INFORMATION_SCHEMA."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COLUMN_NAME, COLUMN_TYPE, EXTRA
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+        ORDER BY ORDINAL_POSITION
+    """, (schema, table))
+    cols = [(row[0], row[1], row[2] if len(row) > 2 else "") for row in cur.fetchall()]
+    cur.close()
+    return cols
+
+
+def _validate_schema(src_conn, tgt_conn, table_config, send_alert=True):
+    """Compare source vs target schema.
+    If mismatch: send alert email and continue with existing target schema.
+    If target missing: skip (table must be created manually).
+    Set send_alert=False to suppress emails (caller handles notification).
+    Returns: ('match'|'mismatch'|'missing', detail_string).
+    """
+    src_schema = table_config["source_schema"]
+    src_table = table_config["source_table"]
+    tgt_table = table_config["target_table"]
+    full_source = f"{src_schema}.{src_table}"
+    full_target = f"{TARGET_SCHEMA}.{tgt_table}"
+
+    print(f"  Schema validation: {full_source} vs {full_target}")
+
+    src_cols = _get_column_defs(src_conn, src_schema, src_table)
+    tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
+
+    if not src_cols:
+        raise RuntimeError(f"Source table {full_source} not found or has no columns")
+
+    # Target table doesn't exist
+    if not tgt_cols:
+        print(f"  WARNING: Target table {full_target} does not exist")
+        if send_alert:
+            _send_alert(
+                f"[PROD->DW Sync] Target table missing: {full_target}",
+                f"The target table {full_target} does not exist in DW.\n"
+                f"Source table {full_source} has {len(src_cols)} columns.\n\n"
+                f"Action required: Create the table manually in {TARGET_SCHEMA} schema."
+            )
+        return "missing", "Target table does not exist"
+
+    # Compare column names and types
+    mismatches = []
+    src_names = [c[0] for c in src_cols]
+    tgt_names = [c[0] for c in tgt_cols]
+
+    src_set = set(src_names)
+    tgt_set = set(tgt_names)
+    missing_in_target = src_set - tgt_set
+    extra_in_target = tgt_set - src_set
+
+    if missing_in_target:
+        mismatches.append(f"Columns in source but not target: {missing_in_target}")
+    if extra_in_target:
+        mismatches.append(f"Columns in target but not source: {extra_in_target}")
+
+    # Check column types for shared columns
+    src_dict = {c[0]: c[1] for c in src_cols}
+    tgt_dict = {c[0]: c[1] for c in tgt_cols}
+    for col_name in src_set & tgt_set:
+        if src_dict[col_name] != tgt_dict[col_name]:
+            mismatches.append(
+                f"Column `{col_name}`: source={src_dict[col_name]}, target={tgt_dict[col_name]}"
+            )
+
+    # Check column order
+    if not mismatches and src_names != tgt_names:
+        mismatches.append("Column order differs")
+
+    if mismatches:
+        detail = "\n".join(f"  - {m}" for m in mismatches)
+        print(f"  Schema MISMATCH detected:")
+        for m in mismatches:
+            print(f"    {m}")
+
+        if send_alert:
+            _send_alert(
+                f"[PROD->DW Sync] Schema mismatch: {full_source} vs {full_target}",
+                f"Schema mismatch detected during hourly sync.\n\n"
+                f"Source: {full_source} ({len(src_cols)} columns)\n"
+                f"Target: {full_target} ({len(tgt_cols)} columns)\n\n"
+                f"Differences:\n{detail}\n\n"
+                f"The sync will continue using the existing target schema.\n"
+                f"Only columns present in BOTH source and target will be synced.\n\n"
+                f"Action required: Review and update the target table DDL if needed."
+            )
+        return "mismatch", detail
+
+    print(f"  Schema OK ({len(src_cols)} columns match)")
+    return "match", ""
+
+
+def _recreate_target_table(src_conn, tgt_conn, table_config):
+    """Drop and recreate target table to match source schema.
+    Only safe for full-sync tables (DELETE + INSERT).
+    """
+    import re
+
+    src_schema = table_config["source_schema"]
+    src_table = table_config["source_table"]
+    tgt_table = table_config["target_table"]
+    full_source = f"{src_schema}.{src_table}"
+    full_target = f"{TARGET_SCHEMA}.{tgt_table}"
+
+    # Get source CREATE TABLE DDL
+    src_cur = src_conn.cursor()
+    src_cur.execute(f"SHOW CREATE TABLE {full_source}")
+    create_ddl = src_cur.fetchone()[1]
+    src_cur.close()
+
+    # Rewrite: replace source table name with fully qualified target
+    # SHOW CREATE TABLE returns: CREATE TABLE `table_name` (...)
+    create_ddl = re.sub(
+        r'CREATE TABLE `?' + re.escape(src_table) + r'`?',
+        f'CREATE TABLE `{TARGET_SCHEMA}`.`{tgt_table}`',
+        create_ddl,
+        count=1,
+    )
+
+    # Drop existing target
+    tgt_cur = tgt_conn.cursor()
+    print(f"  Dropping {full_target} ...")
+    tgt_cur.execute(f"DROP TABLE IF EXISTS `{TARGET_SCHEMA}`.`{tgt_table}`")
+
+    # Create new target from source DDL
+    print(f"  Creating {full_target} from source schema ...")
+    tgt_cur.execute(create_ddl)
+    tgt_conn.commit()
+    tgt_cur.close()
+
+    print(f"  Target table recreated successfully")
+
+
+# ============================================================================
+# SYNC FUNCTION
+# ============================================================================
+
+def sync_table(table_config, **context):
+    """Validate schema + full sync: TRUNCATE target + batch INSERT from source."""
+    src_schema = table_config["source_schema"]
+    src_table = table_config["source_table"]
+    tgt_table = table_config["target_table"]
+    batch_size = table_config["batch_size"]
+
+    full_source = f"{src_schema}.{src_table}"
+    full_target = f"{TARGET_SCHEMA}.{tgt_table}"
+
+    print(f"\n{'='*70}")
+    print(f"SYNC: {full_source} -> {full_target}")
+    print(f"{'='*70}")
+
+    env = _load_env()
+    src_conn = None
+    tgt_conn = None
+
+    try:
+        # --- Connect (with SSH tunnels if USE_SSH_TUNNEL=true) ---
+        print("Connecting to source (PROD) and target (DW) ...")
+        src_conn, tgt_conn = _get_connections(env)
+
+        # --- Schema validation (auto-recreate on mismatch/missing) ---
+        # send_alert=False: full-sync handles its own notification after recreate
+        schema_result, schema_detail = _validate_schema(src_conn, tgt_conn, table_config, send_alert=False)
+
+        if schema_result in ("missing", "mismatch"):
+            reason = schema_result
+            print(f"  Auto-recreating target table ({reason}) ...")
+            _recreate_target_table(src_conn, tgt_conn, table_config)
+            schema_result = "recreated"
+            _send_alert(
+                f"[PROD->DW Sync] Target table recreated: {full_target}",
+                f"The target table {full_target} was automatically recreated "
+                f"to match the source schema (was: {reason}).\n\n"
+                f"Source: {full_source}\nTarget: {full_target}\n\n"
+                f"Reason:\n{schema_detail}\n\n"
+                f"The sync will continue with the new schema.",
+            )
+
+        # Determine which columns to sync (exclude generated/virtual columns)
+        tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
+        generated_cols = {c[0] for c in tgt_cols if "GENERATED" in (c[2] or "").upper() or "VIRTUAL" in (c[2] or "").upper()}
+        if generated_cols:
+            print(f"  Excluding generated columns: {generated_cols}")
+            shared_cols = [c[0] for c in tgt_cols if c[0] not in generated_cols]
+        else:
+            shared_cols = None  # Use all columns (SELECT *)
+
+        # --- Read source row count ---
+        src_cur = src_conn.cursor()
+        src_cur.execute(f"SELECT COUNT(*) FROM {full_source}")
+        source_count = src_cur.fetchone()[0]
+        print(f"Source rows: {source_count:,}")
+        src_cur.close()
+
+        # --- Read source data ---
+        print(f"Reading from {full_source} ...")
+        src_cur = src_conn.cursor()
+        src_cur.execute(f"SELECT * FROM {full_source}")
+        all_col_names = [desc[0] for desc in src_cur.description]
+        all_rows = src_cur.fetchall()
+        src_cur.close()
+        print(f"  Fetched {len(all_rows):,} rows, {len(all_col_names)} columns")
+
+        # Determine which columns to insert and build batches
+        if shared_cols:
+            col_indices = [all_col_names.index(c) for c in shared_cols]
+            columns = shared_cols
+        else:
+            col_indices = list(range(len(all_col_names)))
+            columns = all_col_names
+
+        placeholders = ", ".join(["%s"] * len(columns))
+        col_names = ", ".join(f"`{c}`" for c in columns)
+        insert_sql = f"INSERT INTO {full_target} ({col_names}) VALUES ({placeholders})"
+
+        all_batches = []
+        current_batch = []
+        for row in all_rows:
+            current_batch.append(tuple(row[i] for i in col_indices))
+            if len(current_batch) >= batch_size:
+                all_batches.append(current_batch)
+                current_batch = []
+        if current_batch:
+            all_batches.append(current_batch)
+
+        # --- DELETE + INSERT in transaction ---
+        # If INSERT fails, DELETE is rolled back and old data is preserved
+        print(f"Deleting old data from {full_target} ...")
+        tgt_cur = tgt_conn.cursor()
+        tgt_cur.execute(f"DELETE FROM {full_target}")
+        deleted = tgt_cur.rowcount
+        print(f"  Deleted {deleted:,} rows")
+
+        total_inserted = 0
+        for batch in all_batches:
+            tgt_cur.executemany(insert_sql, batch)
+            total_inserted += len(batch)
+
+            if total_inserted % 100000 == 0:
+                print(f"  ... {total_inserted:,} rows inserted")
+
+        tgt_conn.commit()
+        tgt_cur.close()
+
+        # --- Verify target count ---
+        tgt_cur = tgt_conn.cursor()
+        tgt_cur.execute(f"SELECT COUNT(*) FROM {full_target}")
+        target_count = tgt_cur.fetchone()[0]
+        tgt_cur.close()
+
+        match = "MATCH" if source_count == target_count else "MISMATCH"
+        print(f"Target rows: {target_count:,} ({match})")
+        print(f"Sync complete: {total_inserted:,} rows inserted")
+
+        # Fail hard on count mismatch — Airflow will retry (retries=1, 5 min delay).
+        # If retry also fails, task status is "failed", quality gate blocks downstream.
+        if source_count != target_count:
+            _send_alert(
+                f"[PROD->DW Sync] Row count mismatch: {full_target}",
+                f"Row count mismatch after full sync.\n\n"
+                f"Source: {full_source} = {source_count:,} rows\n"
+                f"Target: {full_target} = {target_count:,} rows\n"
+                f"Difference: {abs(source_count - target_count):,} rows\n\n"
+                f"The task will retry automatically. If retry also fails, "
+                f"the quality gate will block downstream pipelines.",
+            )
+            raise RuntimeError(
+                f"Row count mismatch: source={source_count:,}, target={target_count:,} "
+                f"(diff={abs(source_count - target_count):,})"
+            )
+
+        # Push metrics to XCom (only reached on success)
+        context["task_instance"].xcom_push(
+            key=f"sync_{src_table}",
+            value={
+                "source": full_source,
+                "target": full_target,
+                "source_count": source_count,
+                "target_count": target_count,
+                "inserted": total_inserted,
+                "schema": schema_result,
+                "status": "success",
+            },
+        )
+
+    except Exception as e:
+        print(f"ERROR syncing {full_source}: {e}")
+        import traceback
+        traceback.print_exc()
+
+        context["task_instance"].xcom_push(
+            key=f"sync_{src_table}",
+            value={
+                "source": full_source,
+                "target": full_target,
+                "status": "failed",
+                "error": str(e),
+            },
+        )
+        raise
+
+    finally:
+        if src_conn:
+            src_conn.close()
+        if tgt_conn:
+            tgt_conn.close()
+
+    print(f"{'='*70}\n")
+
+
+# ============================================================================
+# INCREMENTAL SYNC FUNCTION
+# ============================================================================
+
+def sync_table_incremental(table_config, **context):
+    """Incremental sync: fetch rows WHERE id > last_watermark, append to target."""
+    src_schema = table_config["source_schema"]
+    src_table = table_config["source_table"]
+    tgt_table = table_config["target_table"]
+    batch_size = table_config["batch_size"]
+
+    full_source = f"{src_schema}.{src_table}"
+    full_target = f"{TARGET_SCHEMA}.{tgt_table}"
+
+    print(f"\n{'='*70}")
+    print(f"INCREMENTAL SYNC: {full_source} -> {full_target}")
+    print(f"{'='*70}")
+
+    env = _load_env()
+    src_conn = None
+    tgt_conn = None
+
+    try:
+        print("Connecting to source (PROD) and target (DW) ...")
+        src_conn, tgt_conn = _get_connections(env)
+
+        # --- Schema validation ---
+        schema_result, _schema_detail = _validate_schema(src_conn, tgt_conn, table_config)
+
+        if schema_result == "missing":
+            context["task_instance"].xcom_push(
+                key=f"incr_{src_table}",
+                value={"source": full_source, "target": full_target,
+                       "status": "skipped", "error": "Target table does not exist"},
+            )
+            return
+
+        # --- Read watermark ---
+        tgt_cur = tgt_conn.cursor()
+        tgt_cur.execute(
+            f"SELECT last_id FROM {WATERMARK_TABLE} WHERE table_name = %s",
+            (tgt_table,),
+        )
+        row = tgt_cur.fetchone()
+        last_id = row[0] if row else 0
+        tgt_cur.close()
+        print(f"Watermark: last_id = {last_id:,}")
+
+        # --- Get source max id ---
+        src_cur = src_conn.cursor()
+        src_cur.execute(f"SELECT MAX(id) FROM {full_source}")
+        max_id = src_cur.fetchone()[0] or 0
+        src_cur.close()
+        print(f"Source MAX(id) = {max_id:,}")
+
+        if max_id <= last_id:
+            print("No new data — skipping")
+            context["task_instance"].xcom_push(
+                key=f"incr_{src_table}",
+                value={"source": full_source, "target": full_target,
+                       "status": "success", "inserted": 0,
+                       "last_id": last_id, "max_id": max_id},
+            )
+            return
+
+        # --- Determine columns (exclude generated) ---
+        tgt_cols = _get_column_defs(tgt_conn, TARGET_SCHEMA, tgt_table)
+        generated_cols = {c[0] for c in tgt_cols
+                         if "GENERATED" in (c[2] or "").upper()
+                         or "VIRTUAL" in (c[2] or "").upper()}
+        if generated_cols:
+            print(f"  Excluding generated columns: {generated_cols}")
+
+        if schema_result == "mismatch":
+            src_cols = _get_column_defs(src_conn, src_schema, src_table)
+            src_names = set(c[0] for c in src_cols)
+            tgt_names = set(c[0] for c in tgt_cols) - generated_cols
+            shared_cols = [c[0] for c in src_cols if c[0] in tgt_names]
+            print(f"  Syncing {len(shared_cols)} shared columns")
+        else:
+            if generated_cols:
+                shared_cols = [c[0] for c in tgt_cols if c[0] not in generated_cols]
+            else:
+                shared_cols = None
+
+        # --- Determine columns for INSERT ---
+        if shared_cols:
+            # Get source column names to map indices
+            src_cur = src_conn.cursor(buffered=True)
+            src_cur.execute(f"SELECT * FROM {full_source} LIMIT 0")
+            all_col_names = [desc[0] for desc in src_cur.description]
+            src_cur.close()
+            col_indices = [all_col_names.index(c) for c in shared_cols]
+            columns = shared_cols
+        else:
+            src_cur = src_conn.cursor(buffered=True)
+            src_cur.execute(f"SELECT * FROM {full_source} LIMIT 0")
+            all_col_names = [desc[0] for desc in src_cur.description]
+            src_cur.close()
+            col_indices = list(range(len(all_col_names)))
+            columns = all_col_names
+
+        col_names_str = ", ".join(f"`{c}`" for c in columns)
+        row_placeholder = "(" + ", ".join(["%s"] * len(columns)) + ")"
+        SUB_BATCH = 2000  # rows per multi-row INSERT statement
+
+        # --- Chunked fetch + insert loop ---
+        CHUNK_SIZE = 50000
+        new_rows = max_id - last_id
+        print(f"New rows: {new_rows:,} (id {last_id+1:,} to {max_id:,}), chunk={CHUNK_SIZE:,}")
+
+        total_inserted = 0
+        chunk_num = 0
+        current_id = last_id
+        start_time = time.time()
+
+        while current_id < max_id:
+            chunk_num += 1
+
+            # Fetch chunk from source
+            src_cur = src_conn.cursor()
+            src_cur.execute(
+                f"SELECT * FROM {full_source} WHERE id > %s ORDER BY id LIMIT %s",
+                (current_id, CHUNK_SIZE),
+            )
+            rows = src_cur.fetchall()
+            src_cur.close()
+
+            if not rows:
+                break
+
+            # Build filtered batch
+            batch = [tuple(row[i] for i in col_indices) for row in rows]
+            chunk_last_id = rows[-1][all_col_names.index("id")]
+
+            # Multi-row INSERT IGNORE in sub-batches
+            tgt_cur = tgt_conn.cursor()
+            for i in range(0, len(batch), SUB_BATCH):
+                sub = batch[i:i + SUB_BATCH]
+                values_str = ", ".join([row_placeholder] * len(sub))
+                stmt = f"INSERT IGNORE INTO {full_target} ({col_names_str}) VALUES {values_str}"
+                flat_params = [v for row in sub for v in row]
+                tgt_cur.execute(stmt, flat_params)
+
+            # Update watermark
+            tgt_cur.execute(
+                f"INSERT INTO {WATERMARK_TABLE} (table_name, last_id, last_batch_rows, last_sync_at) "
+                f"VALUES (%s, %s, %s, NOW()) "
+                f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), last_batch_rows=VALUES(last_batch_rows), last_sync_at=NOW()",
+                (tgt_table, chunk_last_id, len(batch)),
+            )
+
+            tgt_conn.commit()
+            tgt_cur.close()
+
+            current_id = chunk_last_id
+            total_inserted += len(batch)
+            elapsed = time.time() - start_time
+            rate = total_inserted / elapsed if elapsed > 0 else 0
+            print(f"  Chunk {chunk_num}: +{len(batch):,} rows | id={current_id:,} | {total_inserted:,} total | {rate:,.0f} rows/s")
+
+        new_last_id = current_id
+        elapsed = time.time() - start_time
+        print(f"Sync complete: {total_inserted:,} rows in {elapsed:.0f}s, watermark -> {new_last_id:,}")
+
+        incr_status = "partial_sync" if schema_result == "mismatch" else "success"
+        if incr_status == "partial_sync":
+            print(f"  NOTE: Synced shared columns only due to schema mismatch")
+
+        context["task_instance"].xcom_push(
+            key=f"incr_{src_table}",
+            value={"source": full_source, "target": full_target,
+                   "status": incr_status, "inserted": total_inserted,
+                   "last_id": new_last_id, "max_id": max_id,
+                   "schema": schema_result},
+        )
+
+    except Exception as e:
+        print(f"ERROR syncing {full_source}: {e}")
+        import traceback
+        traceback.print_exc()
+
+        context["task_instance"].xcom_push(
+            key=f"incr_{src_table}",
+            value={"source": full_source, "target": full_target,
+                   "status": "failed", "error": str(e)},
+        )
+        raise
+
+    finally:
+        if src_conn:
+            src_conn.close()
+        if tgt_conn:
+            tgt_conn.close()
+
+    print(f"{'='*70}\n")
+
+
+# ============================================================================
+# QUALITY GATE — blocks downstream if any sync is not clean
+# ============================================================================
+
+def quality_gate(**context):
+    """Check all sync results. Fail this task if any table has a non-clean status.
+
+    This prevents downstream pipelines (dbt, customer exports) from running
+    on incomplete or inconsistent data.
+    """
+    issues = []
+
+    for table in TABLES:
+        src_table = table["source_table"]
+        result = context["task_instance"].xcom_pull(
+            task_ids=f"sync_{src_table}",
+            key=f"sync_{src_table}",
+        )
+        status = result.get("status", "no_result") if result else "no_result"
+        if status != "success":
+            issues.append(f"full_sync/{src_table}: {status}")
+
+    for table in INCREMENTAL_TABLES:
+        src_table = table["source_table"]
+        result = context["task_instance"].xcom_pull(
+            task_ids=f"incr_{src_table}",
+            key=f"incr_{src_table}",
+        )
+        status = result.get("status", "no_result") if result else "no_result"
+        if status != "success":
+            issues.append(f"incremental/{src_table}: {status}")
+
+    context["task_instance"].xcom_push(
+        key="quality_gate",
+        value={"passed": len(issues) == 0, "issues": issues},
+    )
+
+    if issues:
+        msg = "\n".join(f"  - {i}" for i in issues)
+        print(f"QUALITY GATE FAILED — {len(issues)} issue(s):\n{msg}")
+        _send_alert(
+            f"[PROD->DW Sync] Quality gate FAILED — {len(issues)} issue(s)",
+            f"The quality gate blocked downstream pipelines.\n\n"
+            f"Issues:\n{msg}\n\n"
+            f"Downstream tasks (dbt, customer exports) will NOT run.\n"
+            f"Action required: Investigate and re-trigger the DAG after fixing.",
+        )
+        raise RuntimeError(f"Quality gate failed: {len(issues)} issue(s)")
+
+    print("QUALITY GATE PASSED — all tables synced cleanly")
+
+
+# ============================================================================
+# SUMMARY FUNCTION
+# ============================================================================
+
+def print_summary(**context):
+    """Print summary of all table syncs (full + incremental)."""
+    try:
+        print("\n" + "=" * 70)
+        print("PROD -> DW MYSQL SYNC - HOURLY SUMMARY")
+        print("=" * 70)
+        print(f"Execution: {context['ds']} {context.get('ts', '')}")
+
+        total_rows = 0
+        success = 0
+        failed = 0
+        skipped = 0
+        warnings = 0
+
+        # --- Full-sync tables ---
+        print("-" * 70)
+        print("FULL SYNC (DELETE + INSERT):")
+        for table in TABLES:
+            src_table = table["source_table"]
+            result = context["task_instance"].xcom_pull(
+                task_ids=f"sync_{src_table}",
+                key=f"sync_{src_table}",
+            )
+            status = result.get("status", "") if result else ""
+            if status == "success":
+                tgt_cnt = result["target_count"]
+                schema_tag = ""
+                if result.get("schema") == "recreated":
+                    schema_tag = " [schema recreated]"
+                print(f"  {result['source']:<45} -> {tgt_cnt:>10,} rows [OK]{schema_tag}")
+                total_rows += tgt_cnt
+                success += 1
+            elif status == "skipped":
+                print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
+                skipped += 1
+            elif result:
+                print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
+                failed += 1
+            else:
+                print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT (task may have failed)")
+                failed += 1
+
+        # --- Incremental tables ---
+        print("-" * 70)
+        print("INCREMENTAL SYNC (append via watermark):")
+        for table in INCREMENTAL_TABLES:
+            src_table = table["source_table"]
+            result = context["task_instance"].xcom_pull(
+                task_ids=f"incr_{src_table}",
+                key=f"incr_{src_table}",
+            )
+            status = result.get("status", "") if result else ""
+            if status in ("success", "partial_sync"):
+                inserted = result.get("inserted", 0)
+                last_id = result.get("last_id", 0)
+                max_id = result.get("max_id", 0)
+                tag = " [PARTIAL - schema mismatch]" if status == "partial_sync" else ""
+                print(f"  {result['source']:<45} -> +{inserted:>10,} rows  (watermark: {last_id:,}){tag}")
+                total_rows += inserted
+                if status == "partial_sync":
+                    warnings += 1
+                else:
+                    success += 1
+            elif status == "skipped":
+                print(f"  {result['source']:<45} -> SKIPPED: {result.get('error', 'target missing')}")
+                skipped += 1
+            elif result:
+                print(f"  {result['source']:<45} -> FAILED: {result.get('error', 'unknown')}")
+                failed += 1
+            else:
+                print(f"  {table['source_schema']}.{src_table:<40} -> NO RESULT")
+                failed += 1
+
+        print("-" * 70)
+        print(f"Tables: {success} success, {warnings} warnings, {failed} failed, {skipped} skipped")
+        print(f"Total rows synced this run: {total_rows:,}")
+        print("=" * 70 + "\n")
+
+        context["task_instance"].xcom_push(
+            key="summary",
+            value={
+                "success": success,
+                "warnings": warnings,
+                "failed": failed,
+                "skipped": skipped,
+                "total_rows": total_rows,
+            },
+        )
+    finally:
+        # Always clean up SSH tunnels, even if summary logic fails
+        _stop_all_tunnels()
+
+
+# ============================================================================
+# DAG DEFINITION
+# ============================================================================
+
+default_args = {
+    "owner": "data-team",
+    "depends_on_past": False,
+    "start_date": datetime(2026, 3, 10),
+    "email_on_failure": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+    "execution_timeout": timedelta(minutes=50),
+}
+
+dag = DAG(
+    "prod_to_dw_mysql_sync_hourly",
+    default_args=default_args,
+    description="Hourly sync of reference tables (full) and large tables (incremental) from PROD to DW MySQL",
+    schedule_interval="0 * * * *",
+    max_active_runs=1,
+    catchup=False,
+    tags=["mysql-sync", "prod-to-dw", "hourly"],
+)
+
+# ============================================================================
+# TASK GENERATION — parallel full-sync, then sequential incremental
+# ============================================================================
+
+sync_tasks = []
+
+for table in TABLES:
+    def _make_callable(tbl):
+        def _run(**ctx):
+            return sync_table(tbl, **ctx)
+        return _run
+
+    task = PythonOperator(
+        task_id=f"sync_{table['source_table']}",
+        python_callable=_make_callable(table),
+        dag=dag,
+    )
+    sync_tasks.append(task)
+
+# No chaining between full-sync tasks — they run in parallel
+
+# --- Incremental sync tasks (sequential, after all full-sync complete) ---
+incr_tasks = []
+
+for table in INCREMENTAL_TABLES:
+    def _make_incr_callable(tbl):
+        def _run(**ctx):
+            return sync_table_incremental(tbl, **ctx)
+        return _run
+
+    task = PythonOperator(
+        task_id=f"incr_{table['source_table']}",
+        python_callable=_make_incr_callable(table),
+        dag=dag,
+    )
+    incr_tasks.append(task)
+
+# All full-sync tasks must complete before first incremental task starts
+for sync_task in sync_tasks:
+    sync_task >> incr_tasks[0]
+
+# Chain incremental tasks sequentially
+for i in range(1, len(incr_tasks)):
+    incr_tasks[i - 1] >> incr_tasks[i]
+
+# Quality gate — blocks downstream if any sync is not clean
+gate_task = PythonOperator(
+    task_id="quality_gate",
+    python_callable=quality_gate,
+    dag=dag,
+)
+
+# Summary runs after all syncs (even if gate fails)
+summary_task = PythonOperator(
+    task_id="print_summary",
+    python_callable=print_summary,
+    trigger_rule="all_done",
+    dag=dag,
+)
+
+incr_tasks[-1] >> gate_task >> summary_task

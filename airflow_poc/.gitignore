@@ -4,6 +4,9 @@ airflow-webserver.pid
 logs/
 *.log
 
+# Server infrastructure (lives on server, not in repo)
+prod/
+
 # Python virtual environment
 airflow_env/
 
